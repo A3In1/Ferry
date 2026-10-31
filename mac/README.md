@@ -1,4 +1,4 @@
-# Ferry for Mac (Phases 1–3)
+# Ferry for Mac (Phases 1–4)
 
 Menu-bar app (no Dock icon) over the shared Rust core, via UniFFI bindings from `ffi/`.
 AppKit `NSStatusItem` + `NSMenu` (so the icon can take drops); the pairing window is SwiftUI.
@@ -107,6 +107,40 @@ Check it from another device: in nRF Connect, scan for a service UUID starting `
 read `ABDD3056-…` under service `F377E501-0000-…`; it should give 2 bytes. A Mac usually can't see its
 own advert, so this needs a second machine or the phone.
 
+### Phone screen and cursor crossing (Phase 4)
+
+Contract: `docs/screen-protocol.md` (FSP1 over a QUIC stream from `FerryNode.openScreen`). Framing,
+H.264 NAL splitting and the cursor math are in FerryLogic (`Fsp.swift`, `Cursor.swift`, tested); the
+window is `Sources/Ferry/Screen.swift` and crossing is `Sources/Ferry/Crossing.swift`.
+
+- **Mirror <phone>** (menu) opens a window and sends `START` (video, long side 1280, 8 Mbps). The phone asks
+  for screen-sharing consent ("Start now") every time. The window shows that until the first frame. H.264
+  Annex-B is split into NAL units, SPS/PPS become the `CMVideoFormatDescription`, and the slices go as
+  AVCC sample buffers (display-immediately) into an `AVSampleBufferDisplayLayer`, which decodes them.
+  The window keeps the aspect ratio from `INFO` and resizes on rotation. If decoding fails, or a frame
+  arrives before a keyframe, the viewer drops frames and sends `KEYFRAME` (at most once a second).
+- **Input from the window**: click/drag → `TOUCH` (normalized to the video rect, letterbox ignored),
+  scroll → `SCROLL`, typing → `TEXT`, delete → `KEY 67`, return → `KEY 66`. Back / Home / Recents are
+  title-bar buttons and **⌘[ / ⌘H / ⌘R**; **⌘W** closes. If `INFO` says control is off, the window
+  subtitle reads "Turn on Ferry control on the phone to click and type".
+- **END** shows as text with a **Reconnect** button: "Phone locked: unlock it and press Reconnect",
+  "Allow screen sharing on the phone", "Stopped on the phone", and so on. Closing the window finishes the stream.
+- **Share cursor with <phone>** (menu toggle, off by default) and **Cursor crosses at screen edge** →
+  Left / Right (default Right). Push the pointer past that edge of the screen it's on (and no other
+  display is beyond it). Ferry then uses the viewer's stream if a window is open, or opens a
+  control-only one (`START` flags 0). It hides and freezes the Mac cursor and drives the phone's
+  overlay cursor with the mouse deltas (`CURSOR` move/down/up). Wheel → `SCROLL` at the cursor, typing →
+  `TEXT`/`KEY`. All of that input is swallowed on the Mac. Moving back past the phone's Mac-side edge,
+  or pressing **Escape**, puts the pointer back at the Mac edge at the same height and sends `CURSOR` hide.
+  Speed: the phone's long side spans the Mac screen's height. The first push only opens the stream; push
+  again once it's up. While crossed, Ferry becomes the active app (it's the only way to hide the cursor
+  with public API), and the previous app is reactivated when you come back.
+- **Permissions**: crossing needs a `CGEventTap`, which needs **Accessibility**. If the tap can't be created,
+  an alert says "Allow Ferry in System Settings → Privacy & Security → Accessibility" and the toggle turns
+  off. There's no Info.plist usage string for Accessibility (macOS uses its own text), so the bundle gets
+  no new keys. Like Downloads, the grant is tied to the code signature: an ad-hoc rebuild needs Ferry
+  removed and re-added in that list. The Mac needs no Screen Recording permission (it only shows the phone's video).
+
 ## Test it
 
 **With the CLI** (`cargo build --release -p ferry-cli`, then `F=target/release/ferry`):
@@ -140,7 +174,24 @@ own advert, so this needs a second machine or the phone.
 2. Menu → **Pair phone over USB**. The phone shows a code and the Mac shows Match / Doesn't match.
 3. The menu shows "📱 <phone> — USB". Drop a file on the icon to send it over the cable.
 
+**Phase 4 with the phone** (Wi-Fi or USB; over Bluetooth the phone answers "Bluetooth is too slow for video"):
+1. Menu → **Mirror <phone>**. Tap **Start now** on the phone. The phone's screen appears and the window takes its shape.
+2. Turn on Ferry's Accessibility service on the phone, then **Reconnect** (the subtitle hint goes away).
+   Click an app icon, drag to scroll a list, use the trackpad/wheel, and type into a text field (delete and return too).
+   Try ⌘[ / ⌘H / ⌘R and the title-bar buttons. Rotate the phone: the window reshapes.
+3. Lock the phone: the window says "Phone locked: unlock it and press Reconnect". Unlock it and press Reconnect.
+   Decline the consent dialog: "Allow screen sharing on the phone".
+4. Close the window: the phone's capture indicator and "Controlled by" notification go away.
+5. Menu → **Share cursor with <phone>** (grant Accessibility the first time, then toggle it again). Push the
+   pointer against the right edge twice: the Mac cursor disappears and the phone's cursor appears at the
+   same height. Move, click and drag on the phone, scroll, and type into a field. Move back left past the phone's edge
+   (or press Escape): the Mac cursor reappears at the right edge. Switch **Cursor crosses at screen edge** to
+   Left and repeat on that side. With control off on the phone, the toggle turns off with "Turn on Ferry control on the phone".
+
 ## Later
+
+- Mirroring isn't recorded or audio-forwarded, and only one window per phone is supported. Crossing uses one phone
+  at a time and doesn't follow rotation mid-crossing (the cursor speed keeps the old size).
 
 - Publishing the phone's now-playing to `MPNowPlayingInfoCenter` (media keys / Control Center). Skipped:
   it would take the media keys away from the Mac's own players. If added, it goes behind a toggle, off by default.

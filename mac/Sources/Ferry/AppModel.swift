@@ -46,6 +46,9 @@ final class AppModel {
     var categories: [String: UNNotificationCategory] = [:]
     /// Last general-pasteboard changeCount we've seen or caused (echo suppression).
     var seenClipboardChange = NSPasteboard.general.changeCount
+    // Phase 4 (Screen.swift, Crossing.swift): open viewer windows by peer id, and cursor sharing.
+    var viewers: [String: ScreenWindow] = [:]
+    var crossing: Crossing?
 
     init() {
         startTask = Task { await start() }
@@ -102,6 +105,7 @@ final class AppModel {
         // USB and Bluetooth bridges (serial "ble:…") both show up here.
         if let node { usbLinks = node.usbLinks() }
         bluetooth?.setWanted(bluetoothEnabled && !peers.isEmpty)
+        updateCrossing()
         onChange()
     }
 
@@ -312,6 +316,11 @@ final class Bridge: FerryDelegate {
 
     func onEvent(peerId: String, event: FfiEvent) {
         Task { @MainActor in model.handle(event, from: peerId) }
+    }
+
+    /// Phones open screen streams, Macs don't accept them.
+    func onScreenStream(peerId: String, stream: ScreenStream) {
+        Task { await stream.finish() }
     }
 
     func confirmPairing(peerName: String, code: String) async -> Bool {

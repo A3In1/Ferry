@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage.CIFilterBuiltins
 import FerryCore
+import FerryLogic
 import ServiceManagement
 import SwiftUI
 import UserNotifications
@@ -92,6 +93,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(sync)
         menu.addItem(ClosureItem("Ring phone") { [weak self] in self?.model.ring(true) }.enabled(hasPhone))
         menu.addItem(ClosureItem("Stop ringing") { [weak self] in self?.model.ring(false) }.enabled(hasPhone))
+
+        menu.addItem(.separator())
+        for peer in model.peers {
+            menu.addItem(ClosureItem("Mirror \(peer.name)") { [weak self] in self?.model.mirror(peer) }.enabled(model.node != nil))
+            let share = ClosureItem("Share cursor with \(peer.name)") { [weak self] in
+                guard let model = self?.model else { return }
+                model.cursorPeer = model.cursorPeer == peer.id ? nil : peer.id
+            }
+            share.state = model.cursorPeer == peer.id ? .on : .off
+            share.toolTip = "Push the pointer past the \(model.cursorEdge.rawValue) edge of the screen to use it on the phone; Escape comes back"
+            menu.addItem(share.enabled(model.node != nil))
+        }
+        if !model.peers.isEmpty {
+            let edges = NSMenu()
+            for edge in ScreenEdge.allCases {
+                let item = ClosureItem(edge == .left ? "Left" : "Right") { [weak self] in self?.model.cursorEdge = edge }
+                item.state = model.cursorEdge == edge ? .on : .off
+                edges.addItem(item)
+            }
+            let edgeItem = NSMenuItem(title: "Cursor crosses at screen edge", action: nil, keyEquivalent: "")
+            edgeItem.submenu = edges
+            menu.addItem(edgeItem)
+        }
 
         menu.addItem(.separator())
         let login = ClosureItem("Open at Login") { [weak self] in self?.toggleLaunchAtLogin() }
