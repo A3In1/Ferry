@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">Ferry</string>
     <string name="share_label">Send to Mac</string>
+    <string name="clip_tile">Send clipboard</string>
 </resources>

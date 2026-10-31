@@ -6,6 +6,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,13 +15,20 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 
 class FerryApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        Grants.init(this)
         Notifs.createChannels(this)
         Transfers.start(this)
     }
+}
+
+/** Stop button / tap / swipe on the ringing notification. */
+class RingStop : BroadcastReceiver() {
+    override fun onReceive(ctx: Context, intent: Intent) = Ringer.stop(ctx)
 }
 
 object Notifs {
@@ -28,9 +36,12 @@ object Notifs {
     const val CH_PAIR = "pairing"
     const val CH_PROGRESS = "progress"
     const val CH_TRANSFER = "transfers"
+    const val CH_RING = "ring"
+    const val CH_LINKS = "links"
 
     const val ID_ONGOING = 1
     const val ID_PAIR = 2
+    const val ID_RING = 3
 
     fun createChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -40,6 +51,9 @@ object Notifs {
                 NotificationChannel(CH_PAIR, "Pairing requests", NotificationManager.IMPORTANCE_HIGH),
                 NotificationChannel(CH_PROGRESS, "Transfer progress", NotificationManager.IMPORTANCE_LOW),
                 NotificationChannel(CH_TRANSFER, "Received and sent files", NotificationManager.IMPORTANCE_DEFAULT),
+                // The ringer plays its own alarm sound; the channel stays silent.
+                NotificationChannel(CH_RING, "Find my phone", NotificationManager.IMPORTANCE_HIGH).apply { setSound(null, null) },
+                NotificationChannel(CH_LINKS, "Links from Mac", NotificationManager.IMPORTANCE_HIGH),
             ),
         )
     }
@@ -95,6 +109,39 @@ object Notifs {
             id,
             builder(ctx, CH_TRANSFER, "Received $name")
                 .setContentText("Saved to Downloads/Ferry")
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .build(),
+        )
+    }
+
+    fun ringing(ctx: Context, from: String) {
+        val stop = PendingIntent.getBroadcast(ctx, 0, Intent(ctx, RingStop::class.java), PendingIntent.FLAG_IMMUTABLE)
+        post(
+            ctx,
+            ID_RING,
+            builder(ctx, CH_RING, "$from is ringing this phone")
+                .setContentText("Tap Stop to silence it")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setOngoing(true)
+                .setDeleteIntent(stop)
+                .addAction(0, "Stop", stop)
+                .build(),
+        )
+    }
+
+    /** Background activity starts are blocked, so a link from the Mac opens when the user taps this. */
+    fun link(ctx: Context, from: String, url: String) {
+        val id = url.hashCode()
+        val view = Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val pi = PendingIntent.getActivity(ctx, id, view, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        post(
+            ctx,
+            id,
+            builder(ctx, CH_LINKS, "Link from $from")
+                .setContentText(url)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pi)
                 .setAutoCancel(true)
                 .build(),

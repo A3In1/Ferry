@@ -41,11 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if Bundle.main.bundleIdentifier != nil {
             let center = UNUserNotificationCenter.current()
             center.delegate = self
-            center.setNotificationCategories([UNNotificationCategory(
-                identifier: Notifications.received,
-                actions: [UNNotificationAction(identifier: Notifications.showAction, title: "Show in Finder")],
-                intentIdentifiers: []
-            )])
+            model.registerCategories()
             center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
 
@@ -82,6 +78,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(devicesItem)
 
         menu.addItem(.separator())
+        let hasPhone = model.node != nil && !model.peers.isEmpty
+        menu.addItem(ClosureItem("Send clipboard to phone") { [weak self] in self?.model.sendClipboard() }.enabled(hasPhone))
+        let sync = ClosureItem("Sync clipboard to phone") { [weak self] in self?.model.syncClipboard.toggle() }
+        sync.state = model.syncClipboard ? .on : .off
+        if model.syncClipboard, model.clipboardDenied {
+            sync.toolTip = "Ferry can't read the clipboard: allow it in System Settings → Privacy & Security → Paste from Other Apps"
+        }
+        menu.addItem(sync)
+        menu.addItem(ClosureItem("Ring phone") { [weak self] in self?.model.ring(true) }.enabled(hasPhone))
+        menu.addItem(ClosureItem("Stop ringing") { [weak self] in self?.model.ring(false) }.enabled(hasPhone))
+
+        menu.addItem(.separator())
         let login = ClosureItem("Open at Login") { [weak self] in self?.toggleLaunchAtLogin() }
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
@@ -103,6 +111,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func insertLive() {
         var items = model.usbLinks.map { link in
             label(model.peerName(link.peerId).map { "📱 \($0) — USB" } ?? "📱 Phone on USB (not paired)")
+        }
+        for (peer, b) in model.battery.sorted(by: { $0.key < $1.key }) {
+            let who = model.peers.count > 1 ? " · \(model.peerName(peer) ?? "phone")" : ""
+            items.append(label("🔋 \(b.percent)%\(b.charging ? " ⚡" : "")\(who)"))
+        }
+        for (peer, np) in model.nowPlaying.sorted(by: { $0.key < $1.key }) {
+            let artist = np.artist.isEmpty ? "" : " — \(np.artist)"
+            items.append(label("\(np.playing ? "♪" : "⏸") \(np.title)\(artist) (\(np.app))"))
+            items.append(ClosureItem("⏮ Previous") { [weak self] in self?.model.media(.previous, peer: peer) })
+            items.append(ClosureItem("⏯ Play/Pause") { [weak self] in self?.model.media(.playPause, peer: peer) })
+            items.append(ClosureItem("⏭ Next") { [weak self] in self?.model.media(.next, peer: peer) })
         }
         items += model.lines.map { label($0.text) }
         if !items.isEmpty { items.insert(.separator(), at: 0) }
@@ -170,6 +189,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func sendFiles(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
         send(fileURLs(pasteboard))
     }
+
+    /// Any app → Services → "Send link to phone" (NSMessage = sendLink): a web URL as a link, else text.
+    @objc func sendLink(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        let url = (pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL])?.first
+        model.sendText(pasteboard.string(forType: .string) ?? url?.absoluteString)
+    }
 }
 
 // MARK: drop onto the menu-bar icon
@@ -202,8 +227,18 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         [.banner, .list, .sound]
     }
 
-    /// Body click and "Show in Finder" both reveal the files.
+    /// Phone notifications ("n|…"): buttons, replies and dismisses go back to the phone.
+    /// Received-file notifications: body click and "Show in Finder" both reveal the files.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let request = response.notification.request
+        if request.identifier.hasPrefix(Notifications.phonePrefix) {
+            guard let peer = request.content.userInfo[Notifications.peerKey] as? String,
+                  let key = request.content.userInfo[Notifications.keyKey] as? String else { return }
+            let action = response.actionIdentifier
+            let reply = (response as? UNTextInputNotificationResponse)?.userText ?? ""
+            await MainActor.run { model.phoneNotificationResponse(peer: peer, key: key, action: action, reply: reply) }
+            return
+        }
         guard response.actionIdentifier != UNNotificationDismissActionIdentifier,
               let paths = response.notification.request.content.userInfo[Notifications.pathsKey] as? [String]
         else { return }

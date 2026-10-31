@@ -2,8 +2,7 @@ import AppKit
 import FerryCore
 import UserNotifications
 
-/// shortcut: the USB bridge in core/src/usb.rs is still `todo!()` (usbLinks() would trap via try!).
-/// Flip to true once it lands: enables usbWatch at startup, the 2 s usbLinks poll and "Pair phone over USB".
+/// Watch adb for phones plugged in over USB (usbWatch at startup, usbLinks poll, "Pair phone over USB").
 let usbEnabled = true
 
 /// App state; everything here runs on the main actor.
@@ -33,8 +32,18 @@ final class AppModel {
     }
     private var incoming: [String: Incoming] = [:]
     private var startTask: Task<Void, Never>?
+    private var usbWatching = false
     // UNUserNotificationCenter traps outside an app bundle (`swift run`).
-    private let canNotify = Bundle.main.bundleIdentifier != nil
+    let canNotify = Bundle.main.bundleIdentifier != nil
+
+    // Phase 2 state (Sync.swift), per peer id.
+    struct NowPlaying { var title, artist, app: String; var playing: Bool }
+    var nowPlaying: [String: NowPlaying] = [:]
+    var battery: [String: (percent: UInt32, charging: Bool)] = [:]
+    /// Phone-notification categories registered so far, by id (see `categoryID`).
+    var categories: [String: UNNotificationCategory] = [:]
+    /// Last general-pasteboard changeCount we've seen or caused (echo suppression).
+    var seenClipboardChange = NSPasteboard.general.changeCount
 
     init() {
         startTask = Task { await start() }
@@ -42,6 +51,12 @@ final class AppModel {
             while true {
                 try? await Task.sleep(for: .seconds(2))
                 tick()
+            }
+        }
+        Task {
+            while true {
+                try? await Task.sleep(for: .seconds(1))
+                pollClipboard()
             }
         }
     }
@@ -65,7 +80,7 @@ final class AppModel {
             self.node = node
             status = "\(node.deviceName()) · \(node.deviceId().prefix(8))"
             if usbEnabled {
-                do { try node.usbWatch(adbPath: nil) } catch { put("usb", "USB unavailable: \(error)") }
+                do { try await node.usbWatch(adbPath: nil); usbWatching = true } catch { put("usb", "USB unavailable: \(error)") }
             }
         } catch {
             status = "Failed to start: \(error)"
@@ -76,7 +91,8 @@ final class AppModel {
     /// Cheap (in-memory lists); also catches pairings that finished since the last look.
     func tick() {
         refreshPeers()
-        if usbEnabled, let node { usbLinks = node.usbLinks() }
+        // A failed usbWatch can leave the core's USB lock poisoned, and usbLinks() would then trap.
+        if usbWatching, let node { usbLinks = node.usbLinks() }
         onChange()
     }
 
@@ -258,6 +274,12 @@ enum Notifications {
     static let received = "received"
     static let showAction = "show"
     static let pathsKey = "paths"
+    /// Phone notifications use request ids "n|<peerId>|<key>" and carry these in userInfo.
+    static let phonePrefix = "n|"
+    static let peerKey = "peer"
+    static let keyKey = "key"
+    /// Action ids for phone buttons are "b|<buttonId>" (keeps them apart from the system's ids).
+    static let buttonPrefix = "b|"
 }
 
 /// Receives callbacks from Rust worker threads and hops to the main actor.
@@ -268,6 +290,10 @@ final class Bridge: FerryDelegate {
 
     func onFileEvent(event: FfiFileEvent) {
         Task { @MainActor in model.handle(event) }
+    }
+
+    func onEvent(peerId: String, event: FfiEvent) {
+        Task { @MainActor in model.handle(event, from: peerId) }
     }
 
     func confirmPairing(peerName: String, code: String) async -> Bool {

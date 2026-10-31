@@ -12,6 +12,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Find my phone. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- App names for mirrored notifications and now-playing (launcher apps only, no QUERY_ALL_PACKAGES). -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
@@ -55,6 +65,41 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <!-- Reads the clipboard while focused (Android 10+ blocks background reads), sends it, closes. -->
+        <activity
+            android:name=".ClipActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Notification mirroring + media sessions; only the system can bind it. -->
+        <service
+            android:name=".FerryListener"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".ClipTile"
+            android:exported="true"
+            android:icon="@drawable/ic_ferry"
+            android:label="@string/clip_tile"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".RingStop"
+            android:exported="false" />
 
         <service
             android:name=".FerryService"

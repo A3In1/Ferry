@@ -57,6 +57,7 @@ pub struct NodeConfig {
 pub type EventFn = Arc<dyn Fn(String, Event) + Send + Sync>;
 
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
+const EVENT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Connection close codes (application level).
 const ERR_NOT_PAIRED: u32 = 0x01;
 const ERR_HELLO: u32 = 0x02;
@@ -303,7 +304,9 @@ impl Node {
         let id = self.trusted(peer_id)?;
         let conn = self.session(id).await?;
         match send_event_on(&conn, ev).await {
-            Err(_) if conn.close_reason().is_some() => {
+            // no ack: the session is dead (e.g. the peer restarted) even if QUIC hasn't noticed
+            Err(_) => {
+                conn.close(ERR_REPLACED.into(), b"no ack");
                 send_event_on(&self.session(id).await?, ev).await
             }
             r => r,
@@ -518,6 +521,10 @@ async fn send_event_on(conn: &Connection, ev: &Event) -> Result<()> {
     write_prefix(&mut s, CH_EVENTS).await?;
     write_msg(&mut s, ev).await?;
     s.finish()?;
+    // Wait for the peer's ack: finish() only buffers, so a dead session would drop it silently.
+    timeout(EVENT_ACK_TIMEOUT, s.stopped())
+        .await
+        .context("event not acknowledged")??;
     // shortcut: one stream per event, so two events sent back to back may arrive out of
     // order; use a single ordered stream per session if that ever matters (notif add/remove).
     Ok(())

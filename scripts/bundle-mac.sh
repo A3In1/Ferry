@@ -43,6 +43,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
       <array><string>public.data</string></array>
       <key>NSRequiredContext</key><dict/>
     </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>Send link to phone</string></dict>
+      <key>NSMessage</key><string>sendLink</string>
+      <key>NSPortName</key><string>Ferry</string>
+      <key>NSSendTypes</key>
+      <array><string>public.url</string><string>public.utf8-plain-text</string></array>
+      <key>NSRequiredContext</key><dict/>
+    </dict>
   </array>
 </dict>
 </plist>

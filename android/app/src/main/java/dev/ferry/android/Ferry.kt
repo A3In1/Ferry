@@ -9,6 +9,7 @@ import android.util.Log
 import android.widget.Toast
 import dev.ferry.core.FerryDelegate
 import dev.ferry.core.FerryNode
+import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiFileEvent
 import dev.ferry.core.FfiPeer
 import dev.ferry.core.FfiSource
@@ -71,7 +72,7 @@ object Ferry {
     }
 
     /** The running node, waiting briefly if the service is still starting it. */
-    private suspend fun awaitNode() = withTimeoutOrNull(30_000) { node.filterNotNull().first() }
+    suspend fun awaitNode() = withTimeoutOrNull(30_000) { node.filterNotNull().first() }
 
     fun pair(ctx: Context, ticket: String) {
         val app = ctx.applicationContext
@@ -137,6 +138,22 @@ object Ferry {
         }
     }
 
+    /**
+     * A user-initiated event to every paired Mac. The caller is a visible activity, so it starts
+     * the service; this waits for the node first. Toasts [done] once queued.
+     */
+    fun sendEvent(ctx: Context, event: FfiEvent, done: String) {
+        val app = ctx.applicationContext
+        FerryService.start(app)
+        scope.launch {
+            awaitNode() ?: return@launch toast(app, "Ferry isn't running")
+            refreshPeers()
+            if (peers.value.isEmpty()) return@launch toast(app, "No paired Mac yet")
+            Outbox.broadcast(event)
+            toast(app, done)
+        }
+    }
+
     fun toast(ctx: Context, text: String) {
         scope.launch(Dispatchers.Main) { Toast.makeText(ctx.applicationContext, text, Toast.LENGTH_LONG).show() }
     }
@@ -145,6 +162,30 @@ object Ferry {
 /** Callbacks from Rust worker threads. */
 class Bridge(private val ctx: Context) : FerryDelegate {
     override fun onFileEvent(event: FfiFileEvent) = Transfers.offer(event)
+
+    /** Mac → phone events; each acts only if its grant is on. Hops to main (listener, ringer, clipboard live there). */
+    override fun onEvent(peerId: String, event: FfiEvent) {
+        Ferry.scope.launch(Dispatchers.Main) {
+            try {
+                handle(peerId, event)
+            } catch (e: Exception) {
+                Log.e(TAG, "event $event", e)
+            }
+        }
+    }
+
+    private fun handle(peerId: String, e: FfiEvent) {
+        val from = Ferry.peers.value.firstOrNull { it.id == peerId }?.name ?: "your Mac"
+        when (e) {
+            is FfiEvent.NotificationAction -> if (Grant.NOTIFICATIONS in Grants) FerryListener.instance?.act(e)
+            is FfiEvent.MediaCommand -> if (Grant.MEDIA in Grants) FerryListener.instance?.media(e.cmd)
+            is FfiEvent.Clipboard -> if (Grant.CLIPBOARD in Grants) Clip.fromMac(ctx, e.text)
+            is FfiEvent.Ring -> if (Grant.RING in Grants) { if (e.start) Ringer.start(ctx, from) else Ringer.stop(ctx) }
+            is FfiEvent.Link -> if (Grant.LINKS in Grants && Links.isWebUrl(e.url)) Notifs.link(ctx, from, e.url)
+            // Phone → Mac kinds; a Mac shouldn't send them.
+            is FfiEvent.Notification, is FfiEvent.NotificationRemoved, is FfiEvent.NowPlaying, is FfiEvent.Battery -> {}
+        }
+    }
 
     override suspend fun confirmPairing(peerName: String, code: String): Boolean {
         val p = PairPrompt(peerName, code)

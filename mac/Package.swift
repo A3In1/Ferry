@@ -22,6 +22,9 @@ let package = Package(
                 .linkedFramework("Security"),
             ]
         ),
-        .executableTarget(name: "Ferry", dependencies: ["FerryCore"]),
+        .executableTarget(name: "Ferry", dependencies: ["FerryCore", "FerryLogic"]),
+        // Pure helpers (no Rust), so tests build fast.
+        .target(name: "FerryLogic"),
+        .testTarget(name: "FerryLogicTests", dependencies: ["FerryLogic"]),
     ]
 )

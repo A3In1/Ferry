@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
+import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiPeer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -20,7 +21,7 @@ class ShareActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val uris = sharedUris(intent)
         if (uris.isEmpty()) {
-            Ferry.toast(this, "Ferry can only send files for now")
+            shareText(intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString())
             finish()
             return
         }
@@ -42,6 +43,15 @@ class ShareActivity : ComponentActivity() {
             if (files.isNotEmpty()) Ferry.toast(this@ShareActivity, "Sending to ${peer.name}…")
             finish()
         }
+    }
+
+    /** Shared text: a lone web URL goes as a Link (opens on the Mac), anything else as Clipboard. */
+    private fun shareText(text: String?) {
+        if (intent.action != Intent.ACTION_SEND || text.isNullOrBlank()) return Ferry.toast(this, "Nothing to send")
+        val url = Links.sharedUrl(text)
+        val (grant, event) = if (url != null) Grant.LINKS to FfiEvent.Link(url) else Grant.CLIPBOARD to FfiEvent.Clipboard(text)
+        if (grant !in Grants) return Ferry.toast(this, "Turn on “${grant.label}” in Ferry to send this")
+        Ferry.sendEvent(this, event, if (url != null) "Link sent to Mac" else "Text sent to Mac's clipboard")
     }
 
     private fun sharedUris(intent: Intent): List<Uri> = when (intent.action) {

@@ -512,7 +512,8 @@ impl FerryNode {
     }
 
     /// Mac side: watch adb for plugged-in phones and attach them. `adb_path` empty = auto.
-    pub fn usb_watch(&self, adb_path: Option<String>) -> Result<()> {
+    /// Async so it runs on the tokio runtime: the watcher spawns tasks.
+    pub async fn usb_watch(&self, adb_path: Option<String>) -> Result<()> {
         Ok(self.node.usb_watch(adb_path.map(PathBuf::from))?)
     }
 

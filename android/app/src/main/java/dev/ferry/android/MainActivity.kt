@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -62,6 +63,7 @@ class MainActivity : ComponentActivity() {
     private var scanning by mutableStateOf(false)
     private var pasting by mutableStateOf(false)
     private var toSend by mutableStateOf<List<Uri>?>(null)
+    private var listenerOn by mutableStateOf(false)
 
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
     private val askCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
@@ -102,6 +104,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onPaste = { pasting = true },
                         onSend = { pickFiles.launch(arrayOf("*/*")) },
+                        listenerOn = listenerOn,
                     )
                 }
                 if (pasting) PasteDialog(onDismiss = { pasting = false }) { ticket ->
@@ -130,6 +133,11 @@ class MainActivity : ComponentActivity() {
         // Visible activity: allowed to start the foreground service (Android 12+ background rule).
         FerryService.start(this)
         Ferry.refreshPeers()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        listenerOn = FerryListener.enabled(this) // may have changed in system settings
     }
 
     override fun onStop() {
@@ -165,7 +173,7 @@ fun FerryTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit) {
+private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, listenerOn: Boolean) {
     val ctx = LocalContext.current
     val node by Ferry.node.collectAsStateWithLifecycle()
     val status by Ferry.status.collectAsStateWithLifecycle()
@@ -206,6 +214,8 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit) {
                 }
             }
 
+            GrantsSection(listenerOn)
+
             if (recent.isNotEmpty()) {
                 Text("Recent", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
                 recent.forEach { Text(it.text, style = MaterialTheme.typography.bodyMedium) }
@@ -217,6 +227,33 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit) {
                 modifier = Modifier.padding(vertical = 16.dp),
             )
         }
+    }
+}
+
+/** The phone owner's switches for what paired Macs get / may do. All off until turned on here. */
+@Composable
+private fun GrantsSection(listenerOn: Boolean) {
+    val ctx = LocalContext.current
+    val on by Grants.on.collectAsStateWithLifecycle()
+    Text("Share with your Mac", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+    Text(
+        if (on.isEmpty()) "Nothing is shared. Files only." else "Sharing: " + on.sorted().joinToString { it.short },
+        style = MaterialTheme.typography.bodySmall,
+    )
+    Grant.entries.forEach { g ->
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(g.label, Modifier.weight(1f))
+            Switch(checked = g in on, onCheckedChange = { Grants.set(ctx, g, it) })
+        }
+    }
+    if ((Grant.NOTIFICATIONS in on || Grant.MEDIA in on) && !listenerOn) {
+        Text("Notifications and media controls need notification access.", style = MaterialTheme.typography.bodySmall)
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = { FerryListener.openSettings(ctx) }) {
+            Text(if (listenerOn) "Notification access: on" else "Allow notification access")
+        }
+        TextButton(onClick = { Grants.allOff(ctx) }, enabled = on.isNotEmpty()) { Text("Turn all off") }
     }
 }
 
