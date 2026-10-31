@@ -10,20 +10,20 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use iroh::address_lookup::memory::MemoryLookup;
-use iroh::endpoint::{
-    Connection, Incoming, IncomingAddr, PortmapperConfig, RecvStream, SendStream, presets,
-};
+use iroh::endpoint::{Connection, Incoming, IncomingAddr, PortmapperConfig, presets};
+pub use iroh::endpoint::{RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::channel::{
-    CH_CONTROL, CH_EVENTS, CH_FILE, read_msg, read_prefix, write_msg, write_prefix,
+    CH_CONTROL, CH_EVENTS, CH_FILE, CH_SCREEN, read_msg, read_prefix, write_msg, write_prefix,
 };
 use crate::file::{self, AcceptFn, EventSink, Receiver, SendReport};
 use crate::pairing::{self, Me, PairedPeer, TICKET_TTL, Ticket};
@@ -52,9 +52,35 @@ pub struct NodeConfig {
     pub confirm_pairing: ConfirmFn,
     /// Events from paired peers: (peer id, event).
     pub on_event: EventFn,
+    /// A paired peer opened a screen stream (phone side): (peer id, stream).
+    pub on_screen: ScreenFn,
 }
 
 pub type EventFn = Arc<dyn Fn(String, Event) + Send + Sync>;
+pub type ScreenFn = Arc<dyn Fn(String, Screen) + Send + Sync>;
+
+/// A CH_SCREEN bi stream carrying FSP1 bytes (after the channel prefix).
+/// While any is alive the idle reaper leaves sessions open (cursor sharing can be silent).
+pub struct Screen {
+    pub send: SendStream,
+    pub recv: RecvStream,
+    pub live: ScreenLive,
+}
+
+pub struct ScreenLive(Arc<AtomicUsize>);
+
+impl ScreenLive {
+    fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        Self(count.clone())
+    }
+}
+
+impl Drop for ScreenLive {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
 const EVENT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -90,6 +116,9 @@ pub struct Node {
     /// Serialises dialing so concurrent sends to one peer share a single new session.
     dial: tokio::sync::Mutex<()>,
     on_event: EventFn,
+    on_screen: ScreenFn,
+    /// Open screen streams (see [`Screen`]).
+    screens: Arc<AtomicUsize>,
     #[cfg(feature = "mdns")]
     mdns: Mutex<Option<discovery::Mdns>>,
 }
@@ -152,6 +181,8 @@ impl Node {
             sessions: Mutex::default(),
             dial: tokio::sync::Mutex::default(),
             on_event: cfg.on_event,
+            on_screen: cfg.on_screen,
+            screens: Arc::default(),
             #[cfg(feature = "mdns")]
             mdns: Mutex::new(None),
         });
@@ -357,6 +388,19 @@ impl Node {
         }
     }
 
+    /// Mac side: open a screen stream to a paired peer (see docs/screen-protocol.md).
+    pub async fn open_screen(self: &Arc<Self>, peer_id: &str) -> Result<Screen> {
+        let id = self.trusted(peer_id)?;
+        let conn = self.session(id).await?;
+        let (mut send, recv) = timeout(NET_TIMEOUT, conn.open_bi()).await??;
+        write_prefix(&mut send, CH_SCREEN).await?;
+        Ok(Screen {
+            send,
+            recv,
+            live: ScreenLive::new(&self.screens),
+        })
+    }
+
     /// The live session with `id` (either direction), or a newly dialed one.
     async fn session(self: &Arc<Self>, id: EndpointId) -> Result<Connection> {
         let _dialing = self.dial.lock().await;
@@ -433,7 +477,12 @@ impl Node {
         Hello {
             protocol_version: PROTOCOL_VERSION,
             device_name: self.name.clone(),
-            channels: vec![CH_CONTROL.into(), CH_FILE.into(), CH_EVENTS.into()],
+            channels: vec![
+                CH_CONTROL.into(),
+                CH_FILE.into(),
+                CH_EVENTS.into(),
+                CH_SCREEN.into(),
+            ],
             addrs: self.lan_addrs().iter().map(ToString::to_string).collect(),
         }
     }
@@ -575,7 +624,8 @@ impl Node {
             tokio::select! {
                 bi = conn.accept_bi() => {
                     let Ok((send, recv)) = bi else { break };
-                    tokio::spawn(route_bi(self.receiver.clone(), send, recv));
+                    let screen = (self.on_screen.clone(), peer.clone(), self.screens.clone());
+                    tokio::spawn(route_bi(self.receiver.clone(), screen, send, recv));
                 }
                 uni = conn.accept_uni() => {
                     let Ok(recv) = uni else { break };
@@ -596,6 +646,10 @@ async fn reap_idle_sessions(node: std::sync::Weak<Node>) {
     loop {
         tokio::time::sleep(EVERY).await;
         let Some(node) = node.upgrade() else { return };
+        if node.screens.load(Ordering::Relaxed) > 0 {
+            seen.clear();
+            continue;
+        }
         let conns: Vec<Connection> = node.sessions.lock().unwrap().values().cloned().collect();
         let mut next = HashMap::new();
         for c in conns {
@@ -631,8 +685,21 @@ async fn send_event_on(conn: &Connection, ev: &Event) -> Result<()> {
 }
 
 /// Unknown channels are refused per stream, never per connection, so newer peers keep working.
-async fn route_bi(rx: Arc<Receiver>, mut send: SendStream, mut recv: RecvStream) {
+async fn route_bi(
+    rx: Arc<Receiver>,
+    (on_screen, peer, screens): (ScreenFn, String, Arc<AtomicUsize>),
+    mut send: SendStream,
+    mut recv: RecvStream,
+) {
     match timeout(NET_TIMEOUT, read_prefix(&mut recv)).await {
+        Ok(Ok(CH_SCREEN)) => on_screen(
+            peer,
+            Screen {
+                send,
+                recv,
+                live: ScreenLive::new(&screens),
+            },
+        ),
         Ok(Ok(CH_FILE)) => {
             if let Err(e) = rx.handle_control(send, recv).await {
                 warn!("file control stream: {e:#}");

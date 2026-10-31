@@ -18,6 +18,7 @@ async fn node(root: &Path, name: &str) -> Arc<Node> {
         accept: Arc::new(|o| vec![true; o.items.len()]),
         events: Arc::new(|_| {}),
         confirm_pairing: Arc::new(|_| Box::pin(async { true })),
+        on_screen: Arc::new(|_, _| {}),
         on_event: Arc::new(|_, _| {}),
     })
     .await

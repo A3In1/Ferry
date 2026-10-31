@@ -197,6 +197,7 @@ async fn start(data_dir: &Path, name: &str, download_dir: PathBuf, yes: bool) ->
         events: event_printer(),
         confirm_pairing: confirm_fn(yes),
         // Phase 2 events from the phone, printed for testing
+        on_screen: Arc::new(|_, _| {}),
         on_event: Arc::new(|peer, ev| println!("event from {}: {:?}", &peer[..10], ev.kind)),
     })
     .await

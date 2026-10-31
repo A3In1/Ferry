@@ -12,6 +12,8 @@ pub const CH_CONTROL: u8 = 0x00;
 pub const CH_FILE: u8 = 0x01;
 /// Small realtime messages: one `Event` per uni stream (notifications, clipboard, media...).
 pub const CH_EVENTS: u8 = 0x02;
+/// Screen mirroring / control: one bi stream per session, FSP1 bytes (docs/screen-protocol.md).
+pub const CH_SCREEN: u8 = 0x03;
 pub const CHANNEL_VERSION: u8 = 1;
 
 /// Largest control message we accept; bounds memory a peer can make us allocate.

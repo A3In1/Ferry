@@ -45,6 +45,56 @@ pub trait FerryDelegate: Send + Sync {
     async fn confirm_pairing(&self, peer_name: String, code: String) -> bool;
     /// A Phase 2 event (notification, clipboard, media, battery, ring, link) from a paired peer.
     fn on_event(&self, peer_id: String, event: FfiEvent);
+    /// Phone: a paired Mac opened a screen stream (docs/screen-protocol.md).
+    fn on_screen_stream(&self, peer_id: String, stream: Arc<ScreenStream>);
+}
+
+/// One FSP1 byte pipe (docs/screen-protocol.md) over a QUIC bi stream.
+#[derive(uniffi::Object)]
+pub struct ScreenStream {
+    send: tokio::sync::Mutex<Option<ferry_core::node::SendStream>>,
+    recv: tokio::sync::Mutex<ferry_core::node::RecvStream>,
+    live: std::sync::Mutex<Option<ferry_core::node::ScreenLive>>,
+}
+
+impl From<ferry_core::node::Screen> for ScreenStream {
+    fn from(s: ferry_core::node::Screen) -> Self {
+        Self {
+            send: tokio::sync::Mutex::new(Some(s.send)),
+            recv: tokio::sync::Mutex::new(s.recv),
+            live: std::sync::Mutex::new(Some(s.live)),
+        }
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl ScreenStream {
+    /// The next chunk of bytes; empty once the other side has finished.
+    pub async fn read(&self) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; 64 * 1024];
+        let n = (self.recv.lock().await.read(&mut buf).await)
+            .map_err(|e| FerryError::from(anyhow::Error::from(e)))?;
+        buf.truncate(n.unwrap_or(0));
+        Ok(buf)
+    }
+
+    pub async fn write(&self, data: Vec<u8>) -> Result<()> {
+        let mut send = self.send.lock().await;
+        let send = send
+            .as_mut()
+            .ok_or_else(|| FerryError::from(anyhow::anyhow!("screen stream finished")))?;
+        send.write_all(&data)
+            .await
+            .map_err(|e| FerryError::from(anyhow::Error::from(e)))
+    }
+
+    /// Ends our side; the peer sees EOF and finishes its side, which ends our `read`.
+    pub async fn finish(&self) {
+        if let Some(mut s) = self.send.lock().await.take() {
+            let _ = s.finish();
+        }
+        self.live.lock().unwrap().take();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -451,6 +501,10 @@ impl FerryNode {
             accept,
             events,
             confirm_pairing: confirm_fn(delegate.clone()),
+            on_screen: {
+                let d = delegate.clone();
+                Arc::new(move |peer, s| d.on_screen_stream(peer, Arc::new(s.into())))
+            },
             on_event: {
                 let d = delegate.clone();
                 Arc::new(move |peer, ev| {
@@ -596,6 +650,11 @@ impl FerryNode {
     /// Re-announce our addresses to a paired peer after a network change (fresh session).
     pub async fn check_in(&self, peer_id: String) -> Result<()> {
         Ok(self.node.check_in(&peer_id).await?)
+    }
+
+    /// Mac: open a screen stream (mirroring / control) to a paired phone.
+    pub async fn open_screen(&self, peer_id: String) -> Result<Arc<ScreenStream>> {
+        Ok(Arc::new(self.node.open_screen(&peer_id).await?.into()))
     }
 
     /// Send one event to a paired peer over the shared session.
