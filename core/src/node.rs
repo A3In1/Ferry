@@ -4,6 +4,7 @@
 //! come from mDNS (feature `mdns`), from native discovery via [`Node::add_peer_addrs`],
 //! or from the last addresses stored in the trust record.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -52,6 +53,8 @@ const ERR_NOT_PAIRED: u32 = 0x01;
 const ERR_HELLO: u32 = 0x02;
 /// Stream stop/reset code for a channel we don't speak.
 const ERR_UNKNOWN_CHANNEL: u32 = 0x03;
+const ERR_REPLACED: u32 = 0x04;
+const ERR_FORGOTTEN: u32 = 0x05;
 const MAX_LAST_ADDRS: usize = 8;
 const MAX_TICKET_ADDRS: usize = 6;
 
@@ -67,6 +70,9 @@ pub struct Node {
     confirm: ConfirmFn,
     receiver: Arc<Receiver>,
     events: EventSink,
+    /// The live incoming session per peer. A reconnecting peer (e.g. after a crash) replaces
+    /// its old one at once instead of waiting for the idle timeout, which frees its partial files.
+    sessions: Mutex<HashMap<EndpointId, Connection>>,
     #[cfg(feature = "mdns")]
     mdns: Mutex<Option<discovery::Mdns>>,
 }
@@ -105,6 +111,7 @@ impl Node {
             confirm: cfg.confirm_pairing,
             receiver: Receiver::new(cfg.download_dir, cfg.accept, cfg.events.clone()),
             events: cfg.events,
+            sessions: Mutex::default(),
             #[cfg(feature = "mdns")]
             mdns: Mutex::new(None),
         });
@@ -176,8 +183,9 @@ impl Node {
         let id = identity::parse_device_id(peer_id)?;
         ensure!(self.trust.lock().unwrap().remove(&id.to_z32())?, "not a paired device: {peer_id}");
         self.lookup.remove_endpoint_info(id);
-        // shortcut: open sessions from the forgotten peer stay up until they close; track
-        // connections per peer and close them here once the apps keep long-lived sessions.
+        if let Some(c) = self.sessions.lock().unwrap().remove(&id) {
+            c.close(ERR_FORGOTTEN.into(), b"forgotten");
+        }
         Ok(())
     }
 
@@ -329,7 +337,20 @@ impl Node {
         if let Some(a) = from {
             self.remember_addrs(id, &[a]);
         }
-        let _control = match hello_respond(&conn, self.hello()).await {
+        if let Some(old) = self.sessions.lock().unwrap().insert(id, conn.clone()) {
+            old.close(ERR_REPLACED.into(), b"replaced by a new session");
+        }
+        let res = self.serve_session(&conn).await;
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.get(&id).is_some_and(|c| c.stable_id() == conn.stable_id()) {
+            sessions.remove(&id);
+        }
+        res
+    }
+
+    async fn serve_session(&self, conn: &Connection) -> Result<()> {
+        let id = conn.remote_id();
+        let _control = match hello_respond(conn, self.hello()).await {
             Ok(c) => c,
             Err(e) => {
                 conn.close(ERR_HELLO.into(), b"bad hello");

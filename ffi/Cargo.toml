@@ -16,6 +16,9 @@ required-features = ["bindgen"]
 [features]
 # Kept out of the default build so the staticlib doesn't bundle clap/askama.
 bindgen = ["uniffi/cli"]
+# LAN presence via mdns-sd on the Mac; Android builds pass --no-default-features and use NsdManager.
+default = ["mdns"]
+mdns = ["ferry-core/mdns"]
 
 [dependencies]
 ferry-core.workspace = true

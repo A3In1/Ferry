@@ -62,18 +62,36 @@ pub struct Receiver {
     accept: AcceptFn,
     events: EventSink,
     state: Mutex<State>,
+    parts_in_use: PartsInUse,
 }
 
 #[derive(Default)]
 struct State {
     transfers: HashMap<[u8; 16], Arc<Transfer>>,
-    /// Partial files owned by a live transfer; two writers on one file would corrupt it.
-    parts_in_use: HashSet<PathBuf>,
 }
+
+/// Partial files owned by a live transfer; two writers on one file would corrupt it.
+type PartsInUse = Arc<Mutex<HashSet<PathBuf>>>;
+
+/// How long a new offer waits for a partial still held by a dying transfer (e.g. the
+/// sender crashed and reconnected) before falling back to a private, non-resumable one.
+const PART_WAIT: Duration = Duration::from_secs(5);
 
 struct Transfer {
     id: [u8; 16],
     slots: Vec<Option<Slot>>, // None = declined
+    parts_in_use: PartsInUse,
+}
+
+/// Held by the control handler and every data handler, so a partial is released only
+/// once nothing can still write to it.
+impl Drop for Transfer {
+    fn drop(&mut self) {
+        let mut parts = self.parts_in_use.lock().unwrap();
+        for slot in self.slots.iter().flatten() {
+            parts.remove(&slot.part);
+        }
+    }
 }
 
 struct Slot {
@@ -95,17 +113,13 @@ struct Registered(Arc<Receiver>, Arc<Transfer>);
 
 impl Drop for Registered {
     fn drop(&mut self) {
-        let mut st = self.0.state.lock().unwrap();
-        st.transfers.remove(&self.1.id);
-        for slot in self.1.slots.iter().flatten() {
-            st.parts_in_use.remove(&slot.part);
-        }
+        self.0.state.lock().unwrap().transfers.remove(&self.1.id);
     }
 }
 
 impl Receiver {
     pub fn new(dest_dir: PathBuf, accept: AcceptFn, events: EventSink) -> Arc<Self> {
-        Arc::new(Self { dest_dir, accept, events, state: Mutex::default() })
+        Arc::new(Self { dest_dir, accept, events, state: Mutex::default(), parts_in_use: PartsInUse::default() })
     }
 
     /// Handle a CH_FILE bi stream (prefix already consumed by the node).
@@ -200,29 +214,51 @@ impl Receiver {
         if accepted.iter().any(|&a| a) {
             fs::create_dir_all(&partial_dir).with_context(|| format!("create {}", partial_dir.display()))?;
         }
+        if self.state.lock().unwrap().transfers.contains_key(&id) {
+            bail!("transfer {} is already in progress", hex::encode(id));
+        }
+        let mut transfer =
+            Transfer { id, slots: Vec::with_capacity(items.len()), parts_in_use: self.parts_in_use.clone() };
+        for (i, item) in items.into_iter().enumerate() {
+            if !accepted.get(i).copied().unwrap_or(false) {
+                transfer.slots.push(None);
+                continue;
+            }
+            let part = self.claim_part(partial_dir.join(part_name(&item)), || {
+                // Same file still busy: the duplicate gets a private, non-resumable partial.
+                partial_dir.join(format!("{}-{i}.part", hex::encode(id)))
+            });
+            // A partial longer than the file can't be a prefix of it; receive() truncates it.
+            let offset = fs::metadata(&part).map_or(0, |m| if m.len() <= item.size { m.len() } else { 0 });
+            transfer.slots.push(Some(Slot { item, offset, part, data: watch::Sender::new(Data::Waiting) }));
+        }
+        let transfer = Arc::new(transfer);
         let mut st = self.state.lock().unwrap();
         if st.transfers.contains_key(&id) {
             bail!("transfer {} is already in progress", hex::encode(id));
         }
-        let mut slots = Vec::with_capacity(items.len());
-        for (i, item) in items.into_iter().enumerate() {
-            if !accepted.get(i).copied().unwrap_or(false) {
-                slots.push(None);
-                continue;
-            }
-            let mut part = partial_dir.join(part_name(&item));
-            if st.parts_in_use.contains(&part) {
-                // Same file offered twice at once: the duplicate gets a private, non-resumable partial.
-                part = partial_dir.join(format!("{}-{i}.part", hex::encode(id)));
-            }
-            // A partial longer than the file can't be a prefix of it; receive() truncates it.
-            let offset = fs::metadata(&part).map_or(0, |m| if m.len() <= item.size { m.len() } else { 0 });
-            st.parts_in_use.insert(part.clone());
-            slots.push(Some(Slot { item, offset, part, data: watch::Sender::new(Data::Waiting) }));
-        }
-        let transfer = Arc::new(Transfer { id, slots });
         st.transfers.insert(id, transfer.clone());
         Ok(transfer)
+    }
+
+    /// Claims `part`, waiting up to [`PART_WAIT`] if another transfer still holds it.
+    /// Runs on a blocking thread (see handle_control), so sleeping is fine.
+    fn claim_part(&self, part: PathBuf, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+        let deadline = Instant::now() + PART_WAIT;
+        loop {
+            let mut parts = self.parts_in_use.lock().unwrap();
+            if !parts.contains(&part) {
+                parts.insert(part.clone());
+                return part;
+            }
+            if Instant::now() >= deadline {
+                let alt = fallback();
+                parts.insert(alt.clone());
+                return alt;
+            }
+            drop(parts);
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Appends the stream to the partial file; returns the hash of the whole file.
