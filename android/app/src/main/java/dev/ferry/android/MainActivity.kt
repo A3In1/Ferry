@@ -81,6 +81,12 @@ class MainActivity : ComponentActivity() {
         associated = Cdm.associated(this)
         if (associated) Ferry.toast(this, "Ferry can now start in the background when your Mac is near")
     }
+    /** Messages / Calls: the switch turns on only once Android grants all of the feature's permissions. */
+    private val askGrant = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
+        val g = Grant.entries.firstOrNull { it.permissions.isNotEmpty() && r.keys.containsAll(it.permissions) } ?: return@registerForActivityResult
+        if (r.values.all { it }) Grants.set(this, g, true)
+        else Ferry.toast(this, "${g.short} needs all of those permissions (Settings → Apps → Ferry → Permissions)")
+    }
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) toSend = uris
     }
@@ -117,6 +123,7 @@ class MainActivity : ComponentActivity() {
                         onPaste = { pasting = true },
                         onSend = { pickFiles.launch(arrayOf("*/*")) },
                         listenerOn = listenerOn,
+                        onAsk = { askGrant.launch(it.permissions.toTypedArray()) },
                         bluetooth = BluetoothUi(
                             allowed = btAllowed,
                             canAssociate = Cdm.available(this) && !associated,
@@ -162,6 +169,9 @@ class MainActivity : ComponentActivity() {
         listenerOn = FerryListener.enabled(this) // may have changed in system settings
         btAllowed = Ble.allowed(this)
         associated = Cdm.associated(this)
+        // Permissions revoked in Settings: show the switch off rather than on-but-silent.
+        Grants.on.value.filter { it.permissions.isNotEmpty() && !Grants.allowed(this, it) }.forEach { Grants.set(this, it, false) }
+        FerryService.instance?.let(Calls::sync)
     }
 
     override fun onStop() {
@@ -214,7 +224,7 @@ fun FerryTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, listenerOn: Boolean, bluetooth: BluetoothUi) {
+private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, listenerOn: Boolean, onAsk: (Grant) -> Unit, bluetooth: BluetoothUi) {
     val ctx = LocalContext.current
     val node by Ferry.node.collectAsStateWithLifecycle()
     val status by Ferry.status.collectAsStateWithLifecycle()
@@ -266,7 +276,7 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, li
 
             if (Ble.supported && peers.isNotEmpty()) BluetoothSection(bluetooth)
 
-            GrantsSection(listenerOn)
+            GrantsSection(listenerOn, onAsk)
 
             if (peers.isNotEmpty()) ScreenSection()
 
@@ -309,7 +319,7 @@ private fun BluetoothSection(ui: BluetoothUi) {
 
 /** The phone owner's switches for what paired Macs get / may do. All off until turned on here. */
 @Composable
-private fun GrantsSection(listenerOn: Boolean) {
+private fun GrantsSection(listenerOn: Boolean, onAsk: (Grant) -> Unit) {
     val ctx = LocalContext.current
     val on by Grants.on.collectAsStateWithLifecycle()
     Text("Share with your Mac", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
@@ -319,8 +329,11 @@ private fun GrantsSection(listenerOn: Boolean) {
     )
     Grant.entries.forEach { g ->
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(g.label, Modifier.weight(1f))
-            Switch(checked = g in on, onCheckedChange = { Grants.set(ctx, g, it) })
+            Column(Modifier.weight(1f)) {
+                Text(g.label)
+                if (g.why.isNotEmpty()) Text(g.why, style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = g in on, onCheckedChange = { if (it && g.permissions.isNotEmpty()) onAsk(g) else Grants.set(ctx, g, it) })
         }
     }
     if ((Grant.NOTIFICATIONS in on || Grant.MEDIA in on) && !listenerOn) {

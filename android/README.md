@@ -1,7 +1,7 @@
-# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth · Phase 4: screen)
+# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth · Phase 4: screen · Phase 5: messages + calls)
 
 Compose app over the shared Rust core (`ffi/`, UniFFI → Kotlin package `dev.ferry.core`, via JNA).
-Application id `dev.ferry.android` in both flavors (`play`, `full`; identical for now).
+Application id `dev.ferry.android` in both flavors (`play`, `full`; identical for now, Phase 5 included).
 
 ## Build
 
@@ -180,3 +180,45 @@ Code: `app/src/main/java/dev/ferry/android/screen/` (`Fsp.kt` codec, `Screen.kt`
 5. **Stop** in the "connected to your screen" notification ends the session from the phone (END 1).
 6. Logs: `adb logcat -s FerryScreen` shows `START video=… control=…`, `encoding WxH for screen WxH`, and `end <reason> …`.
 
+
+## Phase 5: messages and calls
+
+The phone is the source of truth: the Mac asks, the phone answers from its own providers. Two more switches in
+**Share with your Mac**, both **off by default**. Turning one on asks for its permissions first; the switch stays
+off unless all are granted, and turns itself off if you later revoke one in Settings. Off = Mac requests get no reply.
+Code: `Sms.kt` (provider reads, `SmsReceiver`, sending), `Calls.kt` (call state, commands, call log), `Names.kt`
+(contact names via `PhoneLookup`, cached). Logs: `adb logcat -s FerryPhone` (warn level; message bodies and numbers aren't logged).
+
+| Switch | Permissions | What it does |
+|---|---|---|
+| Messages | READ_SMS, RECEIVE_SMS, SEND_SMS, READ_CONTACTS | `SmsThreadsRequest` → threads newest first (default 50, snippets cut to 200 chars, oldest dropped to stay under 1 MiB), `SmsMessagesRequest` → a thread's last N texts (default 100, oldest first). Incoming texts (`SMS_RECEIVED`; Ferry is not the default SMS app) → `SmsNew` to every paired Mac. `SmsSend` → `SmsManager` (multipart for long text) to that address only, then `SmsNew` (outgoing) to every Mac. Android itself writes it to the sent box for a non-default SMS app, so Ferry doesn't. |
+| Calls | READ_PHONE_STATE, READ_CALL_LOG, ANSWER_PHONE_CALLS, READ_CONTACTS | `TelephonyCallback` (API 31+, registered by the service) + the PHONE_STATE broadcast (ringing number) → `Call{state, number, name}` on each change. `CallCommand` Answer → `TelecomManager.acceptRingingCall`, Decline → `endCall` (also hangs up). `CallLogRequest` → the last 50 calls. |
+
+Limits: SMS only (no MMS/group chats, no pictures). Default SIM only. A text counts as sent once handed to
+`SmsManager` (no delivery report). Incoming texts reach the Mac only while Ferry's service is running. `SmsNew` for
+an incoming or just-sent text has `id = 0` (not in the provider yet; the next `SmsMessagesRequest` returns the real
+id). The number of an outgoing call isn't known (shown with an empty number). **Call audio stays on the phone**:
+answering from the Mac picks up on the phone (use its speaker or headset); Ferry doesn't route call audio to the Mac.
+
+**Play flavor:** Google Play only allows SMS and Call Log permissions for apps approved through the
+*Permissions Declaration Form* (SMS/Call Log policy, "companion device" / "connected device" use). The `play` build
+requests them like `full`; the declaration is needed before uploading it to Play.
+
+Sideloaded from a browser or file manager, Android 13+ may grey out the SMS/call-log permissions ("restricted
+settings"): Settings → Apps → Ferry → ⋮ → Allow restricted settings. `adb install` isn't affected.
+
+### Test on the phone (needs the Mac app's Phase 5 side)
+
+1. Install, open Ferry, pair. Share with your Mac → **Messages** on → allow SMS and contacts. **Calls** on → allow
+   phone, call logs and contacts. The ongoing notification lists "Messages, Calls".
+2. Threads: open Messages on the Mac → the newest ~50 conversations, names for saved contacts, unread counts match.
+3. Thread: open one → its last 100 texts in order, yours marked outgoing.
+4. Incoming: text the phone from another phone → it shows on the Mac within a second or two (log
+   `sms received, 1 sender(s), 1 Mac(s)`). A long (multi-part) text arrives as one message.
+5. Send: reply from the Mac → the other phone receives it (a long reply arrives whole), the Mac shows it as sent, and
+   it appears in the phone's own Messages app (written by Android). Log: `sms sent, N part(s)`.
+6. Calls: call the phone → the Mac shows Ringing with the number/name (log `call RINGING`). Answer from the Mac →
+   the phone picks up (`call ACTIVE`; talk on the phone). Decline / hang up from the Mac → `call IDLE`.
+   Recent calls on the Mac → the last 50, incoming/outgoing/missed.
+7. Off: turn **Messages** off → threads/messages requests go unanswered, incoming texts aren't sent, Send does
+   nothing. Same for **Calls**. Revoke SMS in Settings → Apps → Ferry → Permissions, reopen Ferry → the switch is off.

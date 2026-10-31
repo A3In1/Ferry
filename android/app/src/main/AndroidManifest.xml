@@ -27,6 +27,15 @@
     <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
     <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
 
+    <!-- Messages and Calls (each behind its own switch, asked only when turned on). -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+
     <!-- App names for mirrored notifications and now-playing (launcher apps only, no QUERY_ALL_PACKAGES). -->
     <queries>
         <intent>
@@ -38,6 +47,7 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <application
         android:name=".FerryApplication"
@@ -119,6 +129,16 @@
         <receiver
             android:name=".BleScanReceiver"
             android:exported="false" />
+
+        <!-- Incoming texts for the Mac (not the default SMS app: SMS_RECEIVED, not SMS_DELIVER). -->
+        <receiver
+            android:name=".SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Screen mirroring consent ("Start now"); transparent, closes itself. -->
         <activity

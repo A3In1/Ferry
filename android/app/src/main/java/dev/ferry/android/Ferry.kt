@@ -201,8 +201,31 @@ class Bridge(private val ctx: Context) : FerryDelegate {
             is FfiEvent.Clipboard -> if (Grant.CLIPBOARD in Grants) Clip.fromMac(ctx, e.text)
             is FfiEvent.Ring -> if (Grant.RING in Grants) { if (e.start) Ringer.start(ctx, from) else Ringer.stop(ctx) }
             is FfiEvent.Link -> if (Grant.LINKS in Grants && Links.isWebUrl(e.url)) Notifs.link(ctx, from, e.url)
+            is FfiEvent.SmsThreadsRequest -> reply(peerId, Grant.MESSAGES) { Sms.threads(ctx, e.limit) }
+            is FfiEvent.SmsMessagesRequest -> reply(peerId, Grant.MESSAGES) { Sms.messages(ctx, e.threadId, e.limit) }
+            is FfiEvent.SmsSend -> if (Grants.allowed(ctx, Grant.MESSAGES)) Ferry.scope.launch(Dispatchers.IO) {
+                // Every Mac (the sender too) shows the sent text.
+                runCatching { Sms.send(ctx, e.address, e.body) }
+                    .onSuccess { m -> m?.let { Outbox.broadcast(FfiEvent.SmsNew(it)) } }
+                    .onFailure { Log.w(PHONE_TAG, "sms send failed", it) }
+            }
+            is FfiEvent.CallCommand -> if (Grants.allowed(ctx, Grant.CALLS)) Calls.command(ctx, e.cmd)
+            is FfiEvent.CallLogRequest -> reply(peerId, Grant.CALLS) { Calls.log(ctx, e.limit) }
             // Phone → Mac kinds; a Mac shouldn't send them.
-            is FfiEvent.Notification, is FfiEvent.NotificationRemoved, is FfiEvent.NowPlaying, is FfiEvent.Battery -> {}
+            is FfiEvent.Notification, is FfiEvent.NotificationRemoved, is FfiEvent.NowPlaying, is FfiEvent.Battery,
+            is FfiEvent.SmsThreads, is FfiEvent.SmsMessages, is FfiEvent.SmsNew, is FfiEvent.Call, is FfiEvent.CallLog -> {}
+        }
+    }
+
+    /** Answers a Mac's request off the main thread (provider queries), only while [g] is allowed; else no reply. */
+    private fun reply(peerId: String, g: Grant, make: () -> FfiEvent) {
+        if (!Grants.allowed(ctx, g)) return
+        Ferry.scope.launch(Dispatchers.IO) {
+            try {
+                Outbox.send(peerId, make())
+            } catch (e: Exception) {
+                Log.w(PHONE_TAG, "can't answer for ${g.short}", e)
+            }
         }
     }
 

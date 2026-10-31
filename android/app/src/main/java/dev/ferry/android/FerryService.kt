@@ -106,6 +106,7 @@ class FerryService : Service() {
         ContextCompat.registerReceiver(this, batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, bluetoothChanged, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkChanged)
+        Calls.sync(this)
         // Main thread: startup bookkeeping can't interleave with onDestroy. Nothing here blocks.
         job = Ferry.scope.launch(Dispatchers.Main) { run() }
     }
@@ -128,6 +129,7 @@ class FerryService : Service() {
         job?.cancel()
         unregisterReceiver(batteryChanged)
         unregisterReceiver(bluetoothChanged)
+        Calls.stop(this)
         // Only Stop ends the service, and Stop means stop: no Bluetooth wake-ups until the app is opened again.
         Ble.stopScan(this)
         Ble.stopBridge()
