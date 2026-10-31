@@ -49,6 +49,10 @@ final class AppModel {
     // Phase 4 (Screen.swift, Crossing.swift): open viewer windows by peer id, and cursor sharing.
     var viewers: [String: ScreenWindow] = [:]
     var crossing: Crossing?
+    // Phase 5 (Messages.swift), by peer id: texts and calls, open Messages windows, who an active call is with.
+    var phoneTexts: [String: PhoneTexts] = [:]
+    var messageWindows: [String: MessagesWindow] = [:]
+    var activeCalls: [String: String] = [:]
 
     init() {
         startTask = Task { await start() }
@@ -302,6 +306,11 @@ enum Notifications {
     static let keyKey = "key"
     /// Action ids for phone buttons are "b|<buttonId>" (keeps them apart from the system's ids).
     static let buttonPrefix = "b|"
+    /// Phase 5: texts are "s|<peerId>|<messageId>", the ringing call "c|<peerId>".
+    static let smsPrefix = "s|", callPrefix = "c|"
+    static let sms = "sms", smsCode = "sms-code", call = "call"
+    static let replyAction = "reply", copyAction = "copy", answerAction = "answer", declineAction = "decline"
+    static let addressKey = "address", threadKey = "thread", codeKey = "code"
 }
 
 /// Receives callbacks from Rust worker threads and hops to the main actor.

@@ -1,4 +1,4 @@
-# Ferry for Mac (Phases 1–4)
+# Ferry for Mac (Phases 1–5)
 
 Menu-bar app (no Dock icon) over the shared Rust core, via UniFFI bindings from `ffi/`.
 AppKit `NSStatusItem` + `NSMenu` (so the icon can take drops); the pairing window is SwiftUI.
@@ -141,6 +141,36 @@ window is `Sources/Ferry/Screen.swift` and crossing is `Sources/Ferry/Crossing.s
   no new keys. Like Downloads, the grant is tied to the code signature: an ad-hoc rebuild needs Ferry
   removed and re-added in that list. The Mac needs no Screen Recording permission (it only shows the phone's video).
 
+### Messages and calls (Phase 5)
+
+The phone is the source of truth: the Mac asks (`sendEvent`) and shows what comes back, and keeps nothing
+on disk. The phone only answers when **Messages** / **Calls** are turned on in Ferry there. The window is
+`Sources/Ferry/Messages.swift` (SwiftUI in an `NSWindow`). Code detection and number matching are in
+FerryLogic (`Texts.swift`, tested).
+
+- **Messages <phone>** (menu) opens a window and sends `SmsThreadsRequest` + `CallLogRequest`. **Refresh**
+  (toolbar) asks again. The list shows name or number, snippet, date, and a dot for unread. If nothing comes back
+  within 5 s, the sidebar says "Turn on Messages in Ferry on your phone" (or Calls, on the Calls tab).
+- **Selecting a thread** sends `SmsMessagesRequest` and shows the chat: phone's messages on the left, yours on the
+  right. Type and press **Send** or Return to send `SmsSend` to that thread's address. Nothing is sent any
+  other way. Your text shows as "sending…" until the phone echoes it back as `SmsNew`. **New message**
+  (toolbar) takes a number and text. If that number already has a thread, it goes there.
+- **`SmsNew`** updates the open chat and moves the thread to the top of the list. An incoming text posts a
+  notification (sender, body) with **Reply**, which sends `SmsSend`. Clicking it opens the thread. No
+  notification is posted while that thread is open in the front window. If the text has a one-time code
+  (`oneTimeCode(in:)`: 4–8 digits, or 123-456, near code/OTP/verification/password/PIN, skipping phone numbers,
+  amounts, dates and masked card numbers), the title starts with the code and there's a **Copy code**
+  button. A copied code is never synced back to the phone.
+- **Calls**: on `Call(RINGING)` a time-sensitive notification "<name or number> is calling" with
+  **Answer** / **Decline** (→ `CallCommand`). It's removed on IDLE or ACTIVE. While a call is active, the
+  menu shows "📞 On a call with X" and **Hang up** (`CallCommand DECLINE`). **Audio stays on the phone**:
+  Answer picks up there, and you talk on the phone or its headset. The Mac is only a remote control.
+- **Recent calls**: the **Calls** tab in the Messages window (`CallLogRequest`, refreshed after each call ends
+  while the window is open). Missed calls are red with a missed-call icon and "Missed".
+- The window handles ⌘C/⌘V/⌘X/⌘A/⌘Z/⌘W itself, because a menu-bar app has no Edit menu.
+- **Time-sensitive** needs the `com.apple.developer.usernotifications.time-sensitive` entitlement to break through
+  Focus. The ad-hoc bundle doesn't have it, so macOS shows the call as a normal notification.
+
 ## Test it
 
 **With the CLI** (`cargo build --release -p ferry-cli`, then `F=target/release/ferry`):
@@ -188,7 +218,29 @@ window is `Sources/Ferry/Screen.swift` and crossing is `Sources/Ferry/Crossing.s
    (or press Escape): the Mac cursor reappears at the right edge. Switch **Cursor crosses at screen edge** to
    Left and repeat on that side. With control off on the phone, the toggle turns off with "Turn on Ferry control on the phone".
 
+**Phase 5 with the phone** (any link; turn on **Messages** and **Calls** in Ferry on the phone first):
+1. Menu → **Messages <phone>**. The thread list fills within a second or two (unread threads have a dot), and the
+   **Calls** tab shows recent calls with missed ones in red. Turn the Messages grant off on the phone, then
+   **Refresh**: after 5 s, "Turn on Messages in Ferry on your phone". Turn it back on and Refresh.
+2. Click a thread: the chat loads, oldest at the top, yours on the right. Type a reply and press Return:
+   it shows "sending…", then the phone sends it and the bubble turns normal. Check it on the phone.
+3. **New message** → a number (e.g. your own) + text → Send. Once the phone echoes it, the new thread is selected.
+4. Close the window (or switch to another app) and text the phone from another phone: a notification with
+   the sender and text. **Reply** from the notification and check the reply arrives. Click a notification: it
+   opens that thread.
+5. Codes: get a real OTP (a bank or app login), or text the phone "Your verification code is 482913". The
+   notification title starts with 482913, and **Copy code** puts it on the clipboard (`pbpaste`).
+6. Call the phone: "<name> is calling" with Answer / Decline. **Decline** rejects it. Call again and press
+   **Answer**: the phone picks up (talk on the phone), the notification goes away, and the menu shows
+   "📞 On a call with <name>" with **Hang up**. Hang up from the menu. The line goes away and the
+   Calls tab shows the call. Let a call ring out: it shows as Missed.
+- Without a phone, the CLI's `listen` prints what the Mac sends (`SmsThreadsRequest`, `SmsSend`, `CallCommand`, …).
+  The CLI can't send Phase 5 events yet, so it can only test the Mac → phone direction.
+
 ## Later
+
+- Phase 5: read state isn't sent back to the phone (opening a thread clears its dot on the Mac only), a send
+  that never echoes stays "sending…", and threads/messages aren't paged (the phone's default limits).
 
 - Mirroring isn't recorded or audio-forwarded, and only one window per phone is supported. Crossing uses one phone
   at a time and doesn't follow rotation mid-crossing (the cursor speed keeps the old size).

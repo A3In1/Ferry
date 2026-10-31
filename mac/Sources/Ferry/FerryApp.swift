@@ -96,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         menu.addItem(.separator())
         for peer in model.peers {
+            menu.addItem(ClosureItem("Messages \(peer.name)") { [weak self] in self?.model.openMessages(peer) }.enabled(model.node != nil))
             menu.addItem(ClosureItem("Mirror \(peer.name)") { [weak self] in self?.model.mirror(peer) }.enabled(model.node != nil))
             let share = ClosureItem("Share cursor with \(peer.name)") { [weak self] in
                 guard let model = self?.model else { return }
@@ -145,6 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         for (peer, b) in model.battery.sorted(by: { $0.key < $1.key }) {
             let who = model.peers.count > 1 ? " · \(model.peerName(peer) ?? "phone")" : ""
             items.append(label("🔋 \(b.percent)%\(b.charging ? " ⚡" : "")\(who)"))
+        }
+        for (peer, who) in model.activeCalls.sorted(by: { $0.key < $1.key }) {
+            items.append(label("📞 On a call with \(who)"))
+            items.append(ClosureItem("Hang up") { [weak self] in self?.model.callCommand(.decline, peer: peer) })
         }
         for (peer, np) in model.nowPlaying.sorted(by: { $0.key < $1.key }) {
             let artist = np.artist.isEmpty ? "" : " — \(np.artist)"
@@ -258,9 +263,21 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     }
 
     /// Phone notifications ("n|…"): buttons, replies and dismisses go back to the phone.
+    /// Texts ("s|…") and calls ("c|…"): reply, copy code, answer/decline; a click on a text opens its thread.
     /// Received-file notifications: body click and "Show in Finder" both reveal the files.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let request = response.notification.request
+        let info = request.content.userInfo
+        if request.identifier.hasPrefix(Notifications.smsPrefix) || request.identifier.hasPrefix(Notifications.callPrefix) {
+            guard let peer = info[Notifications.peerKey] as? String else { return }
+            let address = info[Notifications.addressKey] as? String ?? "", code = info[Notifications.codeKey] as? String ?? ""
+            let thread = info[Notifications.threadKey] as? Int64, action = response.actionIdentifier
+            let reply = (response as? UNTextInputNotificationResponse)?.userText ?? ""
+            await MainActor.run {
+                model.textsResponse(peer: peer, action: action, reply: reply, address: address, code: code, thread: thread)
+            }
+            return
+        }
         if request.identifier.hasPrefix(Notifications.phonePrefix) {
             guard let peer = request.content.userInfo[Notifications.peerKey] as? String,
                   let key = request.content.userInfo[Notifications.keyKey] as? String else { return }

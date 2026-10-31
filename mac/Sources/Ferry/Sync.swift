@@ -36,7 +36,10 @@ extension AppModel {
             guard let url = webURL(url) else { NSLog("Ferry: ignored non-web link from phone: \(url)"); return }
             NSWorkspace.shared.open(url)
             notify("Opened link from \(peerName(peer) ?? "your phone")", url.absoluteString)
-        case .notificationAction, .mediaCommand, .ring:
+        case .smsThreads, .smsMessages, .smsNew, .call, .callLog:
+            handleTexts(event, from: peer) // Messages.swift
+        case .notificationAction, .mediaCommand, .ring, .smsThreadsRequest, .smsMessagesRequest, .smsSend, .callCommand,
+             .callLogRequest:
             break // Mac → phone only
         }
     }
@@ -169,7 +172,7 @@ extension AppModel {
             actions: [UNNotificationAction(identifier: Notifications.showAction, title: "Show in Finder")],
             intentIdentifiers: []
         )
-        UNUserNotificationCenter.current().setNotificationCategories(Set(categories.values).union([received]))
+        UNUserNotificationCenter.current().setNotificationCategories(Set(categories.values).union([received] + textCategories))
     }
 
     /// From the notification delegate: button, reply or dismiss on a phone notification.
