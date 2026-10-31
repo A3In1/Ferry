@@ -91,3 +91,13 @@ vivo notes: app Info logs are hidden (`log.tag=M`), so Kotlin diagnostics use `L
 | Restart after reboot / force-stop | ⚠️ open the app once to restart the scan |
 | Bridge hello is unauthenticated | ⚠️ a nearby device could knock the link offline (denial of service only: QUIC still authenticates every packet) |
 | Throughput / battery while a Bluetooth link idles | ⏳ not measured |
+
+## Phase 4 status (mirroring + control, tested on the vivo V2222 over USB/Wi-Fi)
+
+| Check | Result |
+|---|---|
+| Phone screen in a Mac window (MediaProjection consent each session, H.264 576×1280) | ✅ |
+| Click, drag, scroll, type, Back/Home/Recents from the Mac (Ferry control accessibility service, off by default) | ✅ |
+| Cursor crossing at a Mac screen edge, overlay cursor on the phone, Esc / move back to return | ✅ |
+| Locked phone | ends the session (capture and control); unlock on the phone, then Reconnect |
+| Known limits | text is appended at the end of a field (not at the caret); fast scrolling may jump; Mac Accessibility grant must be re-added after each ad-hoc rebuild |
