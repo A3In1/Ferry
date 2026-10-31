@@ -1,4 +1,4 @@
-# Ferry for Mac (Phases 1–2)
+# Ferry for Mac (Phases 1–3)
 
 Menu-bar app (no Dock icon) over the shared Rust core, via UniFFI bindings from `ffi/`.
 AppKit `NSStatusItem` + `NSMenu` (so the icon can take drops); the pairing window is SwiftUI.
@@ -73,15 +73,39 @@ Paste from Other Apps. If you choose *Deny*, sync can't read anything; the menu 
 Writing to the pasteboard (text from the phone) never prompts. On the dev machine (macOS 27) the poll's
 reads came back with the text right away. Whether an alert appeared on screen wasn't checked.
 
-### USB is switched off (FFI bug)
+### Bluetooth (Phase 3)
 
-`FerryNode.usbWatch` is a sync FFI call, and it runs `tokio::spawn` outside the Tokio runtime. The panic
-poisons the core's USB lock, and after that every incoming session is dropped and `usbLinks()` traps. One
-constant at the top of `Sources/Ferry/AppModel.swift` turns USB back on once the FFI is fixed:
+When you're not on the same Wi-Fi, the phone reaches the Mac over Bluetooth LE. The Mac is the peripheral
+and the phone is the central. `Sources/Ferry/Bluetooth.swift` does this:
 
-```swift
-let usbEnabled = false   // → true: usbWatch(nil) at startup, usbLinks() poll every 2 s, "Pair phone over USB" enabled
-```
+- **Advert**: one 128-bit service UUID, `FerryNode.presenceBleUuid()`, and **no local name**. The UUID fills
+  the 28-byte budget, and a name would identify the Mac. Only paired phones can match the UUID. It rotates
+  about every 15 min. Ferry re-reads it every minute and restarts the advert when it changes, and again on
+  power-on.
+- **GATT**: a fixed service `F377E501-0000-1000-8000-00805F9B34FB` with Apple's read-only L2CAP PSM
+  characteristic (`CBUUIDL2CAPPSMCharacteristicString`, `ABDD3056-…`). Reading it returns the PSM as a
+  little-endian UInt16. macOS assigns the PSM on each `publishL2CAPChannel(withEncryption: false)`.
+  The channel is unencrypted because Android can't open a secure one without bonding; QUIC/TLS secures it.
+- **L2CAP channel → core**: each channel the phone opens becomes `openStreamBridge(label: "ble:<id prefix>")`.
+  The core runs the same bridge hello and framing as USB, so the bridge shows up in `usbLinks()` with a
+  `ble:` serial. The menu shows **"📱 <phone> — Bluetooth"**. If the bridge peer isn't a paired device,
+  the channel is closed. The core replaces an older bridge for the same phone, and a USB bridge wins
+  over Bluetooth.
+- **Threading**: CoreBluetooth runs on its own serial queue. Each channel's input and output streams are
+  scheduled on a dedicated thread with its own run loop (`StreamPump` in FerryLogic), and every stream
+  call happens on that thread. The core's `ByteSink.write` comes from a Tokio blocking worker. It hands
+  the bytes to the pump thread and blocks until they're written, which gives backpressure to the radio.
+  Bytes read go through an `AsyncStream` to `bridge.push`. EOF or an error ends the bridge, and the core
+  ending the bridge closes the streams.
+- **When it runs**: only while at least one phone is paired and the **Bluetooth** menu toggle is on
+  (default). The first start asks for Bluetooth permission (`NSBluetoothAlwaysUsageDescription`). No
+  entitlement is needed outside the sandbox. If Bluetooth can't run, the menu says **Bluetooth off** or
+  **Allow Bluetooth for Ferry in System Settings**. The permission is tied to the code signature, so an
+  ad-hoc build may ask again after a rebuild, the same as Downloads access.
+
+Check it from another device: in nRF Connect, scan for a service UUID starting `f377e501`. Connect, and
+read `ABDD3056-…` under service `F377E501-0000-…`; it should give 2 bytes. A Mac usually can't see its
+own advert, so this needs a second machine or the phone.
 
 ## Test it
 
@@ -110,7 +134,7 @@ let usbEnabled = false   // → true: usbWatch(nil) at startup, usbLinks() poll 
   The ⏮/⏯/⏭ items only show while the phone reports something playing.
 - The CLI's port changes on every run. If an `event` times out, the Mac hasn't found it yet (mDNS); retry.
 
-**With the phone over USB** (after `usbEnabled = true` and the core and Android USB work are in):
+**With the phone over USB**:
 1. Turn on USB debugging on the phone, plug it in and accept the "Allow USB debugging" prompt
    (`adb devices` shows it). Open Ferry on the phone.
 2. Menu → **Pair phone over USB**. The phone shows a code and the Mac shows Match / Doesn't match.

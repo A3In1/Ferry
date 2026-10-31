@@ -76,6 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let devicesItem = NSMenuItem(title: "Paired devices", action: nil, keyEquivalent: "")
         devicesItem.submenu = devices
         menu.addItem(devicesItem)
+        let bluetooth = ClosureItem("Bluetooth") { [weak self] in self?.model.bluetoothEnabled.toggle() }
+        bluetooth.state = model.bluetoothEnabled ? .on : .off
+        bluetooth.toolTip = "Reach your paired phone over Bluetooth when you're not on the same Wi-Fi"
+        menu.addItem(bluetooth)
 
         menu.addItem(.separator())
         let hasPhone = model.node != nil && !model.peers.isEmpty
@@ -110,8 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     private func insertLive() {
         var items = model.usbLinks.map { link in
-            label(model.peerName(link.peerId).map { "📱 \($0) — USB" } ?? "📱 Phone on USB (not paired)")
+            let via = link.serial.hasPrefix("ble:") ? "Bluetooth" : "USB"
+            return label(model.peerName(link.peerId).map { "📱 \($0) — \(via)" } ?? "📱 Phone on \(via) (not paired)")
         }
+        if let note = model.bluetoothNote, model.bluetoothEnabled { items.append(label(note)) }
         for (peer, b) in model.battery.sorted(by: { $0.key < $1.key }) {
             let who = model.peers.count > 1 ? " · \(model.peerName(peer) ?? "phone")" : ""
             items.append(label("🔋 \(b.percent)%\(b.charging ? " ⚡" : "")\(who)"))

@@ -349,7 +349,7 @@ pub trait ByteSink: Send + Sync {
     /// Write all of `data` to the socket; false if it's closed.
     fn write(&self, data: Vec<u8>) -> bool;
     /// The bridge ended: close the socket.
-    fn close(&self);
+    fn finish(&self);
 }
 
 #[derive(uniffi::Object)]
@@ -375,7 +375,7 @@ impl StreamBridge {
     }
 
     /// The socket closed (or the app is done): ends the bridge.
-    pub async fn close(&self) {
+    pub async fn finish(&self) {
         self.to_core.lock().await.take();
     }
 
@@ -585,7 +585,7 @@ impl FerryNode {
                     break;
                 }
             }
-            sink.close();
+            sink.finish();
         });
         Arc::new(StreamBridge {
             to_core: tokio::sync::Mutex::new(Some(to_core)),

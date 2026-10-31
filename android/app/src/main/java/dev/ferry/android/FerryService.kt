@@ -3,6 +3,7 @@ package dev.ferry.android
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -21,6 +22,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import dev.ferry.core.FerryNode
 import dev.ferry.core.FfiEvent
+import dev.ferry.core.FfiPeer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,9 +34,9 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Owns the one [FerryNode] while it runs: start → USB bridge + NSD presence → ongoing
- * notification. Started only from a visible activity (Android 12+ forbids background FGS
- * starts; the Stop action reaches the already-running service).
+ * Owns the one [FerryNode] while it runs: start → USB bridge + NSD presence + Bluetooth scan →
+ * ongoing notification. Started from a visible activity, or from a Bluetooth scan hit in the
+ * background (Android 12+ allows that only with a CDM association, see [Cdm]).
  */
 class FerryService : Service() {
     private var job: Job? = null
@@ -58,6 +60,15 @@ class FerryService : Service() {
     }
 
     private var checkIn: Job? = null
+
+    /** Turning Bluetooth off drops our PendingIntent scan: re-register when it's back on. */
+    private val bluetoothChanged = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, i: Intent) {
+            if (i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) != BluetoothAdapter.STATE_ON) return
+            Ble.adapterReset()
+            Ble.sync(ctx)
+        }
+    }
 
     /** Joined Wi-Fi or got a new address: tell each Mac where we are now, so it can reach us
      * without the cable (networks that block mDNS give it no other way to find out). */
@@ -89,6 +100,7 @@ class FerryService : Service() {
         goForeground(ongoing("Ferry is starting", ""))
         // System broadcast: NOT_EXPORTED is fine (and required for runtime receivers on 34+).
         ContextCompat.registerReceiver(this, batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, bluetoothChanged, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkChanged)
         // Main thread: startup bookkeeping can't interleave with onDestroy. Nothing here blocks.
         job = Ferry.scope.launch(Dispatchers.Main) { run() }
@@ -101,14 +113,18 @@ class FerryService : Service() {
             // Every startForegroundService() call must be answered with startForeground().
             notification?.let(::goForeground)
         }
-        // shortcut: not sticky, a killed process stays stopped until the app is opened again;
-        // a CDM association (later phase) allows restarting from the background.
+        // Not sticky: a killed process stays stopped until the app is opened again or (with a
+        // CDM association) a Bluetooth scan hit restarts it.
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         job?.cancel()
         unregisterReceiver(batteryChanged)
+        unregisterReceiver(bluetoothChanged)
+        // Only Stop ends the service, and Stop means stop: no Bluetooth wake-ups until the app is opened again.
+        Ble.stopScan(this)
+        Ble.stopBridge()
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkChanged) }
         checkIn?.cancel()
         Ringer.stop(this)
@@ -166,17 +182,22 @@ class FerryService : Service() {
     }
 
     private suspend fun showStatus() {
-        combine(Ferry.peers, Ferry.nearby, Grants.on) { peers, near, grants -> Triple(peers, peers.filter { it.id in near }.map { it.name }, grants) }
-            .collect { (peers, near, grants) ->
-                val n = if (near.isEmpty()) {
-                    ongoing("Ready to receive", if (peers.isEmpty()) "Open Ferry to pair a Mac" else "Waiting for a paired Mac on this network", grants)
-                } else {
-                    ongoing("Ferry is connected", near.joinToString(), grants)
+        combine(Ferry.peers, Ferry.nearby, Grants.on, Ferry.ble) { peers, near, grants, ble ->
+            Shown(peers, peers.filter { it.id in near }.map { it.name }, grants, peers.firstOrNull { it.id == ble }?.name)
+        }
+            .collect { (peers, near, grants, ble) ->
+                Ble.sync(this@FerryService) // pairing or forgetting the last Mac starts/stops the presence scan
+                val n = when {
+                    near.isNotEmpty() -> ongoing("Ferry is connected", near.joinToString(), grants)
+                    ble != null -> ongoing("Connected over Bluetooth", ble, grants)
+                    else -> ongoing("Ready to receive", if (peers.isEmpty()) "Open Ferry to pair a Mac" else "Waiting for a paired Mac on this network", grants)
                 }
                 Notifs.post(this, Notifs.ID_ONGOING, n)
                 sendBattery() // a Mac appeared or the grant changed: tell it now, not in 5 min
             }
     }
+
+    private data class Shown(val peers: List<FfiPeer>, val near: List<String>, val grants: Set<Grant>, val ble: String?)
 
     private fun goForeground(n: Notification) {
         notification = n

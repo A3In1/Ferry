@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -64,10 +65,20 @@ class MainActivity : ComponentActivity() {
     private var pasting by mutableStateOf(false)
     private var toSend by mutableStateOf<List<Uri>?>(null)
     private var listenerOn by mutableStateOf(false)
+    private var btAllowed by mutableStateOf(false)
+    private var associated by mutableStateOf(false)
 
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
     private val askCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) scanning = true else Ferry.toast(this, "Ferry needs the camera to scan the Mac's QR code")
+    }
+    private val askBluetooth = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        btAllowed = Ble.allowed(this)
+        if (btAllowed) Ble.sync(this) else Ferry.toast(this, "Without Bluetooth, Ferry reaches your Mac only over Wi-Fi or USB")
+    }
+    private val associate = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+        associated = Cdm.associated(this)
+        if (associated) Ferry.toast(this, "Ferry can now start in the background when your Mac is near")
     }
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) toSend = uris
@@ -105,6 +116,16 @@ class MainActivity : ComponentActivity() {
                         onPaste = { pasting = true },
                         onSend = { pickFiles.launch(arrayOf("*/*")) },
                         listenerOn = listenerOn,
+                        bluetooth = BluetoothUi(
+                            allowed = btAllowed,
+                            canAssociate = Cdm.available(this) && !associated,
+                            onAllow = { askBluetooth.launch(Ble.PERMISSIONS) },
+                            onAssociate = {
+                                Ferry.node.value?.let { node ->
+                                    Cdm.associate(this, node.blePrefix()) { associate.launch(IntentSenderRequest.Builder(it).build()) }
+                                }
+                            },
+                        ),
                     )
                 }
                 if (pasting) PasteDialog(onDismiss = { pasting = false }) { ticket ->
@@ -138,6 +159,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         listenerOn = FerryListener.enabled(this) // may have changed in system settings
+        btAllowed = Ble.allowed(this)
+        associated = Cdm.associated(this)
     }
 
     override fun onStop() {
@@ -190,13 +213,14 @@ fun FerryTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, listenerOn: Boolean) {
+private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, listenerOn: Boolean, bluetooth: BluetoothUi) {
     val ctx = LocalContext.current
     val node by Ferry.node.collectAsStateWithLifecycle()
     val status by Ferry.status.collectAsStateWithLifecycle()
     val usb by Ferry.usbListening.collectAsStateWithLifecycle()
     val peers by Ferry.peers.collectAsStateWithLifecycle()
     val nearby by Ferry.nearby.collectAsStateWithLifecycle()
+    val ble by Ferry.ble.collectAsStateWithLifecycle()
     val recent by Ferry.recent.collectAsStateWithLifecycle()
 
     Scaffold { pad ->
@@ -206,7 +230,7 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, li
         ) {
             Text("Ferry", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(top = 16.dp))
             node?.let { Text("${it.deviceName()} · ${it.deviceId().take(8)}", style = MaterialTheme.typography.titleMedium) }
-            Text(status + if (usb) " · USB bridge listening" else "", style = MaterialTheme.typography.bodyMedium)
+            Text(status + (if (usb) " · USB bridge listening" else "") + (if (ble != null) " · Connected over Bluetooth" else ""), style = MaterialTheme.typography.bodyMedium)
 
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onScan, enabled = node != null) { Text("Scan QR") }
@@ -227,13 +251,19 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, li
                     Column(Modifier.weight(1f)) {
                         Text(peer.name, fontWeight = FontWeight.Medium)
                         Text(
-                            if (peer.id in nearby) "On this network" else "Not seen nearby",
+                            when (peer.id) {
+                                ble -> "Connected over Bluetooth"
+                                in nearby -> "On this network"
+                                else -> "Not seen nearby"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     TextButton(onClick = { Ferry.forget(ctx, peer) }) { Text("Forget") }
                 }
             }
+
+            if (Ble.supported && peers.isNotEmpty()) BluetoothSection(bluetooth)
 
             GrantsSection(listenerOn)
 
@@ -248,6 +278,29 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, li
                 modifier = Modifier.padding(vertical = 16.dp),
             )
         }
+    }
+}
+
+class BluetoothUi(val allowed: Boolean, val canAssociate: Boolean, val onAllow: () -> Unit, val onAssociate: () -> Unit)
+
+/** Bluetooth permission (API 31+, no location) and the CDM association for background starts. */
+@Composable
+private fun BluetoothSection(ui: BluetoothUi) {
+    val node by Ferry.node.collectAsStateWithLifecycle()
+    Text("Bluetooth", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+    Text(
+        "Notices your Mac nearby and keeps a slow backup link when there's no shared Wi-Fi or cable. Ferry doesn't use your location.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!ui.allowed) OutlinedButton(onClick = ui.onAllow) { Text("Allow Bluetooth") }
+        if (ui.canAssociate) OutlinedButton(onClick = ui.onAssociate, enabled = node != null) { Text("Allow Ferry in the background") }
+    }
+    if (ui.canAssociate) {
+        Text(
+            "Pick your Mac once so Android lets Ferry start by itself when the Mac is in Bluetooth range (needs Bluetooth and Location switched on).",
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 

@@ -51,6 +51,8 @@ object Ferry {
     val peers = MutableStateFlow<List<FfiPeer>>(emptyList())
     /** Paired peers whose presence tag we saw on the LAN. */
     val nearby = MutableStateFlow<Set<String>>(emptySet())
+    /** Paired peer with a live Bluetooth bridge (see [Ble]), if any. */
+    val ble = MutableStateFlow<String?>(null)
     val recent = MutableStateFlow<List<Recent>>(emptyList())
     val prompt = MutableStateFlow<PairPrompt?>(null)
 
@@ -121,6 +123,7 @@ object Ferry {
     fun send(ctx: Context, peer: FfiPeer, files: List<Source>) {
         val app = ctx.applicationContext
         if (files.isEmpty()) return toast(app, "Couldn't open the selected files")
+        if (ble.value == peer.id && peer.id !in nearby.value) toast(app, "Connected over Bluetooth — large files are slow; join the same Wi-Fi")
         scope.launch {
             try {
                 val node = awaitNode() ?: error("Ferry isn't running")

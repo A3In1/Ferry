@@ -29,6 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>LSUIElement</key><true/>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Ferry finds and connects to your paired phone on this network.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Ferry uses Bluetooth to reach your paired phone when you're not on the same Wi-Fi.</string>
   <key>NSBonjourServices</key>
   <array><string>_ferry._udp</string></array>
   <key>NSServices</key>

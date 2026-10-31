@@ -32,7 +32,9 @@ final class AppModel {
     }
     private var incoming: [String: Incoming] = [:]
     private var startTask: Task<Void, Never>?
-    private var usbWatching = false
+    private var bluetooth: Bluetooth?
+    /// "Bluetooth off" etc. while Bluetooth should run but can't.
+    private(set) var bluetoothNote: String?
     // UNUserNotificationCenter traps outside an app bundle (`swift run`).
     let canNotify = Bundle.main.bundleIdentifier != nil
 
@@ -80,7 +82,13 @@ final class AppModel {
             self.node = node
             status = "\(node.deviceName()) · \(node.deviceId().prefix(8))"
             if usbEnabled {
-                do { try await node.usbWatch(adbPath: nil); usbWatching = true } catch { put("usb", "USB unavailable: \(error)") }
+                do { try await node.usbWatch(adbPath: nil) } catch { put("usb", "USB unavailable: \(error)") }
+            }
+            bluetooth = Bluetooth(node: node) { [weak self] note in
+                Task { @MainActor in
+                    self?.bluetoothNote = note
+                    self?.onChange()
+                }
             }
         } catch {
             status = "Failed to start: \(error)"
@@ -91,9 +99,19 @@ final class AppModel {
     /// Cheap (in-memory lists); also catches pairings that finished since the last look.
     func tick() {
         refreshPeers()
-        // A failed usbWatch can leave the core's USB lock poisoned, and usbLinks() would then trap.
-        if usbWatching, let node { usbLinks = node.usbLinks() }
+        // USB and Bluetooth bridges (serial "ble:…") both show up here.
+        if let node { usbLinks = node.usbLinks() }
+        bluetooth?.setWanted(bluetoothEnabled && !peers.isEmpty)
         onChange()
+    }
+
+    /// Menu toggle "Bluetooth" (default on). It only runs while a phone is paired.
+    var bluetoothEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "bluetooth") as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "bluetooth")
+            tick()
+        }
     }
 
     func refreshPeers() {
