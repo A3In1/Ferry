@@ -6,6 +6,9 @@ import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.LinkProperties
+import android.net.Network
+import android.net.ConnectivityManager
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.BatteryManager
@@ -54,6 +57,26 @@ class FerryService : Service() {
         }
     }
 
+    private var checkIn: Job? = null
+
+    /** Joined Wi-Fi or got a new address: tell each Mac where we are now, so it can reach us
+     * without the cable (networks that block mDNS give it no other way to find out). */
+    private val networkChanged = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = scheduleCheckIn()
+        override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) = scheduleCheckIn()
+    }
+
+    private fun scheduleCheckIn() {
+        checkIn?.cancel()
+        checkIn = Ferry.scope.launch {
+            delay(3_000) // let addresses settle; collapses bursts of callbacks
+            val node = Ferry.node.value ?: return@launch
+            Ferry.peers.value.forEach { p ->
+                runCatching { node.checkIn(p.id) }.onFailure { Log.w("Ferry", "check-in with ${p.name}: ${it.message}") }
+            }
+        }
+    }
+
     private fun sendBattery() {
         val b = battery
         if (b != null && Grant.BATTERY in Grants) Outbox.broadcast(b)
@@ -66,6 +89,7 @@ class FerryService : Service() {
         goForeground(ongoing("Ferry is starting", ""))
         // System broadcast: NOT_EXPORTED is fine (and required for runtime receivers on 34+).
         ContextCompat.registerReceiver(this, batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkChanged)
         // Main thread: startup bookkeeping can't interleave with onDestroy. Nothing here blocks.
         job = Ferry.scope.launch(Dispatchers.Main) { run() }
     }
@@ -85,6 +109,8 @@ class FerryService : Service() {
     override fun onDestroy() {
         job?.cancel()
         unregisterReceiver(batteryChanged)
+        runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkChanged) }
+        checkIn?.cancel()
         Ringer.stop(this)
         presence?.stop()
         presence = null

@@ -484,6 +484,11 @@ impl FerryNode {
     }
 
     /// Send with display names (Android: path `/proc/self/fd/N` + the document's name).
+    /// Re-announce our addresses to a paired peer after a network change (fresh session).
+    pub async fn check_in(&self, peer_id: String) -> Result<()> {
+        Ok(self.node.check_in(&peer_id).await?)
+    }
+
     /// Send one event to a paired peer over the shared session.
     pub async fn send_event(&self, peer_id: String, event: FfiEvent) -> Result<()> {
         Ok(self.node.send_event(&peer_id, &event.into_proto()).await?)

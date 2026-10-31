@@ -321,6 +321,17 @@ impl Node {
         }
     }
 
+    /// Opens a fresh session to `peer_id`, replacing any current one, so the handshake tells
+    /// the peer our current addresses. Call after our network changes (e.g. joined Wi-Fi):
+    /// otherwise the peer can't reach us until we happen to send it something.
+    pub async fn check_in(self: &Arc<Self>, peer_id: &str) -> Result<()> {
+        let id = self.trusted(peer_id)?;
+        if let Some(old) = self.sessions.lock().unwrap().remove(&id) {
+            old.close(ERR_REPLACED.into(), b"network changed");
+        }
+        self.session(id).await.map(drop)
+    }
+
     /// Send one event (notification, clipboard, ...) to a paired peer.
     pub async fn send_event(self: &Arc<Self>, peer_id: &str, ev: &Event) -> Result<()> {
         let id = self.trusted(peer_id)?;

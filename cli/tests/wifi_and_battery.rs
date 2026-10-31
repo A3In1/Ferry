@@ -62,6 +62,10 @@ async fn handshake_teaches_lan_addresses() {
     let (mac, phone) = paired(root.path()).await;
     // the phone dialed the Mac's loopback address; its Hello still carries its LAN addresses
     phone.send_event(&mac.device_id(), &clip()).await.unwrap();
+    // a check-in replaces the live session with a fresh one (new handshake, new addresses)
+    phone.check_in(&mac.device_id()).await.unwrap();
+    assert_eq!(phone.session_count(), 1);
+    phone.send_event(&mac.device_id(), &clip()).await.unwrap();
     let learned = mac.peers()[0].last_addrs.clone();
     let lan: Vec<_> = learned.iter().filter(|a| !a.ip().is_loopback()).collect();
     if lan.is_empty() {
