@@ -31,11 +31,29 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <string>Ferry finds and connects to your paired phone on this network.</string>
   <key>NSBonjourServices</key>
   <array><string>_ferry._udp</string></array>
+  <key>NSServices</key>
+  <array>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>Send with Ferry</string></dict>
+      <key>NSMessage</key><string>sendFiles</string>
+      <key>NSPortName</key><string>Ferry</string>
+      <key>NSSendTypes</key>
+      <array><string>public.file-url</string><string>NSFilenamesPboardType</string></array>
+      <key>NSSendFileTypes</key>
+      <array><string>public.data</string></array>
+      <key>NSRequiredContext</key><dict/>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
 
-# Ad-hoc signature: runs locally only. Release builds need a Developer ID + notarization.
-codesign --force --sign - --options runtime "$APP"
+# Ad-hoc by default: runs locally only, and macOS re-asks for Downloads access after each rebuild
+# (the privacy grant is tied to the binary hash). FERRY_SIGN_IDENTITY="Apple Development: …" keeps it.
+# Release builds need a Developer ID + notarization.
+codesign --force --sign "${FERRY_SIGN_IDENTITY:--}" --options runtime "$APP"
 codesign --verify --verbose "$APP"
+plutil -lint "$APP/Contents/Info.plist"
+# Register the bundle so Finder's Services menu picks up "Send with Ferry" right away.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
 echo "Built mac/$APP — launch with: open mac/$APP"

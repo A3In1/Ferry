@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 ferry-proto.workspace = true
 iroh.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "process"] }
 prost.workspace = true
 blake3.workspace = true
 anyhow.workspace = true

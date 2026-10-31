@@ -1,5 +1,7 @@
 //! Ferry core: identity, pairing, sessions and channels shared by the Mac and Android apps.
 
+#[cfg(not(target_os = "android"))]
+pub mod adb;
 pub mod channel;
 pub mod discovery;
 pub mod file;

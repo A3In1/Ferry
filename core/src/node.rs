@@ -2,7 +2,8 @@
 //!
 //! Relays and n0 DNS lookups are disabled (no traffic leaves the LAN). Peer addresses
 //! come from mDNS (feature `mdns`), from native discovery via [`Node::add_peer_addrs`],
-//! or from the last addresses stored in the trust record.
+//! or from the last addresses stored in the trust record. USB bridge addresses live in a
+//! separate lookup ([`crate::usb`]) so they come and go without touching the others.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -61,8 +62,11 @@ const MAX_LAST_ADDRS: usize = 8;
 const MAX_TICKET_ADDRS: usize = 6;
 
 pub struct Node {
-    endpoint: Endpoint,
+    pub(crate) endpoint: Endpoint,
     lookup: MemoryLookup,
+    /// Only live USB shim addresses; iroh merges it with `lookup`.
+    pub(crate) usb_lookup: MemoryLookup,
+    pub(crate) usb: Mutex<crate::usb::UsbState>,
     name: String,
     presence_key: [u8; 32],
     presence_nonce: Mutex<([u8; 8], Instant)>,
@@ -86,6 +90,7 @@ impl Node {
         let ident = identity::load_or_create(&cfg.data_dir)?;
         let trust = TrustStore::load(&cfg.data_dir)?;
         let lookup = MemoryLookup::new();
+        let usb_lookup = MemoryLookup::with_provenance("usb");
         for p in trust.list() {
             if let Ok(id) = identity::parse_device_id(&p.id) {
                 lookup.add_endpoint_info(addr_of(id, &p.last_addrs));
@@ -99,12 +104,15 @@ impl Node {
             .relay_mode(RelayMode::Disabled)
             .portmapper_config(PortmapperConfig::Disabled)
             .address_lookup(lookup.clone())
+            .address_lookup(usb_lookup.clone())
             .bind()
             .await
             .context("bind endpoint")?;
         let node = Arc::new(Node {
             endpoint,
             lookup,
+            usb_lookup,
+            usb: Mutex::default(),
             name: pairing::clean_name(&cfg.device_name),
             presence_key: ident.presence_key,
             presence_nonce: Mutex::new((rand::random(), Instant::now())),
@@ -178,9 +186,12 @@ impl Node {
             t.id != self.endpoint.id(),
             "that is this device's own ticket"
         );
+        // the USB bridge (if any) learned t.id from its hello: pairing needs no shared Wi-Fi
+        let mut addrs = t.addrs.clone();
+        addrs.extend(self.usb_addr(t.id));
         let conn = timeout(
             NET_TIMEOUT,
-            self.endpoint.connect(addr_of(t.id, &t.addrs), ALPN_PAIR),
+            self.endpoint.connect(addr_of(t.id, &addrs), ALPN_PAIR),
         )
         .await
         .context("connecting to the other device timed out")?
@@ -263,7 +274,11 @@ impl Node {
         let id = self.trusted(peer_id)?;
         let conn = timeout(
             NET_TIMEOUT,
-            self.endpoint.connect(EndpointAddr::new(id), ALPN_SESSION),
+            // iroh skips the lookup when it already has a path; name the USB one explicitly
+            self.endpoint.connect(
+                addr_of(id, &Vec::from_iter(self.usb_addr(id))),
+                ALPN_SESSION,
+            ),
         )
         .await
         .context("connecting timed out (is the other device on this network?)")?
@@ -284,6 +299,7 @@ impl Node {
     }
 
     pub async fn shutdown(&self) {
+        self.usb_shutdown();
         #[cfg(feature = "mdns")]
         if let Some(m) = self.mdns.lock().unwrap().take() {
             m.shutdown();
@@ -379,6 +395,8 @@ impl Node {
             t.filter(|(_, exp)| Instant::now() < *exp).map(|(s, _)| s)
         };
         let peer = pairing::show(&conn, take, &self.me(), &self.confirm).await?;
+        // a USB shim address is per bridge: never persist it
+        let from = from.filter(|a| !self.is_usb_addr(*a));
         self.store_peer(conn.remote_id(), peer, from.into_iter().collect())?;
         Ok(())
     }
@@ -392,7 +410,7 @@ impl Node {
             debug!(remote = %id.fmt_short(), "refused session from unpaired device");
             return Ok(());
         }
-        if let Some(a) = from {
+        if let Some(a) = from.filter(|a| !self.is_usb_addr(*a)) {
             self.remember_addrs(id, &[a]);
         }
         if let Some(old) = self.sessions.lock().unwrap().insert(id, conn.clone()) {
@@ -495,7 +513,7 @@ fn check_hello(h: Hello) -> Result<()> {
     Ok(())
 }
 
-fn addr_of(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
+pub(crate) fn addr_of(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
     EndpointAddr::from_parts(id, addrs.iter().copied().map(TransportAddr::Ip))
 }
 

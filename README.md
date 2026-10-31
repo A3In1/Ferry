@@ -43,10 +43,24 @@ On one machine, edit the ticket's `a=` to `127.0.0.1:<port>`. Over Wi-Fi, use th
 | 5,000 × 50 KB at ≥ 60% of bulk | ✅ 83% (`cargo test --release -p ferry-core small_files_throughput -- --ignored`) |
 | Hostile input (names, offsets, sizes, oversized messages) | ✅ unit tests + 20k randomized names |
 | Mac app runs the core, advertises `_ferry._udp` | ✅ (pairing with the CLI is a manual GUI check, see below) |
-| Android skeleton | ⏸ deferred (no Android SDK yet) |
+| Android skeleton | ✅ superseded by the Phase 1 app |
 
 **Manual check: Mac app ↔ CLI**
 1. `open mac/build/Ferry.app`, then menu bar → **Pair a device…** and copy the ticket text.
 2. `target/release/ferry --data-dir /tmp/ferryB --name PhoneB pair '<ticket>'` and confirm the code on both sides.
 3. `target/release/ferry --data-dir /tmp/ferryB send <Mac name> some-file`: it lands in `~/Downloads`.
 4. In the app: Paired devices → PhoneB → **Send files…** while `ferry --data-dir /tmp/ferryB listen` runs.
+
+## Phase 1 status (pairing + file sharing, tested on a vivo V2222, Android 15)
+
+| Check | Result |
+|---|---|
+| Rust core starts on Android; NSD advertises `_ferry._udp` | ✅ |
+| QR pairing Mac app ↔ phone over Wi-Fi | ✅ (campus Wi-Fi blocks mDNS discovery, but direct unicast works) |
+| USB link: adb auto-attach, ticket pushed to the phone, code confirmed | ✅ |
+| 100 MB Mac → phone over USB | ✅ 29.5 MiB/s, SHA-256 identical, saved in Download/Ferry |
+| 100 MB phone → Mac over USB (share/picker) | ✅ SHA-256 identical |
+| First USB pairing attempt saved on the Mac only | ⚠️ not reproduced on retry; watch for it |
+| Wi-Fi throughput benchmark on a network that allows device-to-device traffic | ⏳ |
+
+Android: `android/README.md`. Install over USB: `adb install -r android/app/build/outputs/apk/full/debug/app-full-debug.apk`.

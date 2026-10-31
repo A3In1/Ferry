@@ -13,13 +13,13 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, uniffi::Error)]
 pub enum FerryError {
-    Failed { message: String },
+    Failed { reason: String },
 }
 
 impl std::fmt::Display for FerryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Failed { message } = self;
-        f.write_str(message)
+        let Self::Failed { reason } = self;
+        f.write_str(reason)
     }
 }
 
@@ -28,7 +28,7 @@ impl std::error::Error for FerryError {}
 impl From<anyhow::Error> for FerryError {
     fn from(e: anyhow::Error) -> Self {
         Self::Failed {
-            message: format!("{e:#}"),
+            reason: format!("{e:#}"),
         }
     }
 }
@@ -306,7 +306,13 @@ impl FerryNode {
 
     pub fn usb_links(&self) -> Vec<FfiUsbLink> {
         let links = self.node.usb_links();
-        links.into_iter().map(|l| FfiUsbLink { serial: l.serial, peer_id: l.peer_id }).collect()
+        links
+            .into_iter()
+            .map(|l| FfiUsbLink {
+                serial: l.serial,
+                peer_id: l.peer_id,
+            })
+            .collect()
     }
 
     /// Mac side: open a fresh pairing ticket on the USB phone (no QR scan).

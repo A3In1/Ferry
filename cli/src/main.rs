@@ -62,6 +62,51 @@ enum Cmd {
     },
     /// Create a random file of <gib> GiB (for throughput tests)
     BenchFile { path: PathBuf, gib: f64 },
+    /// Mac side of the USB link: attach phones plugged in via adb, receive until Ctrl-C
+    Usb {
+        #[arg(long, default_value = "received")]
+        dir: PathBuf,
+        #[arg(long)]
+        yes: bool,
+        /// adb binary [default: ANDROID_HOME, Homebrew, PATH]
+        #[arg(long)]
+        adb: Option<PathBuf>,
+    },
+    /// Phone role of the USB link (testing on one machine): bridge listener + receive
+    UsbServe {
+        #[arg(long, default_value_t = ferry_core::usb::USB_PORT)]
+        port: u16,
+        #[arg(long, default_value = "received")]
+        dir: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Attach to a `usb-serve` bridge on 127.0.0.1:<tcp_port> without adb, then receive
+    UsbAttach {
+        tcp_port: u16,
+        #[arg(long, default_value = "received")]
+        dir: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Open a pairing ticket on the USB phone and wait until it pairs
+    UsbPair {
+        /// adb serial [default: the only connected phone]
+        #[arg(long)]
+        serial: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        adb: Option<PathBuf>,
+    },
+}
+
+/// What `listen` does over USB besides receiving.
+enum Usb {
+    Off,
+    Watch(Option<PathBuf>),
+    Serve(u16),
+    Attach(u16),
 }
 
 const MIB: f64 = 1024.0 * 1024.0;
@@ -103,8 +148,23 @@ async fn main() -> Result<()> {
             }
             println!("forgot {id}");
         }
-        Cmd::Listen { dir, yes } => listen(&data_dir, &name, dir, yes, false).await?,
-        Cmd::PairShow { dir, yes } => listen(&data_dir, &name, dir, yes, true).await?,
+        Cmd::Listen { dir, yes } => listen(&data_dir, &name, dir, yes, false, Usb::Off).await?,
+        Cmd::PairShow { dir, yes } => listen(&data_dir, &name, dir, yes, true, Usb::Off).await?,
+        Cmd::Usb { dir, yes, adb } => {
+            listen(&data_dir, &name, dir, yes, false, Usb::Watch(adb)).await?
+        }
+        Cmd::UsbServe { port, dir, yes } => {
+            listen(&data_dir, &name, dir, yes, false, Usb::Serve(port)).await?
+        }
+        Cmd::UsbAttach { tcp_port, dir, yes } => {
+            listen(&data_dir, &name, dir, yes, false, Usb::Attach(tcp_port)).await?
+        }
+        Cmd::UsbPair { serial, yes, adb } => {
+            let node = start(&data_dir, &name, PathBuf::from("received"), yes).await?;
+            let res = usb_pair(&node, serial, adb).await;
+            node.shutdown().await;
+            res?
+        }
         Cmd::Pair { ticket, yes } => {
             let node = start(&data_dir, &name, PathBuf::from("received"), yes).await?;
             let res = node.pair_with_ticket(&ticket, confirm_fn(yes)).await;
@@ -136,6 +196,7 @@ async fn listen(
     dir: PathBuf,
     yes: bool,
     show_ticket: bool,
+    usb: Usb,
 ) -> Result<()> {
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let node = start(data_dir, name, dir.clone(), yes).await?;
@@ -154,10 +215,66 @@ async fn listen(
             .build();
         println!("\n{qr}\n\nPairing ticket (one use, valid 10 min):\n{ticket}\n");
     }
+    let usb_on = !matches!(usb, Usb::Off);
+    match usb {
+        Usb::Off => {}
+        Usb::Watch(adb) => node.usb_watch(adb)?,
+        Usb::Serve(port) => {
+            node.usb_serve(port).await?;
+            println!("USB bridge listening on 127.0.0.1:{port}");
+        }
+        Usb::Attach(port) => {
+            node.usb_attach(port, format!("tcp:{port}")).await?;
+        }
+    }
+    if usb_on {
+        tokio::spawn(print_usb_links(node.clone()));
+    }
     println!("receiving into {} — Ctrl-C to stop", dir.display());
     tokio::signal::ctrl_c().await?;
     node.shutdown().await;
     Ok(())
+}
+
+/// Prints phones (or Macs) as their USB bridges come and go.
+async fn print_usb_links(node: Arc<Node>) {
+    let mut shown: Vec<(String, String)> = Vec::new();
+    loop {
+        let now: Vec<(String, String)> = node
+            .usb_links()
+            .into_iter()
+            .map(|l| (l.serial, l.peer_id))
+            .collect();
+        for (serial, id) in now.iter().filter(|l| !shown.contains(l)) {
+            let name = node.peers().into_iter().find(|p| p.id == *id);
+            let name = name.map_or("unpaired device".into(), |p| p.name);
+            println!("USB attached: {name} ({id}) {serial}");
+        }
+        for (serial, id) in shown.iter().filter(|l| !now.contains(l)) {
+            println!("USB detached: {id} {serial}");
+        }
+        shown = now;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn usb_pair(node: &Arc<Node>, serial: Option<String>, adb: Option<PathBuf>) -> Result<()> {
+    node.usb_watch(adb)?;
+    let before = node.peers();
+    node.usb_push_ticket(serial).await?;
+    println!("pairing ticket opened on the phone — compare the codes on both devices");
+    let t0 = Instant::now();
+    while t0.elapsed() < ferry_core::pairing::TICKET_TTL {
+        if let Some(p) = node.peers().into_iter().find(|p| !before.contains(p)) {
+            println!("paired with {} ({})", p.name, p.id);
+            return Ok(());
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            _ = tokio::signal::ctrl_c() => bail!("cancelled"),
+        }
+    }
+    bail!("the phone did not pair within 10 minutes")
 }
 
 async fn send(data_dir: &Path, name: &str, peer: &str, files: &[PathBuf]) -> Result<()> {
@@ -189,8 +306,13 @@ async fn send(data_dir: &Path, name: &str, peer: &str, files: &[PathBuf]) -> Res
             .find(|p| p.id == id)
             .map(|p| p.last_addrs)
             .unwrap_or_default();
+        // A phone on USB attaches within a second or two; no adb is fine (Wi-Fi only).
+        let _ = node.usb_watch(None);
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_secs(5) {
+            if node.usb_links().iter().any(|l| l.peer_id == id) {
+                break;
+            }
             let now = node
                 .peers()
                 .into_iter()
