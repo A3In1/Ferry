@@ -36,6 +36,41 @@ pub fn match_tag(peers: &[TrustedPeer], nonce: &[u8; 8], tag_: &[u8; 8]) -> Opti
 }
 
 /// [`match_tag`] on raw TXT values (from mdns-sd, Bonjour or NsdManager); junk → None.
+/// Fixed first 4 bytes of a Ferry Bluetooth service UUID: phones scan with this as a mask.
+pub const BLE_PREFIX: [u8; 4] = [0xf3, 0x77, 0xe5, 0x01];
+
+/// Bluetooth presence as a 128-bit service UUID (macOS adverts carry only UUIDs and a name):
+/// prefix (4) + nonce (4) + tag (8). Only paired peers can match it; it rotates with the nonce.
+pub fn ble_uuid(presence_key: &[u8; 32], nonce: &[u8; 8]) -> String {
+    let mut n = [0u8; 8];
+    n[..4].copy_from_slice(&nonce[..4]);
+    let mut u = [0u8; 16];
+    u[..4].copy_from_slice(&BLE_PREFIX);
+    u[4..8].copy_from_slice(&n[..4]);
+    u[8..].copy_from_slice(&tag(presence_key, &n));
+    let h = hex::encode(u);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
+/// Which paired peer (if any) advertised this UUID (any case, with or without dashes).
+pub fn match_ble_uuid(peers: &[TrustedPeer], uuid: &str) -> Option<String> {
+    let mut u = [0u8; 16];
+    hex::decode_to_slice(uuid.replace('-', ""), &mut u).ok()?;
+    if u[..4] != BLE_PREFIX {
+        return None;
+    }
+    let mut n = [0u8; 8];
+    n[..4].copy_from_slice(&u[4..8]);
+    match_tag(peers, &n, u[8..].try_into().ok()?)
+}
+
 pub fn match_txt<'a>(
     peers: &[TrustedPeer],
     get: impl Fn(&str) -> Option<&'a str>,
@@ -165,5 +200,21 @@ mod tests {
             match_txt(&peers, |k| if k == "v" { Some("1") } else { Some("zz") }),
             None
         );
+
+        // Bluetooth UUID: matches its peer in any case/format, never others or foreign UUIDs
+        let u = ble_uuid(&k1, &nonce);
+        assert_eq!(u.len(), 36);
+        assert!(u.starts_with("f377e501-"));
+        assert_eq!(match_ble_uuid(&peers, &u), Some("one".into()));
+        assert_eq!(
+            match_ble_uuid(&peers, &u.to_uppercase().replace('-', "")),
+            Some("one".into())
+        );
+        assert_ne!(ble_uuid(&k1, &[7u8; 8]), u, "rotates with the nonce");
+        assert_eq!(
+            match_ble_uuid(&peers, "0000180f-0000-1000-8000-00805f9b34fb"),
+            None
+        );
+        assert_eq!(match_ble_uuid(&peers, "not a uuid"), None);
     }
 }

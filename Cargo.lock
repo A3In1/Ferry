@@ -863,6 +863,7 @@ dependencies = [
  "async-compat",
  "async-trait",
  "ferry-core",
+ "hex",
  "tokio",
  "uniffi",
 ]

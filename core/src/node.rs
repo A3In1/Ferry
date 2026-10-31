@@ -255,6 +255,17 @@ impl Node {
     }
 
     /// Which paired peer (if any) a natively discovered `_ferry._udp` TXT record belongs to.
+    /// Our Bluetooth presence UUID (advertised by the Mac app); rotates like [`Node::presence_txt`].
+    pub fn presence_ble_uuid(&self) -> String {
+        self.presence_txt(); // rotates the nonce if due
+        discovery::ble_uuid(&self.presence_key, &self.presence_nonce.lock().unwrap().0)
+    }
+
+    /// Which paired peer advertised this Bluetooth service UUID (phone-side scan results).
+    pub fn match_presence_ble(&self, uuid: &str) -> Option<String> {
+        discovery::match_ble_uuid(self.trust.lock().unwrap().list(), uuid)
+    }
+
     pub fn match_presence(&self, txt: &[(String, String)]) -> Option<String> {
         let get = |k: &str| {
             txt.iter()

@@ -518,6 +518,21 @@ impl FerryNode {
         self.node.port()
     }
 
+    /// Bluetooth service UUID to advertise (Mac); rotates every 15 min, so re-read it then.
+    pub fn presence_ble_uuid(&self) -> String {
+        self.node.presence_ble_uuid()
+    }
+
+    /// Paired peer that advertised this Bluetooth service UUID (phone scan results).
+    pub fn match_presence_ble(&self, uuid: String) -> Option<String> {
+        self.node.match_presence_ble(&uuid)
+    }
+
+    /// Fixed first 4 bytes of every Ferry Bluetooth UUID, as hex: the phone's scan-filter mask.
+    pub fn ble_prefix(&self) -> String {
+        hex::encode(ferry_core::discovery::BLE_PREFIX)
+    }
+
     /// Paired peer a natively discovered TXT record belongs to (Android NsdManager).
     pub fn match_presence(&self, txt: Vec<FfiTxt>) -> Option<String> {
         let txt: Vec<(String, String)> = txt.into_iter().map(|t| (t.key, t.value)).collect();
