@@ -1,0 +1,53 @@
+// Ferry wire protocol v1. Field numbers are forever: never reuse or renumber.
+syntax = "proto3";
+package ferry.v1;
+
+// --- Session (ALPN "ferry/1"), control channel ---
+message Hello {
+  uint32 protocol_version = 1;
+  string device_name = 2;
+  repeated uint32 channels = 3; // channel ids this side supports
+}
+
+// --- Pairing (ALPN "ferry/pair/1") ---
+message PairHello {
+  string device_name = 1;
+  bytes proof = 2;        // blake3 keyed hash (key = ticket secret) of the TLS exporter
+  bytes presence_key = 3; // 32 bytes; peer uses it to recognise our mDNS/BLE presence tags
+}
+message PairConfirm {
+  bool accepted = 1; // user confirmed the 6-digit code
+}
+
+// --- File channel ---
+message FileItem {
+  string name = 1;
+  uint64 size = 2;
+  int64 mtime_unix_ms = 3;
+}
+message Offer {
+  bytes transfer_id = 1; // 16 random bytes
+  repeated FileItem items = 2;
+}
+message ItemAccept {
+  bool accepted = 1;
+  uint64 offset = 2; // bytes already held from an earlier attempt (resume)
+}
+message OfferReply {
+  repeated ItemAccept items = 1; // same order as Offer.items
+}
+message DataHeader { // first message on each file data stream, raw bytes follow
+  bytes transfer_id = 1;
+  uint32 index = 2;
+  uint64 offset = 3;
+}
+message ItemDone {
+  uint32 index = 1;
+  bytes blake3 = 2; // hash of the whole file
+}
+message ItemResult {
+  uint32 index = 1;
+  bool ok = 2;
+  string error = 3;
+  string saved_as = 4; // final file name after sanitising and conflict handling
+}

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["proto", "core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+ferry-proto = { path = "proto" }
+ferry-core = { path = "core" }
+iroh = "1.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
+prost = "0.14"
+blake3 = "1.8"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
