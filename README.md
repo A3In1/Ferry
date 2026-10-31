@@ -64,3 +64,17 @@ On one machine, edit the ticket's `a=` to `127.0.0.1:<port>`. Over Wi-Fi, use th
 | Wi-Fi throughput benchmark on a network that allows device-to-device traffic | ⏳ |
 
 Android: `android/README.md`. Install over USB: `adb install -r android/app/build/outputs/apk/full/debug/app-full-debug.apk`.
+
+## Phase 2 status (everyday sync, tested on the vivo V2222 over USB and Wi-Fi)
+
+| Feature | Result |
+|---|---|
+| Phone notifications on the Mac; dismissing on the Mac clears the phone | ✅ (needs macOS notification permission for Ferry) |
+| Find my phone (ring on silent, stop from either side) | ✅ |
+| Clipboard Mac → phone (automatic with sync on, or one-shot) | ✅ |
+| Clipboard phone → Mac | ✅ via in-app button, Quick Settings tile or Share. Android 10+ blocks background clipboard reads; automatic needs a Ferry keyboard (not built) |
+| Links, media controls, battery | ✅ |
+| Cable-free on campus Wi-Fi (mDNS blocked) | ✅ stable ports + addresses exchanged in the handshake + check-in on network change |
+| Battery | idle sessions close after ~30 s; phone discovery/multicast lock 1 min per 15 min; Mac uses `adb track-devices` instead of polling |
+
+vivo notes: app Info logs are hidden (`log.tag=M`), so Kotlin diagnostics use `Log.w`.
