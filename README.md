@@ -78,3 +78,16 @@ Android: `android/README.md`. Install over USB: `adb install -r android/app/buil
 | Battery | idle sessions close after ~30 s; phone discovery/multicast lock 1 min per 15 min; Mac uses `adb track-devices` instead of polling |
 
 vivo notes: app Info logs are hidden (`log.tag=M`), so Kotlin diagnostics use `Log.w`.
+
+## Phase 3 status (Bluetooth, tested on the vivo V2222 with Wi-Fi off and no cable)
+
+| Check | Result |
+|---|---|
+| Phone finds the Mac by its rotating Bluetooth presence UUID (low-power background scan) | ✅ |
+| L2CAP channel carries the same QUIC/TLS session (no second security protocol) | ✅ link up within about a minute of turning Wi-Fi off |
+| Ring, notifications and clipboard over Bluetooth | ✅ |
+| Companion association lets the service start from the background | ✅ granted from the app |
+| Switch back to Wi-Fi when it returns | ⚠️ a live Bluetooth link isn't dropped; Wi-Fi is used again once that link ends |
+| Restart after reboot / force-stop | ⚠️ open the app once to restart the scan |
+| Bridge hello is unauthenticated | ⚠️ a nearby device could knock the link offline (denial of service only: QUIC still authenticates every packet) |
+| Throughput / battery while a Bluetooth link idles | ⏳ not measured |
