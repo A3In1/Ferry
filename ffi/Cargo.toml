@@ -1,0 +1,28 @@
+[package]
+name = "ferry-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ferry_ffi"
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+# Kept out of the default build so the staticlib doesn't bundle clap/askama.
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+ferry-core.workspace = true
+anyhow.workspace = true
+uniffi = { version = "=0.32.2", features = ["tokio"] }
+# uniffi's `tokio` runtime goes through async-compat; `multi-thread` makes tasks the core
+# spawns (accept loop, transfers) run on a multi-threaded tokio pool instead of one thread.
+async-compat = { version = "0.2.6", features = ["multi-thread"] }
+# Required by uniffi for foreign traits with async methods.
+async-trait = "0.1"

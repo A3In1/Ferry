@@ -1,0 +1,4 @@
+.build/
+build/
+Frameworks/
+Sources/FerryCore/FerryCore.swift

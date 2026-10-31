@@ -1,0 +1,7 @@
+# Names chosen to match the Swift package targets in mac/Package.swift.
+[bindings.swift]
+module_name = "FerryCore"
+ffi_module_name = "FerryCoreFFI"
+
+[bindings.kotlin]
+package_name = "dev.ferry.core"
