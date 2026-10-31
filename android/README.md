@@ -1,4 +1,4 @@
-# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth)
+# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth · Phase 4: screen)
 
 Compose app over the shared Rust core (`ffi/`, UniFFI → Kotlin package `dev.ferry.core`, via JNA).
 Application id `dev.ferry.android` in both flavors (`play`, `full`; identical for now).
@@ -144,3 +144,39 @@ advertising nearby. Undo it in Settings → Connected devices / Apps → Special
    A force-stop (Settings, or an OEM battery manager) cancels the scan until the app is opened again.
 6. Wi-Fi back on: a Bluetooth bridge stays up until the link drops (NSD discovery keeps running alongside);
    after that, scan hits check in over Wi-Fi again.
+
+## Phase 4: screen mirroring, control, cursor crossing
+
+Protocol: [`docs/screen-protocol.md`](../docs/screen-protocol.md) (FSP1 over the core's `CH_SCREEN` stream).
+Code: `app/src/main/java/dev/ferry/android/screen/` (`Fsp.kt` codec, `Screen.kt` session + consent,
+`Capture.kt` encoder, `Control.kt` Accessibility service). Logs: `adb logcat -s FerryScreen` (all at warn; vivo hides info).
+
+- **Mirroring** needs no setup. When the Mac asks (START with video), Android's "Start now" dialog appears; if
+  Android won't show it from the background, a **Tap to share your screen with <Mac>** notification opens it.
+  Only *entire screen* is offered (Android 14+). Capture stops when the screen turns off (END 2), when you stop it
+  from Android's capture indicator, or with **Stop** on the "<Mac> is connected to your screen" notification (END 1).
+  While capturing, the service also runs with the `mediaProjection` foreground type. Video is refused over a
+  Bluetooth-only link; control-only still works there. A locked phone refuses START (END 2).
+- **Control** (and cursor crossing) needs **Ferry control**: Ferry → Screen & control → **Turn on Ferry control**
+  opens Accessibility settings → Installed apps / Downloaded apps → Ferry control → on. Off by default. While off,
+  INFO has no control bit, input is ignored, and a control-only START is answered with END 3 "turn on Ferry control".
+  Sideloaded from a browser/file manager, Android 13+ greys it out: Settings → Apps → Ferry → ⋮ → Allow restricted settings.
+- Mapping: TOUCH → gestures (a press that never moves past touch slop is a tap on up, held time kept, so long press
+  works; drags are continued strokes as they arrive); SCROLL → a 120 ms swipe at the point (1 wheel unit ≈ 20 dp);
+  NAV → Back/Home/Recents/Notifications; TEXT → appended to the focused field (`ACTION_SET_TEXT`); KEY 67 deletes the
+  last character, KEY 66 is the IME enter action (Android 11+; older: newline in multi-line fields); CURSOR → an
+  arrow overlay, down/up at the cursor are a tap or drag. One session at a time: a new one replaces the old.
+
+### Test on the phone (needs the Mac viewer)
+
+1. Install, open Ferry, pair (as above). Wi-Fi or USB.
+2. Mirroring: start mirroring on the Mac → tap **Start now** (or the notification first). The Mac shows the screen;
+   the phone shows Android's capture indicator and "<Mac> is connected to your screen". Rotate the phone: the Mac
+   view re-sizes within a second. Press the power button: mirroring ends ("phone locked").
+3. Control: turn on Ferry control, start mirroring again. Click = tap, click-hold = long press, drag = swipe/drag,
+   wheel = scroll, type into a focused text field, Backspace/Return, the Mac's Back/Home/Recents buttons.
+4. Cursor crossing: move the Mac pointer off its screen edge toward the phone → an arrow appears on the phone and
+   clicks tap under it. Turn Ferry control off → the Mac is told "turn on Ferry control" and nothing happens on the phone.
+5. **Stop** in the "connected to your screen" notification ends the session from the phone (END 1).
+6. Logs: `adb logcat -s FerryScreen` shows `START video=… control=…`, `encoding WxH for screen WxH`, and `end <reason> …`.
+

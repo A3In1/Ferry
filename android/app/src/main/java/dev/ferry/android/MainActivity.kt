@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import dev.ferry.android.screen.ControlService
 import dev.ferry.core.FfiPeer
 import dev.ferry.core.coreVersion
 import kotlinx.coroutines.Dispatchers
@@ -267,6 +268,8 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, li
 
             GrantsSection(listenerOn)
 
+            if (peers.isNotEmpty()) ScreenSection()
+
             if (recent.isNotEmpty()) {
                 Text("Recent", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
                 recent.forEach { Text(it.text, style = MaterialTheme.typography.bodyMedium) }
@@ -328,6 +331,21 @@ private fun GrantsSection(listenerOn: Boolean) {
             Text(if (listenerOn) "Notification access: on" else "Allow notification access")
         }
         TextButton(onClick = { Grants.allOff(ctx) }, enabled = on.isNotEmpty()) { Text("Turn all off") }
+    }
+}
+
+/** Mirroring needs no setup (Android asks each time); control needs the Accessibility service. */
+@Composable
+private fun ScreenSection() {
+    val ctx = LocalContext.current
+    val control by ControlService.instance.collectAsStateWithLifecycle()
+    Text("Screen & control", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+    Text(
+        "Your Mac can mirror this screen after you tap Start now here each time. Turn on Ferry control to also tap, scroll and type from the Mac.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    OutlinedButton(onClick = { ControlService.openSettings(ctx) }) {
+        Text(if (control != null) "Ferry control: on" else "Turn on Ferry control")
     }
 }
 

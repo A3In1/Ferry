@@ -20,6 +20,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import dev.ferry.android.screen.Fsp
+import dev.ferry.android.screen.Screen
 import dev.ferry.core.FerryNode
 import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiPeer
@@ -43,6 +45,7 @@ class FerryService : Service() {
     private var presence: NsdPresence? = null
     private var notification: Notification? = null
     private var battery: FfiEvent.Battery? = null
+    private var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
 
     private val batteryChanged = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, i: Intent) {
@@ -97,6 +100,7 @@ class FerryService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         goForeground(ongoing("Ferry is starting", ""))
         // System broadcast: NOT_EXPORTED is fine (and required for runtime receivers on 34+).
         ContextCompat.registerReceiver(this, batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -119,6 +123,8 @@ class FerryService : Service() {
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
+        Screen.stop(Fsp.END_STOPPED, "Ferry stopped on the phone")
         job?.cancel()
         unregisterReceiver(batteryChanged)
         unregisterReceiver(bluetoothChanged)
@@ -201,7 +207,13 @@ class FerryService : Service() {
 
     private fun goForeground(n: Notification) {
         notification = n
-        ServiceCompat.startForeground(this, Notifs.ID_ONGOING, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        ServiceCompat.startForeground(this, Notifs.ID_ONGOING, n, types)
+    }
+
+    /** Adds/drops the mediaProjection type; add it after consent and before getMediaProjection (Android 14+). */
+    fun projecting(on: Boolean) {
+        types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or (if (on) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0)
+        notification?.let(::goForeground)
     }
 
     /** The visible indicator of what's shared: the active grants are always listed here. */
@@ -233,6 +245,8 @@ class FerryService : Service() {
 
     companion object {
         private const val ACTION_STOP = "dev.ferry.android.STOP"
+
+        @Volatile var instance: FerryService? = null
 
         fun start(ctx: Context) = ContextCompat.startForegroundService(ctx, Intent(ctx, FerryService::class.java))
     }

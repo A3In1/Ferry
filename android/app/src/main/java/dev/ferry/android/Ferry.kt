@@ -7,12 +7,14 @@ import android.provider.OpenableColumns
 import android.text.format.Formatter
 import android.util.Log
 import android.widget.Toast
+import dev.ferry.android.screen.Screen
 import dev.ferry.core.FerryDelegate
 import dev.ferry.core.FerryNode
 import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiFileEvent
 import dev.ferry.core.FfiPeer
 import dev.ferry.core.FfiSource
+import dev.ferry.core.ScreenStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -123,7 +125,7 @@ object Ferry {
     fun send(ctx: Context, peer: FfiPeer, files: List<Source>) {
         val app = ctx.applicationContext
         if (files.isEmpty()) return toast(app, "Couldn't open the selected files")
-        if (ble.value == peer.id && peer.id !in nearby.value) toast(app, "Connected over Bluetooth — large files are slow; join the same Wi-Fi")
+        if (bluetoothOnly(peer.id)) toast(app, "Connected over Bluetooth — large files are slow; join the same Wi-Fi")
         scope.launch {
             try {
                 val node = awaitNode() ?: error("Ferry isn't running")
@@ -168,6 +170,9 @@ object Ferry {
         }
     }
 
+    /** Reached only through the Bluetooth bridge (no Wi-Fi presence). */
+    fun bluetoothOnly(peerId: String) = ble.value == peerId && peerId !in nearby.value
+
     fun toast(ctx: Context, text: String) {
         scope.launch(Dispatchers.Main) { Toast.makeText(ctx.applicationContext, text, Toast.LENGTH_LONG).show() }
     }
@@ -200,6 +205,8 @@ class Bridge(private val ctx: Context) : FerryDelegate {
             is FfiEvent.Notification, is FfiEvent.NotificationRemoved, is FfiEvent.NowPlaying, is FfiEvent.Battery -> {}
         }
     }
+
+    override fun onScreenStream(peerId: String, stream: ScreenStream) = Screen.open(ctx, peerId, stream)
 
     override suspend fun confirmPairing(peerName: String, code: String): Boolean {
         val p = PairPrompt(peerName, code)
