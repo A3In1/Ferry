@@ -65,7 +65,13 @@ async fn harness(accept: AcceptFn) -> Harness {
     });
     let addr = EndpointAddr::new(server.id()).with_ip_addr(server.bound_sockets()[0]);
     let conn = client.connect(addr, ALPN_SESSION).await.unwrap();
-    Harness { conn, dest, src: TempDir::new().unwrap(), events, _endpoints: (server, client) }
+    Harness {
+        conn,
+        dest,
+        src: TempDir::new().unwrap(),
+        events,
+        _endpoints: (server, client),
+    }
 }
 
 fn accept_all() -> AcceptFn {
@@ -126,11 +132,20 @@ async fn sends_big_and_many_small_files() {
     assert_eq!(fs::read(h.dest.path().join("big.bin")).unwrap(), big);
     assert_eq!(fs::read(h.dest.path().join("empty.txt")).unwrap(), b"");
     for (i, data) in small.iter().enumerate() {
-        assert_eq!(&fs::read(h.dest.path().join(format!("small-{i:03}.dat"))).unwrap(), data);
+        assert_eq!(
+            &fs::read(h.dest.path().join(format!("small-{i:03}.dat"))).unwrap(),
+            data
+        );
     }
     assert_eq!(h.dest_files().len(), 502);
     assert_eq!(h.partials(), 0);
-    let saved = h.events.lock().unwrap().iter().filter(|e| matches!(e, FileEvent::Saved { .. })).count();
+    let saved = h
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, FileEvent::Saved { .. }))
+        .count();
     assert_eq!(saved, 502);
 }
 
@@ -141,9 +156,18 @@ async fn name_conflict_keeps_both() {
     let p = h.write_src("photo.jpg", b"incoming");
     h.send(std::slice::from_ref(&p)).await.unwrap();
     h.send(std::slice::from_ref(&p)).await.unwrap();
-    assert_eq!(h.dest_files(), ["photo (1).jpg", "photo (2).jpg", "photo.jpg"]);
-    assert_eq!(fs::read(h.dest.path().join("photo.jpg")).unwrap(), b"user's own file");
-    assert_eq!(fs::read(h.dest.path().join("photo (2).jpg")).unwrap(), b"incoming");
+    assert_eq!(
+        h.dest_files(),
+        ["photo (1).jpg", "photo (2).jpg", "photo.jpg"]
+    );
+    assert_eq!(
+        fs::read(h.dest.path().join("photo.jpg")).unwrap(),
+        b"user's own file"
+    );
+    assert_eq!(
+        fs::read(h.dest.path().join("photo (2).jpg")).unwrap(),
+        b"incoming"
+    );
 }
 
 #[tokio::test]
@@ -176,7 +200,13 @@ async fn corrupt_partial_fails_then_restarts() {
     assert!(format!("{err:#}").contains("BLAKE3 mismatch"), "{err:#}");
     assert!(!part.exists());
     assert!(h.dest_files().is_empty());
-    assert!(h.events.lock().unwrap().iter().any(|e| matches!(e, FileEvent::Failed { .. })));
+    assert!(
+        h.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, FileEvent::Failed { .. }))
+    );
 
     let report = h.send(&[p]).await.unwrap();
     assert_eq!(report.bytes_sent, data.len() as u64);
@@ -185,8 +215,17 @@ async fn corrupt_partial_fails_then_restarts() {
 
 #[tokio::test]
 async fn declined_items_are_not_sent() {
-    let h = harness(Arc::new(|o: &Offer| o.items.iter().map(|i| !i.name.starts_with("skip")).collect())).await;
-    let paths = [h.write_src("keep.txt", b"keep"), h.write_src("skip.bin", &random_bytes(100_000))];
+    let h = harness(Arc::new(|o: &Offer| {
+        o.items
+            .iter()
+            .map(|i| !i.name.starts_with("skip"))
+            .collect()
+    }))
+    .await;
+    let paths = [
+        h.write_src("keep.txt", b"keep"),
+        h.write_src("skip.bin", &random_bytes(100_000)),
+    ];
     let report = h.send(&paths).await.unwrap();
     assert_eq!((report.files_sent, report.bytes_sent), (1, 4));
     assert_eq!(h.dest_files(), ["keep.txt"]);
@@ -207,8 +246,20 @@ async fn hostile_sender_stays_inside_dest() {
     let id = [7u8; 16];
     let (mut send, mut recv) = h.conn.open_bi().await.unwrap();
     write_prefix(&mut send, CH_FILE).await.unwrap();
-    let item = FileItem { name: "../../etc/passwd".into(), size: body.len() as u64, mtime_unix_ms: 0 };
-    write_msg(&mut send, &Offer { transfer_id: id.to_vec(), items: vec![item] }).await.unwrap();
+    let item = FileItem {
+        name: "../../etc/passwd".into(),
+        size: body.len() as u64,
+        mtime_unix_ms: 0,
+    };
+    write_msg(
+        &mut send,
+        &Offer {
+            transfer_id: id.to_vec(),
+            items: vec![item],
+        },
+    )
+    .await
+    .unwrap();
     let reply: OfferReply = read_msg(&mut recv).await.unwrap();
     assert!(reply.items[0].accepted);
 
@@ -216,17 +267,43 @@ async fn hostile_sender_stays_inside_dest() {
     for (index, offset) in [(0, 5), (3, 0)] {
         let mut s = h.conn.open_uni().await.unwrap();
         write_prefix(&mut s, CH_FILE).await.unwrap();
-        write_msg(&mut s, &DataHeader { transfer_id: id.to_vec(), index, offset }).await.unwrap();
+        write_msg(
+            &mut s,
+            &DataHeader {
+                transfer_id: id.to_vec(),
+                index,
+                offset,
+            },
+        )
+        .await
+        .unwrap();
         s.write_all(&body).await.unwrap();
         s.finish().unwrap();
     }
     let mut s = h.conn.open_uni().await.unwrap();
     write_prefix(&mut s, CH_FILE).await.unwrap();
-    write_msg(&mut s, &DataHeader { transfer_id: id.to_vec(), index: 0, offset: 0 }).await.unwrap();
+    write_msg(
+        &mut s,
+        &DataHeader {
+            transfer_id: id.to_vec(),
+            index: 0,
+            offset: 0,
+        },
+    )
+    .await
+    .unwrap();
     s.write_all(&body).await.unwrap();
     s.finish().unwrap();
     let hash = blake3::hash(&body);
-    write_msg(&mut send, &ItemDone { index: 0, blake3: hash.as_bytes().to_vec() }).await.unwrap();
+    write_msg(
+        &mut send,
+        &ItemDone {
+            index: 0,
+            blake3: hash.as_bytes().to_vec(),
+        },
+    )
+    .await
+    .unwrap();
     let result: ItemResult = read_msg(&mut recv).await.unwrap();
     assert!(result.ok, "{}", result.error);
     assert_eq!(result.saved_as, "passwd");
@@ -236,7 +313,15 @@ async fn hostile_sender_stays_inside_dest() {
     // A malformed transfer id is rejected outright.
     let (mut send, mut recv) = h.conn.open_bi().await.unwrap();
     write_prefix(&mut send, CH_FILE).await.unwrap();
-    write_msg(&mut send, &Offer { transfer_id: vec![1, 2, 3], items: vec![] }).await.unwrap();
+    write_msg(
+        &mut send,
+        &Offer {
+            transfer_id: vec![1, 2, 3],
+            items: vec![],
+        },
+    )
+    .await
+    .unwrap();
     assert!(read_msg::<_, OfferReply>(&mut recv).await.is_err());
 }
 
@@ -246,10 +331,15 @@ async fn hostile_sender_stays_inside_dest() {
 async fn small_files_throughput() {
     let h = harness(accept_all()).await;
     let bulk = h.write_src("bulk.bin", &random_bytes(250 << 20));
-    let small: Vec<PathBuf> = (0..5000).map(|i| h.write_src(&format!("s{i}"), &random_bytes(50_000))).collect();
+    let small: Vec<PathBuf> = (0..5000)
+        .map(|i| h.write_src(&format!("s{i}"), &random_bytes(50_000)))
+        .collect();
     let rate = |r: SendReport| r.bytes_sent as f64 / r.elapsed.as_secs_f64() / 1e6;
     let bulk_rate = rate(h.send(&[bulk]).await.unwrap());
     let small_rate = rate(h.send(&small).await.unwrap());
-    println!("bulk {bulk_rate:.0} MB/s, 5000x50KB {small_rate:.0} MB/s ({:.0}%)", 100.0 * small_rate / bulk_rate);
+    println!(
+        "bulk {bulk_rate:.0} MB/s, 5000x50KB {small_rate:.0} MB/s ({:.0}%)",
+        100.0 * small_rate / bulk_rate
+    );
     assert!(small_rate >= 0.6 * bulk_rate);
 }

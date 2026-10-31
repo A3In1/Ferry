@@ -29,10 +29,27 @@ use crate::sanitize;
 /// Progress and results, for CLI output and app UI.
 #[derive(Debug, Clone)]
 pub enum FileEvent {
-    Offered { transfer_id: [u8; 16], names: Vec<String>, total_bytes: u64 },
-    Progress { transfer_id: [u8; 16], index: u32, done: u64, total: u64 },
-    Saved { transfer_id: [u8; 16], index: u32, path: PathBuf },
-    Failed { transfer_id: [u8; 16], index: u32, error: String },
+    Offered {
+        transfer_id: [u8; 16],
+        names: Vec<String>,
+        total_bytes: u64,
+    },
+    Progress {
+        transfer_id: [u8; 16],
+        index: u32,
+        done: u64,
+        total: u64,
+    },
+    Saved {
+        transfer_id: [u8; 16],
+        index: u32,
+        path: PathBuf,
+    },
+    Failed {
+        transfer_id: [u8; 16],
+        index: u32,
+        error: String,
+    },
 }
 
 pub type EventSink = Arc<dyn Fn(FileEvent) + Send + Sync>;
@@ -119,23 +136,43 @@ impl Drop for Registered {
 
 impl Receiver {
     pub fn new(dest_dir: PathBuf, accept: AcceptFn, events: EventSink) -> Arc<Self> {
-        Arc::new(Self { dest_dir, accept, events, state: Mutex::default(), parts_in_use: PartsInUse::default() })
+        Arc::new(Self {
+            dest_dir,
+            accept,
+            events,
+            state: Mutex::default(),
+            parts_in_use: PartsInUse::default(),
+        })
     }
 
     /// Handle a CH_FILE bi stream (prefix already consumed by the node).
-    pub async fn handle_control(self: Arc<Self>, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+    pub async fn handle_control(
+        self: Arc<Self>,
+        mut send: SendStream,
+        mut recv: RecvStream,
+    ) -> Result<()> {
         let offer: Offer = read_msg(&mut recv).await.context("read offer")?;
         let id = transfer_id(&offer.transfer_id)?;
         if offer.items.len() > MAX_ITEMS {
-            bail!("offer has {} items, limit is {MAX_ITEMS}", offer.items.len());
+            bail!(
+                "offer has {} items, limit is {MAX_ITEMS}",
+                offer.items.len()
+            );
         }
         if offer.items.iter().any(|i| i.name.len() > MAX_NAME_LEN) {
             bail!("offer contains a file name longer than {MAX_NAME_LEN} bytes");
         }
         (self.events)(FileEvent::Offered {
             transfer_id: id,
-            names: offer.items.iter().map(|i| sanitize::file_name(&i.name)).collect(),
-            total_bytes: offer.items.iter().fold(0u64, |a, i| a.saturating_add(i.size)),
+            names: offer
+                .items
+                .iter()
+                .map(|i| sanitize::file_name(&i.name))
+                .collect(),
+            total_bytes: offer
+                .items
+                .iter()
+                .fold(0u64, |a, i| a.saturating_add(i.size)),
         });
 
         // The accept callback may block on a UI prompt; preparing touches the disk.
@@ -149,7 +186,10 @@ impl Receiver {
 
         let reply = OfferReply {
             items: (transfer.slots.iter())
-                .map(|s| ItemAccept { accepted: s.is_some(), offset: s.as_ref().map_or(0, |s| s.offset) })
+                .map(|s| ItemAccept {
+                    accepted: s.is_some(),
+                    offset: s.as_ref().map_or(0, |s| s.offset),
+                })
                 .collect(),
         };
         write_msg(&mut send, &reply).await?;
@@ -157,23 +197,49 @@ impl Receiver {
         let mut finished = vec![false; transfer.slots.len()];
         let mut pending = transfer.slots.iter().flatten().count();
         while pending > 0 {
-            let done: ItemDone = read_msg(&mut recv).await.context("control stream ended with items unfinished")?;
+            let done: ItemDone = read_msg(&mut recv)
+                .await
+                .context("control stream ended with items unfinished")?;
             let i = done.index as usize;
-            let Some(Some(slot)) = transfer.slots.get(i) else { bail!("ItemDone for unknown or declined item {i}") };
+            let Some(Some(slot)) = transfer.slots.get(i) else {
+                bail!("ItemDone for unknown or declined item {i}")
+            };
             if std::mem::replace(&mut finished[i], true) {
                 bail!("duplicate ItemDone for item {i}");
             }
             pending -= 1;
             let result = match self.finish_item(slot, &done.blake3, &send).await {
                 Ok(path) => {
-                    let saved_as = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    (self.events)(FileEvent::Saved { transfer_id: id, index: done.index, path });
-                    ItemResult { index: done.index, ok: true, error: String::new(), saved_as }
+                    let saved_as = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    (self.events)(FileEvent::Saved {
+                        transfer_id: id,
+                        index: done.index,
+                        path,
+                    });
+                    ItemResult {
+                        index: done.index,
+                        ok: true,
+                        error: String::new(),
+                        saved_as,
+                    }
                 }
                 Err(e) => {
                     let error = format!("{e:#}");
-                    (self.events)(FileEvent::Failed { transfer_id: id, index: done.index, error: error.clone() });
-                    ItemResult { index: done.index, ok: false, error, saved_as: String::new() }
+                    (self.events)(FileEvent::Failed {
+                        transfer_id: id,
+                        index: done.index,
+                        error: error.clone(),
+                    });
+                    ItemResult {
+                        index: done.index,
+                        ok: false,
+                        error,
+                        saved_as: String::new(),
+                    }
                 }
             };
             write_msg(&mut send, &result).await?;
@@ -186,12 +252,24 @@ impl Receiver {
     pub async fn handle_data(self: Arc<Self>, mut recv: RecvStream) -> Result<()> {
         let h: DataHeader = read_msg(&mut recv).await.context("read data header")?;
         let id = transfer_id(&h.transfer_id)?;
-        let transfer = self.state.lock().unwrap().transfers.get(&id).cloned().context("data for unknown transfer")?;
+        let transfer = self
+            .state
+            .lock()
+            .unwrap()
+            .transfers
+            .get(&id)
+            .cloned()
+            .context("data for unknown transfer")?;
         let Some(Some(slot)) = transfer.slots.get(h.index as usize) else {
             bail!("data for unknown or declined item {}", h.index)
         };
         if h.offset != slot.offset {
-            bail!("data for item {} starts at {}, expected {}", h.index, h.offset, slot.offset);
+            bail!(
+                "data for item {} starts at {}, expected {}",
+                h.index,
+                h.offset,
+                slot.offset
+            );
         }
         let claimed = slot.data.send_if_modified(|d| match d {
             Data::Waiting => {
@@ -204,21 +282,32 @@ impl Receiver {
             bail!("second data stream for item {}", h.index);
         }
         let res = self.receive(id, h.index, slot, &mut recv).await;
-        slot.data.send_replace(Data::Done(res.as_ref().map(|h| *h).map_err(|e| format!("{e:#}"))));
+        slot.data.send_replace(Data::Done(
+            res.as_ref().map(|h| *h).map_err(|e| format!("{e:#}")),
+        ));
         res.map(drop)
     }
 
     /// Chooses partial files and resume offsets, then registers the transfer.
-    fn prepare(&self, id: [u8; 16], items: Vec<FileItem>, accepted: &[bool]) -> Result<Arc<Transfer>> {
+    fn prepare(
+        &self,
+        id: [u8; 16],
+        items: Vec<FileItem>,
+        accepted: &[bool],
+    ) -> Result<Arc<Transfer>> {
         let partial_dir = self.dest_dir.join(PARTIAL_DIR);
         if accepted.iter().any(|&a| a) {
-            fs::create_dir_all(&partial_dir).with_context(|| format!("create {}", partial_dir.display()))?;
+            fs::create_dir_all(&partial_dir)
+                .with_context(|| format!("create {}", partial_dir.display()))?;
         }
         if self.state.lock().unwrap().transfers.contains_key(&id) {
             bail!("transfer {} is already in progress", hex::encode(id));
         }
-        let mut transfer =
-            Transfer { id, slots: Vec::with_capacity(items.len()), parts_in_use: self.parts_in_use.clone() };
+        let mut transfer = Transfer {
+            id,
+            slots: Vec::with_capacity(items.len()),
+            parts_in_use: self.parts_in_use.clone(),
+        };
         for (i, item) in items.into_iter().enumerate() {
             if !accepted.get(i).copied().unwrap_or(false) {
                 transfer.slots.push(None);
@@ -229,8 +318,14 @@ impl Receiver {
                 partial_dir.join(format!("{}-{i}.part", hex::encode(id)))
             });
             // A partial longer than the file can't be a prefix of it; receive() truncates it.
-            let offset = fs::metadata(&part).map_or(0, |m| if m.len() <= item.size { m.len() } else { 0 });
-            transfer.slots.push(Some(Slot { item, offset, part, data: watch::Sender::new(Data::Waiting) }));
+            let offset =
+                fs::metadata(&part).map_or(0, |m| if m.len() <= item.size { m.len() } else { 0 });
+            transfer.slots.push(Some(Slot {
+                item,
+                offset,
+                part,
+                data: watch::Sender::new(Data::Waiting),
+            }));
         }
         let transfer = Arc::new(transfer);
         let mut st = self.state.lock().unwrap();
@@ -262,7 +357,13 @@ impl Receiver {
     }
 
     /// Appends the stream to the partial file; returns the hash of the whole file.
-    async fn receive(&self, id: [u8; 16], index: u32, slot: &Slot, recv: &mut RecvStream) -> Result<blake3::Hash> {
+    async fn receive(
+        &self,
+        id: [u8; 16],
+        index: u32,
+        slot: &Slot,
+        recv: &mut RecvStream,
+    ) -> Result<blake3::Hash> {
         let size = slot.item.size;
         let mut file = tokio::fs::OpenOptions::new()
             .read(true)
@@ -300,14 +401,21 @@ impl Receiver {
     }
 
     /// Waits for the item's data, verifies it and moves it to its final name.
-    async fn finish_item(&self, slot: &Slot, expected: &[u8], send: &SendStream) -> Result<PathBuf> {
+    async fn finish_item(
+        &self,
+        slot: &Slot,
+        expected: &[u8],
+        send: &SendStream,
+    ) -> Result<PathBuf> {
         let mut rx = slot.data.subscribe();
         // The data stream may still be in flight; give up if the connection dies first.
         let data = tokio::select! {
             d = rx.wait_for(|d| matches!(d, Data::Done(_))) => d.map(|d| d.clone())?,
             _ = send.stopped() => bail!("connection lost before data arrived"),
         };
-        let Data::Done(hash) = data else { unreachable!() };
+        let Data::Done(hash) = data else {
+            unreachable!()
+        };
         let hash = hash.map_err(|e| anyhow!(e))?;
         if hash.as_bytes()[..] != *expected {
             // Start from zero next time instead of resuming from bad bytes.
@@ -315,25 +423,59 @@ impl Receiver {
             bail!("BLAKE3 mismatch, partial data discarded");
         }
         let (part, dir) = (slot.part.clone(), self.dest_dir.clone());
-        let (name, mtime) = (sanitize::file_name(&slot.item.name), slot.item.mtime_unix_ms);
+        let (name, mtime) = (
+            sanitize::file_name(&slot.item.name),
+            slot.item.mtime_unix_ms,
+        );
         tokio::task::spawn_blocking(move || place(&part, &dir, &name, mtime)).await?
     }
 }
 
 /// Send `paths` (regular files only) over an established session connection.
-pub async fn send_files(conn: &Connection, paths: &[PathBuf], events: EventSink) -> Result<SendReport> {
+pub async fn send_files(
+    conn: &Connection,
+    paths: &[PathBuf],
+    events: EventSink,
+) -> Result<SendReport> {
+    let files: Vec<(PathBuf, Option<String>)> = paths.iter().map(|p| (p.clone(), None)).collect();
+    send_named(conn, &files, events).await
+}
+
+/// Like [`send_files`], with an optional display name per file. Android passes shared
+/// `content://` files as `/proc/self/fd/N`, whose own name means nothing to the receiver.
+pub async fn send_named(
+    conn: &Connection,
+    files: &[(PathBuf, Option<String>)],
+    events: EventSink,
+) -> Result<SendReport> {
     let start = Instant::now();
-    let mut items = Vec::with_capacity(paths.len());
-    for p in paths {
-        items.push(file_item(p).await?);
+    let paths: Vec<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
+    let mut items = Vec::with_capacity(files.len());
+    for (p, name) in files {
+        let mut item = file_item(p).await?;
+        if let Some(n) = name {
+            item.name = n.clone();
+        }
+        items.push(item);
     }
     let id: [u8; 16] = rand::random();
     let (mut send, mut recv) = conn.open_bi().await?;
     write_prefix(&mut send, CH_FILE).await?;
-    write_msg(&mut send, &Offer { transfer_id: id.to_vec(), items: items.clone() }).await?;
+    write_msg(
+        &mut send,
+        &Offer {
+            transfer_id: id.to_vec(),
+            items: items.clone(),
+        },
+    )
+    .await?;
     let reply: OfferReply = read_msg(&mut recv).await.context("read offer reply")?;
     if reply.items.len() != items.len() {
-        bail!("peer replied for {} items, offered {}", reply.items.len(), items.len());
+        bail!(
+            "peer replied for {} items, offered {}",
+            reply.items.len(),
+            items.len()
+        );
     }
     let mut accepted = Vec::new();
     for (i, a) in reply.items.iter().enumerate().filter(|(_, a)| a.accepted) {
@@ -349,14 +491,33 @@ pub async fn send_files(conn: &Connection, paths: &[PathBuf], events: EventSink)
         let mut bytes = 0;
         loop {
             while tasks.len() < PARALLEL_STREAMS {
-                let Some(&(i, offset)) = queue.next() else { break };
-                let job = (conn.clone(), paths[i].clone(), id, i as u32, offset, items[i].size, events.clone());
+                let Some(&(i, offset)) = queue.next() else {
+                    break;
+                };
+                let job = (
+                    conn.clone(),
+                    paths[i].clone(),
+                    id,
+                    i as u32,
+                    offset,
+                    items[i].size,
+                    events.clone(),
+                );
                 tasks.spawn(send_item(job));
             }
-            let Some(joined) = tasks.join_next().await else { break };
+            let Some(joined) = tasks.join_next().await else {
+                break;
+            };
             let (index, hash, n) = joined??;
             bytes += n;
-            write_msg(&mut send, &ItemDone { index, blake3: hash.as_bytes().to_vec() }).await?;
+            write_msg(
+                &mut send,
+                &ItemDone {
+                    index,
+                    blake3: hash.as_bytes().to_vec(),
+                },
+            )
+            .await?;
         }
         anyhow::Ok(bytes)
     };
@@ -369,10 +530,18 @@ pub async fn send_files(conn: &Connection, paths: &[PathBuf], events: EventSink)
             }
             if r.ok {
                 ok += 1;
-                (events)(FileEvent::Saved { transfer_id: id, index: r.index, path: r.saved_as.into() });
+                (events)(FileEvent::Saved {
+                    transfer_id: id,
+                    index: r.index,
+                    path: r.saved_as.into(),
+                });
             } else {
                 failed.push(format!("{}: {}", items[r.index as usize].name, r.error));
-                (events)(FileEvent::Failed { transfer_id: id, index: r.index, error: r.error });
+                (events)(FileEvent::Failed {
+                    transfer_id: id,
+                    index: r.index,
+                    error: r.error,
+                });
             }
         }
         anyhow::Ok((ok, failed))
@@ -380,23 +549,44 @@ pub async fn send_files(conn: &Connection, paths: &[PathBuf], events: EventSink)
     let (bytes_sent, (files_sent, failed)) = tokio::try_join!(data, results)?;
     let _ = send.finish();
     if !failed.is_empty() {
-        bail!("{} of {} files failed: {}", failed.len(), accepted.len(), failed.join("; "));
+        bail!(
+            "{} of {} files failed: {}",
+            failed.len(),
+            accepted.len(),
+            failed.join("; ")
+        );
     }
-    Ok(SendReport { files_sent, bytes_sent, elapsed: start.elapsed() })
+    Ok(SendReport {
+        files_sent,
+        bytes_sent,
+        elapsed: start.elapsed(),
+    })
 }
 
 type SendJob = (Connection, PathBuf, [u8; 16], u32, u64, u64, EventSink);
 
 /// Streams one file from `offset`; returns (index, whole-file hash, bytes sent).
-async fn send_item((conn, path, id, index, offset, size, events): SendJob) -> Result<(u32, blake3::Hash, u64)> {
-    let mut file = tokio::fs::File::open(&path).await.with_context(|| format!("open {}", path.display()))?;
+async fn send_item(
+    (conn, path, id, index, offset, size, events): SendJob,
+) -> Result<(u32, blake3::Hash, u64)> {
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .with_context(|| format!("open {}", path.display()))?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; chunk_len(size)];
     hash_prefix(&mut file, offset, &mut hasher, &mut buf).await?;
 
     let mut s = conn.open_uni().await?;
     write_prefix(&mut s, CH_FILE).await?;
-    write_msg(&mut s, &DataHeader { transfer_id: id.to_vec(), index, offset }).await?;
+    write_msg(
+        &mut s,
+        &DataHeader {
+            transfer_id: id.to_vec(),
+            index,
+            offset,
+        },
+    )
+    .await?;
     let mut progress = Progress::new(&events, id, index, size);
     let mut done = offset;
     while done < size {
@@ -416,15 +606,28 @@ async fn send_item((conn, path, id, index, offset, size, events): SendJob) -> Re
 
 /// Offer entry for a local file; public so callers/tests can predict resume keys.
 pub async fn file_item(path: &Path) -> Result<FileItem> {
-    let md = tokio::fs::metadata(path).await.with_context(|| format!("stat {}", path.display()))?;
+    let md = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("stat {}", path.display()))?;
     if !md.is_file() {
-        bail!("{}: only regular files can be sent (folders are not supported yet)", path.display());
+        bail!(
+            "{}: only regular files can be sent (folders are not supported yet)",
+            path.display()
+        );
     }
-    let name = path.file_name().context("path has no file name")?.to_string_lossy().into_owned();
+    let name = path
+        .file_name()
+        .context("path has no file name")?
+        .to_string_lossy()
+        .into_owned();
     let mtime_unix_ms = (md.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    Ok(FileItem { name, size: md.len(), mtime_unix_ms })
+    Ok(FileItem {
+        name,
+        size: md.len(),
+        mtime_unix_ms,
+    })
 }
 
 /// Resume key: stable across retries (which get a new transfer id) of the same file version.
@@ -442,10 +645,17 @@ pub fn part_name(item: &FileItem) -> String {
 fn place(part: &Path, dir: &Path, name: &str, mtime_ms: i64) -> Result<PathBuf> {
     if mtime_ms > 0 {
         let t = UNIX_EPOCH + Duration::from_millis(mtime_ms as u64);
-        let _ = fs::File::options().write(true).open(part).and_then(|f| f.set_modified(t)); // cosmetic
+        let _ = fs::File::options()
+            .write(true)
+            .open(part)
+            .and_then(|f| f.set_modified(t)); // cosmetic
     }
     for n in 0..10_000 {
-        let target = dir.join(if n == 0 { name.to_owned() } else { sanitize::numbered(name, n) });
+        let target = dir.join(if n == 0 {
+            name.to_owned()
+        } else {
+            sanitize::numbered(name, n)
+        });
         match fs::hard_link(part, &target) {
             Ok(()) => {
                 let _ = fs::remove_file(part);
@@ -473,7 +683,8 @@ fn place(part: &Path, dir: &Path, name: &str, mtime_ms: i64) -> Result<PathBuf> 
 }
 
 fn transfer_id(b: &[u8]) -> Result<[u8; 16]> {
-    b.try_into().map_err(|_| anyhow!("transfer_id must be 16 bytes, got {}", b.len()))
+    b.try_into()
+        .map_err(|_| anyhow!("transfer_id must be 16 bytes, got {}", b.len()))
 }
 
 /// Small files don't need a 1 MiB buffer each.
@@ -481,7 +692,12 @@ fn chunk_len(size: u64) -> usize {
     size.clamp(4096, CHUNK as u64) as usize
 }
 
-async fn hash_prefix<R: AsyncRead + Unpin>(r: &mut R, len: u64, hasher: &mut blake3::Hasher, buf: &mut [u8]) -> Result<()> {
+async fn hash_prefix<R: AsyncRead + Unpin>(
+    r: &mut R,
+    len: u64,
+    hasher: &mut blake3::Hasher,
+    buf: &mut [u8],
+) -> Result<()> {
     let mut left = len;
     while left > 0 {
         let want = left.min(buf.len() as u64) as usize;
@@ -518,12 +734,27 @@ struct Progress<'a> {
 
 impl<'a> Progress<'a> {
     fn new(events: &'a EventSink, id: [u8; 16], index: u32, total: u64) -> Self {
-        Self { events, id, index, total, last: 0, at: Instant::now() }
+        Self {
+            events,
+            id,
+            index,
+            total,
+            last: 0,
+            at: Instant::now(),
+        }
     }
 
     fn update(&mut self, done: u64) {
-        if done == self.total || done - self.last >= PROGRESS_BYTES || self.at.elapsed() >= PROGRESS_EVERY {
-            (self.events)(FileEvent::Progress { transfer_id: self.id, index: self.index, done, total: self.total });
+        if done == self.total
+            || done - self.last >= PROGRESS_BYTES
+            || self.at.elapsed() >= PROGRESS_EVERY
+        {
+            (self.events)(FileEvent::Progress {
+                transfer_id: self.id,
+                index: self.index,
+                done,
+                total: self.total,
+            });
             (self.last, self.at) = (done, Instant::now());
         }
     }

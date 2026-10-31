@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use iroh::address_lookup::memory::MemoryLookup;
-use iroh::endpoint::{Connection, Incoming, IncomingAddr, PortmapperConfig, RecvStream, SendStream, presets};
+use iroh::endpoint::{
+    Connection, Incoming, IncomingAddr, PortmapperConfig, RecvStream, SendStream, presets,
+};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -160,17 +162,29 @@ impl Node {
             .collect();
         addrs.sort_by_key(|a| a.is_ipv6()); // v4 first: shorter and what phones usually reach
         addrs.truncate(MAX_TICKET_ADDRS);
-        Ok(Ticket { id: self.endpoint.id(), secret, name: self.name.clone(), addrs }.to_string())
+        Ok(Ticket {
+            id: self.endpoint.id(),
+            secret,
+            name: self.name.clone(),
+            addrs,
+        }
+        .to_string())
     }
 
     /// Scanner side: pair with the device that showed `ticket`.
     pub async fn pair_with_ticket(&self, ticket: &str, confirm: ConfirmFn) -> Result<TrustedPeer> {
         let t: Ticket = ticket.parse()?;
-        ensure!(t.id != self.endpoint.id(), "that is this device's own ticket");
-        let conn = timeout(NET_TIMEOUT, self.endpoint.connect(addr_of(t.id, &t.addrs), ALPN_PAIR))
-            .await
-            .context("connecting to the other device timed out")?
-            .context("connect to the other device")?;
+        ensure!(
+            t.id != self.endpoint.id(),
+            "that is this device's own ticket"
+        );
+        let conn = timeout(
+            NET_TIMEOUT,
+            self.endpoint.connect(addr_of(t.id, &t.addrs), ALPN_PAIR),
+        )
+        .await
+        .context("connecting to the other device timed out")?
+        .context("connect to the other device")?;
         let peer = pairing::scan(&conn, &t, &self.me(), &confirm).await?;
         self.store_peer(t.id, peer, t.addrs)
     }
@@ -181,7 +195,10 @@ impl Node {
 
     pub fn forget_peer(&self, peer_id: &str) -> Result<()> {
         let id = identity::parse_device_id(peer_id)?;
-        ensure!(self.trust.lock().unwrap().remove(&id.to_z32())?, "not a paired device: {peer_id}");
+        ensure!(
+            self.trust.lock().unwrap().remove(&id.to_z32())?,
+            "not a paired device: {peer_id}"
+        );
         self.lookup.remove_endpoint_info(id);
         if let Some(c) = self.sessions.lock().unwrap().remove(&id) {
             c.close(ERR_FORGOTTEN.into(), b"forgotten");
@@ -195,6 +212,16 @@ impl Node {
         self.lookup.add_endpoint_info(addr_of(id, &addrs));
         self.remember_addrs(id, &addrs);
         Ok(())
+    }
+
+    /// Which paired peer (if any) a natively discovered `_ferry._udp` TXT record belongs to.
+    pub fn match_presence(&self, txt: &[(String, String)]) -> Option<String> {
+        let get = |k: &str| {
+            txt.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        discovery::match_txt(self.trust.lock().unwrap().list(), get)
     }
 
     /// Our current presence tag for native mDNS/BLE adverts: (txt key, value) pairs.
@@ -214,15 +241,33 @@ impl Node {
 
     /// The UDP port our endpoint is bound to (for native mDNS registration).
     pub fn port(&self) -> u16 {
-        self.endpoint.bound_sockets().iter().find(|a| a.is_ipv4()).map_or(0, |a| a.port())
+        self.endpoint
+            .bound_sockets()
+            .iter()
+            .find(|a| a.is_ipv4())
+            .map_or(0, |a| a.port())
     }
 
     pub async fn send_files(&self, peer_id: &str, paths: &[PathBuf]) -> Result<SendReport> {
+        let files: Vec<(PathBuf, Option<String>)> =
+            paths.iter().map(|p| (p.clone(), None)).collect();
+        self.send_named(peer_id, &files).await
+    }
+
+    /// [`Node::send_files`] with an optional display name per file (see [`file::send_named`]).
+    pub async fn send_named(
+        &self,
+        peer_id: &str,
+        files: &[(PathBuf, Option<String>)],
+    ) -> Result<SendReport> {
         let id = self.trusted(peer_id)?;
-        let conn = timeout(NET_TIMEOUT, self.endpoint.connect(EndpointAddr::new(id), ALPN_SESSION))
-            .await
-            .context("connecting timed out (is the other device on this network?)")?
-            .context("connect")?;
+        let conn = timeout(
+            NET_TIMEOUT,
+            self.endpoint.connect(EndpointAddr::new(id), ALPN_SESSION),
+        )
+        .await
+        .context("connecting timed out (is the other device on this network?)")?
+        .context("connect")?;
         let res = async {
             let _control = hello_initiate(&conn, self.hello())
                 .await
@@ -230,7 +275,7 @@ impl Node {
                     Some(r) => format!("session refused: {r}"),
                     None => "session handshake".into(),
                 })?;
-            file::send_files(&conn, paths, self.events.clone()).await
+            file::send_named(&conn, files, self.events.clone()).await
         }
         .await;
         // send_files returns only after every ItemResult arrived, so nothing is cut off
@@ -247,7 +292,10 @@ impl Node {
     }
 
     fn me(&self) -> Me<'_> {
-        Me { name: &self.name, presence_key: &self.presence_key }
+        Me {
+            name: &self.name,
+            presence_key: &self.presence_key,
+        }
     }
 
     fn hello(&self) -> Hello {
@@ -261,11 +309,19 @@ impl Node {
     /// Parses `peer_id` and checks it is paired.
     fn trusted(&self, peer_id: &str) -> Result<EndpointId> {
         let id = identity::parse_device_id(peer_id)?;
-        ensure!(self.trust.lock().unwrap().get(&id.to_z32()).is_some(), "not a paired device: {peer_id}");
+        ensure!(
+            self.trust.lock().unwrap().get(&id.to_z32()).is_some(),
+            "not a paired device: {peer_id}"
+        );
         Ok(id)
     }
 
-    fn store_peer(&self, id: EndpointId, p: PairedPeer, addrs: Vec<SocketAddr>) -> Result<TrustedPeer> {
+    fn store_peer(
+        &self,
+        id: EndpointId,
+        p: PairedPeer,
+        addrs: Vec<SocketAddr>,
+    ) -> Result<TrustedPeer> {
         let peer = TrustedPeer {
             id: id.to_z32(),
             name: p.name,
@@ -284,7 +340,9 @@ impl Node {
     /// Newest addresses first; persisted only when the list changes.
     fn remember_addrs(&self, id: EndpointId, new: &[SocketAddr]) {
         let mut trust = self.trust.lock().unwrap();
-        let Some(mut p) = trust.get(&id.to_z32()).cloned() else { return };
+        let Some(mut p) = trust.get(&id.to_z32()).cloned() else {
+            return;
+        };
         let mut merged = new.to_vec();
         merged.extend(p.last_addrs.iter().filter(|a| !new.contains(a)));
         merged.truncate(MAX_LAST_ADDRS);
@@ -342,7 +400,10 @@ impl Node {
         }
         let res = self.serve_session(&conn).await;
         let mut sessions = self.sessions.lock().unwrap();
-        if sessions.get(&id).is_some_and(|c| c.stable_id() == conn.stable_id()) {
+        if sessions
+            .get(&id)
+            .is_some_and(|c| c.stable_id() == conn.stable_id())
+        {
             sessions.remove(&id);
         }
         res
@@ -416,14 +477,21 @@ async fn hello_initiate(conn: &Connection, ours: Hello) -> Result<(SendStream, R
 
 async fn hello_respond(conn: &Connection, ours: Hello) -> Result<(SendStream, RecvStream)> {
     let (mut send, mut recv) = timeout(NET_TIMEOUT, conn.accept_bi()).await??;
-    ensure!(timeout(NET_TIMEOUT, read_prefix(&mut recv)).await?? == CH_CONTROL, "first stream is not control");
+    ensure!(
+        timeout(NET_TIMEOUT, read_prefix(&mut recv)).await?? == CH_CONTROL,
+        "first stream is not control"
+    );
     check_hello(timeout(NET_TIMEOUT, read_msg(&mut recv)).await??)?;
     write_msg(&mut send, &ours).await?;
     Ok((send, recv))
 }
 
 fn check_hello(h: Hello) -> Result<()> {
-    ensure!(h.protocol_version == PROTOCOL_VERSION, "peer speaks protocol {}", h.protocol_version);
+    ensure!(
+        h.protocol_version == PROTOCOL_VERSION,
+        "peer speaks protocol {}",
+        h.protocol_version
+    );
     Ok(())
 }
 

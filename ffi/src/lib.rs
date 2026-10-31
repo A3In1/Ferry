@@ -27,7 +27,9 @@ impl std::error::Error for FerryError {}
 
 impl From<anyhow::Error> for FerryError {
     fn from(e: anyhow::Error) -> Self {
-        Self::Failed { message: format!("{e:#}") }
+        Self::Failed {
+            message: format!("{e:#}"),
+        }
     }
 }
 
@@ -44,38 +46,81 @@ pub trait FerryDelegate: Send + Sync {
 
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum FfiFileEvent {
-    Offered { transfer_id: String, names: Vec<String>, total_bytes: u64 },
-    Progress { transfer_id: String, index: u32, done: u64, total: u64 },
-    Saved { transfer_id: String, index: u32, path: String },
-    Failed { transfer_id: String, index: u32, error: String },
+    Offered {
+        transfer_id: String,
+        names: Vec<String>,
+        total_bytes: u64,
+    },
+    Progress {
+        transfer_id: String,
+        index: u32,
+        done: u64,
+        total: u64,
+    },
+    Saved {
+        transfer_id: String,
+        index: u32,
+        path: String,
+    },
+    Failed {
+        transfer_id: String,
+        index: u32,
+        error: String,
+    },
 }
 
 impl From<FileEvent> for FfiFileEvent {
     fn from(e: FileEvent) -> Self {
         match e {
-            FileEvent::Offered { transfer_id, names, total_bytes } => {
-                Self::Offered { transfer_id: hex(&transfer_id), names, total_bytes }
-            }
-            FileEvent::Progress { transfer_id, index, done, total } => {
-                Self::Progress { transfer_id: hex(&transfer_id), index, done, total }
-            }
-            FileEvent::Saved { transfer_id, index, path } => Self::Saved {
+            FileEvent::Offered {
+                transfer_id,
+                names,
+                total_bytes,
+            } => Self::Offered {
+                transfer_id: hex(&transfer_id),
+                names,
+                total_bytes,
+            },
+            FileEvent::Progress {
+                transfer_id,
+                index,
+                done,
+                total,
+            } => Self::Progress {
+                transfer_id: hex(&transfer_id),
+                index,
+                done,
+                total,
+            },
+            FileEvent::Saved {
+                transfer_id,
+                index,
+                path,
+            } => Self::Saved {
                 transfer_id: hex(&transfer_id),
                 index,
                 path: path.to_string_lossy().into_owned(),
             },
-            FileEvent::Failed { transfer_id, index, error } => {
-                Self::Failed { transfer_id: hex(&transfer_id), index, error }
-            }
+            FileEvent::Failed {
+                transfer_id,
+                index,
+                error,
+            } => Self::Failed {
+                transfer_id: hex(&transfer_id),
+                index,
+                error,
+            },
         }
     }
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -95,6 +140,18 @@ impl From<TrustedPeer> for FfiPeer {
             last_addrs: p.last_addrs.iter().map(ToString::to_string).collect(),
         }
     }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiUsbLink {
+    pub serial: String,
+    pub peer_id: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSource {
+    pub path: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -163,7 +220,10 @@ impl FerryNode {
 
     /// Scanner side. The delegate's `confirm_pairing` is asked to compare codes.
     pub async fn pair_with_ticket(&self, ticket: String) -> Result<FfiPeer> {
-        let peer = self.node.pair_with_ticket(&ticket, confirm_fn(self.delegate.clone())).await?;
+        let peer = self
+            .node
+            .pair_with_ticket(&ticket, confirm_fn(self.delegate.clone()))
+            .await?;
         Ok(peer.into())
     }
 
@@ -179,27 +239,79 @@ impl FerryNode {
     pub fn add_peer_addrs(&self, peer_id: String, addrs: Vec<String>) -> Result<()> {
         let addrs = addrs
             .iter()
-            .map(|a| a.parse::<SocketAddr>().map_err(|e| anyhow::anyhow!("bad address {a:?}: {e}")))
+            .map(|a| {
+                a.parse::<SocketAddr>()
+                    .map_err(|e| anyhow::anyhow!("bad address {a:?}: {e}"))
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(self.node.add_peer_addrs(&peer_id, addrs)?)
     }
 
     pub fn presence_txt(&self) -> Vec<FfiTxt> {
-        self.node.presence_txt().into_iter().map(|(key, value)| FfiTxt { key, value }).collect()
+        self.node
+            .presence_txt()
+            .into_iter()
+            .map(|(key, value)| FfiTxt { key, value })
+            .collect()
     }
 
     pub fn port(&self) -> u16 {
         self.node.port()
     }
 
+    /// Paired peer a natively discovered TXT record belongs to (Android NsdManager).
+    pub fn match_presence(&self, txt: Vec<FfiTxt>) -> Option<String> {
+        let txt: Vec<(String, String)> = txt.into_iter().map(|t| (t.key, t.value)).collect();
+        self.node.match_presence(&txt)
+    }
+
     pub async fn send_files(&self, peer_id: String, paths: Vec<String>) -> Result<FfiSendReport> {
-        let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-        let r = self.node.send_files(&peer_id, &paths).await?;
+        let files = paths
+            .into_iter()
+            .map(|p| FfiSource {
+                path: p,
+                name: None,
+            })
+            .collect();
+        self.send_named(peer_id, files).await
+    }
+
+    /// Send with display names (Android: path `/proc/self/fd/N` + the document's name).
+    pub async fn send_named(
+        &self,
+        peer_id: String,
+        files: Vec<FfiSource>,
+    ) -> Result<FfiSendReport> {
+        let files: Vec<(PathBuf, Option<String>)> = files
+            .into_iter()
+            .map(|f| (PathBuf::from(f.path), f.name))
+            .collect();
+        let r = self.node.send_named(&peer_id, &files).await?;
         Ok(FfiSendReport {
             files_sent: r.files_sent,
             bytes_sent: r.bytes_sent,
             elapsed_ms: r.elapsed.as_millis() as u64,
         })
+    }
+
+    /// Phone side: listen for the Mac's USB bridge (127.0.0.1:47100 through adb forward).
+    pub async fn usb_serve(&self) -> Result<()> {
+        Ok(self.node.usb_serve(ferry_core::usb::USB_PORT).await?)
+    }
+
+    /// Mac side: watch adb for plugged-in phones and attach them. `adb_path` empty = auto.
+    pub fn usb_watch(&self, adb_path: Option<String>) -> Result<()> {
+        Ok(self.node.usb_watch(adb_path.map(PathBuf::from))?)
+    }
+
+    pub fn usb_links(&self) -> Vec<FfiUsbLink> {
+        let links = self.node.usb_links();
+        links.into_iter().map(|l| FfiUsbLink { serial: l.serial, peer_id: l.peer_id }).collect()
+    }
+
+    /// Mac side: open a fresh pairing ticket on the USB phone (no QR scan).
+    pub async fn usb_push_ticket(&self, serial: Option<String>) -> Result<()> {
+        Ok(self.node.usb_push_ticket(serial).await?)
     }
 
     pub async fn shutdown(&self) {
@@ -209,7 +321,11 @@ impl FerryNode {
 
 #[uniffi::export]
 pub fn core_version() -> String {
-    format!("{} (protocol {})", env!("CARGO_PKG_VERSION"), ferry_core::PROTOCOL_VERSION)
+    format!(
+        "{} (protocol {})",
+        env!("CARGO_PKG_VERSION"),
+        ferry_core::PROTOCOL_VERSION
+    )
 }
 
 #[cfg(test)]

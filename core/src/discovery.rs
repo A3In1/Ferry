@@ -36,7 +36,10 @@ pub fn match_tag(peers: &[TrustedPeer], nonce: &[u8; 8], tag_: &[u8; 8]) -> Opti
 }
 
 /// [`match_tag`] on raw TXT values (from mdns-sd, Bonjour or NsdManager); junk → None.
-pub fn match_txt<'a>(peers: &[TrustedPeer], get: impl Fn(&str) -> Option<&'a str>) -> Option<String> {
+pub fn match_txt<'a>(
+    peers: &[TrustedPeer],
+    get: impl Fn(&str) -> Option<&'a str>,
+) -> Option<String> {
     if get("v")? != "1" {
         return None;
     }
@@ -129,7 +132,8 @@ mod mdns {
         let instance = format!("ferry-{}", hex::encode(rand::random::<[u8; 6]>()));
         let host = format!("{instance}.local.");
         let txt = node.presence_txt();
-        let info = ServiceInfo::new(MDNS_SERVICE, &instance, &host, (), node.port(), &txt[..])?.enable_addr_auto();
+        let info = ServiceInfo::new(MDNS_SERVICE, &instance, &host, (), node.port(), &txt[..])?
+            .enable_addr_auto();
         let full = info.get_fullname().to_string();
         d.register(info)?;
         Ok(full)
@@ -157,6 +161,9 @@ mod tests {
         assert_eq!(match_txt(&peers, get), Some("two".into()));
         assert_eq!(match_tag(&peers, &[8u8; 8], &tag(&k2, &nonce)), None);
         assert_eq!(match_tag(&peers, &nonce, &tag(&[3u8; 32], &nonce)), None);
-        assert_eq!(match_txt(&peers, |k| if k == "v" { Some("1") } else { Some("zz") }), None);
+        assert_eq!(
+            match_txt(&peers, |k| if k == "v" { Some("1") } else { Some("zz") }),
+            None
+        );
     }
 }

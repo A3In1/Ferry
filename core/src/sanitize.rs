@@ -14,12 +14,26 @@ pub fn file_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .filter(|&c| !is_invisible(c))
-        .map(|c| if matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
-    let last = cleaned.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("");
+    let last = cleaned
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
     let mut out = tidy(last).to_owned();
     // `CON.txt` is unopenable on Windows even with an extension.
-    let base = out.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let base = out
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
     if is_reserved(&base) {
         out.insert(0, '_');
     }
@@ -105,7 +119,10 @@ mod tests {
     fn long_names_keep_extension() {
         let long = format!("{}.jpeg", "é".repeat(300));
         let out = file_name(&long);
-        assert!(out.len() <= MAX_NAME_BYTES && out.ends_with(".jpeg"), "{out}");
+        assert!(
+            out.len() <= MAX_NAME_BYTES && out.ends_with(".jpeg"),
+            "{out}"
+        );
         assert!(out.len() >= MAX_NAME_BYTES - 1); // at most one byte lost to char boundary
 
         let numbered = numbered(&out, 12);
@@ -132,9 +149,15 @@ mod tests {
                 })
                 .collect();
             let out = file_name(&s);
-            assert!(!out.is_empty() && out != "." && out != "..", "{s:?} -> {out:?}");
+            assert!(
+                !out.is_empty() && out != "." && out != "..",
+                "{s:?} -> {out:?}"
+            );
             assert!(out.len() <= MAX_NAME_BYTES, "{s:?} -> {out:?}");
-            assert!(!out.contains(['/', '\\']) && !out.chars().any(is_invisible), "{s:?} -> {out:?}");
+            assert!(
+                !out.contains(['/', '\\']) && !out.chars().any(is_invisible),
+                "{s:?} -> {out:?}"
+            );
             assert_eq!(file_name(&out), out, "not idempotent for {s:?}");
         }
     }

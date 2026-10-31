@@ -66,7 +66,11 @@ mod tests {
     async fn roundtrip_and_limits() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         write_prefix(&mut a, CH_FILE).await.unwrap();
-        let hello = Hello { protocol_version: 1, device_name: "Mac".into(), channels: vec![0, 1] };
+        let hello = Hello {
+            protocol_version: 1,
+            device_name: "Mac".into(),
+            channels: vec![0, 1],
+        };
         write_msg(&mut a, &hello).await.unwrap();
         assert_eq!(read_prefix(&mut b).await.unwrap(), CH_FILE);
         assert_eq!(read_msg::<_, Hello>(&mut b).await.unwrap(), hello);

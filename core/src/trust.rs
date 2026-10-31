@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrustedPeer {
-    pub id: String,           // iroh public key string
+    pub id: String, // iroh public key string
     pub name: String,
     pub presence_key: String, // hex, 32 bytes: recognises the peer's presence tags
     pub paired_at_unix: i64,
@@ -26,7 +26,9 @@ impl TrustStore {
     pub fn load(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join("peers.json");
         let peers = match std::fs::read(&path) {
-            Ok(b) => serde_json::from_slice(&b).with_context(|| format!("parse {}", path.display()))?,
+            Ok(b) => {
+                serde_json::from_slice(&b).with_context(|| format!("parse {}", path.display()))?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };

@@ -130,10 +130,21 @@ async fn start(data_dir: &Path, name: &str, download_dir: PathBuf, yes: bool) ->
     .await
 }
 
-async fn listen(data_dir: &Path, name: &str, dir: PathBuf, yes: bool, show_ticket: bool) -> Result<()> {
+async fn listen(
+    data_dir: &Path,
+    name: &str,
+    dir: PathBuf,
+    yes: bool,
+    show_ticket: bool,
+) -> Result<()> {
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let node = start(data_dir, name, dir.clone(), yes).await?;
-    println!("{}  {}  port {}", node.device_id(), node.device_name(), node.port());
+    println!(
+        "{}  {}  port {}",
+        node.device_id(),
+        node.device_name(),
+        node.port()
+    );
     if show_ticket {
         let ticket = node.new_pairing_ticket()?;
         let qr = qrcode::QrCode::new(ticket.as_bytes())?
@@ -156,21 +167,38 @@ async fn send(data_dir: &Path, name: &str, peer: &str, files: &[PathBuf]) -> Res
         let target = match identity::parse_device_id(peer) {
             Ok(id) => peers.iter().find(|p| p.id == id.to_z32()),
             Err(_) => {
-                let named: Vec<_> = peers.iter().filter(|p| p.name.eq_ignore_ascii_case(peer)).collect();
+                let named: Vec<_> = peers
+                    .iter()
+                    .filter(|p| p.name.eq_ignore_ascii_case(peer))
+                    .collect();
                 if named.len() > 1 {
                     bail!("several paired devices are called {peer}; use the id");
                 }
                 named.first().copied()
             }
         };
-        let id = target.with_context(|| format!("not a paired device: {peer} (see `ferry peers`)"))?.id.clone();
+        let id = target
+            .with_context(|| format!("not a paired device: {peer} (see `ferry peers`)"))?
+            .id
+            .clone();
 
         // Give mDNS a moment: up to 5 s if we know no address, 1.5 s if we have old ones.
-        let initial = node.peers().into_iter().find(|p| p.id == id).map(|p| p.last_addrs).unwrap_or_default();
+        let initial = node
+            .peers()
+            .into_iter()
+            .find(|p| p.id == id)
+            .map(|p| p.last_addrs)
+            .unwrap_or_default();
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_secs(5) {
-            let now = node.peers().into_iter().find(|p| p.id == id).map(|p| p.last_addrs).unwrap_or_default();
-            if now != initial || (!initial.is_empty() && t0.elapsed() > Duration::from_millis(1500)) {
+            let now = node
+                .peers()
+                .into_iter()
+                .find(|p| p.id == id)
+                .map(|p| p.last_addrs)
+                .unwrap_or_default();
+            if now != initial || (!initial.is_empty() && t0.elapsed() > Duration::from_millis(1500))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -186,7 +214,11 @@ async fn send(data_dir: &Path, name: &str, peer: &str, files: &[PathBuf]) -> Res
             r.bytes_sent as f64 / MIB / secs.max(1e-9)
         );
         if (r.files_sent as usize) < files.len() {
-            bail!("{} of {} files were declined", files.len() - r.files_sent as usize, files.len());
+            bail!(
+                "{} of {} files were declined",
+                files.len() - r.files_sent as usize,
+                files.len()
+            );
         }
         Ok(())
     }
@@ -199,14 +231,21 @@ fn confirm_fn(yes: bool) -> ConfirmFn {
     Arc::new(move |p: PairingPrompt| {
         Box::pin(async move {
             if yes {
-                println!("pairing with {}: code {} (auto-confirmed)", p.peer_name, p.code);
+                println!(
+                    "pairing with {}: code {} (auto-confirmed)",
+                    p.peer_name, p.code
+                );
                 return true;
             }
             tokio::task::spawn_blocking(move || {
-                print!("Pairing with {}: code {} — does it match on the other device? [y/N] ", p.peer_name, p.code);
+                print!(
+                    "Pairing with {}: code {} — does it match on the other device? [y/N] ",
+                    p.peer_name, p.code
+                );
                 let _ = std::io::stdout().flush();
                 let mut line = String::new();
-                std::io::stdin().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("y")
+                std::io::stdin().read_line(&mut line).is_ok()
+                    && line.trim().eq_ignore_ascii_case("y")
             })
             .await
             .unwrap_or(false)
@@ -218,17 +257,35 @@ fn confirm_fn(yes: bool) -> ConfirmFn {
 fn event_printer() -> ferry_core::file::EventSink {
     let started: Mutex<HashMap<([u8; 16], u32), Instant>> = Mutex::default();
     Arc::new(move |e| match e {
-        FileEvent::Offered { names, total_bytes, .. } => {
-            println!("incoming: {} file(s), {:.1} MiB", names.len(), total_bytes as f64 / MIB);
+        FileEvent::Offered {
+            names, total_bytes, ..
+        } => {
+            println!(
+                "incoming: {} file(s), {:.1} MiB",
+                names.len(),
+                total_bytes as f64 / MIB
+            );
         }
-        FileEvent::Progress { transfer_id, index, done, total } => {
+        FileEvent::Progress {
+            transfer_id,
+            index,
+            done,
+            total,
+        } => {
             let Some(t0) = started.lock().unwrap().get(&(transfer_id, index)).copied() else {
                 // first event only starts the clock; a rate over ~0 s is noise
-                started.lock().unwrap().insert((transfer_id, index), Instant::now());
+                started
+                    .lock()
+                    .unwrap()
+                    .insert((transfer_id, index), Instant::now());
                 return;
             };
             let rate = done as f64 / MIB / t0.elapsed().as_secs_f64().max(1e-3);
-            print!("\r  #{index}: {:.0}/{:.0} MiB  {rate:.1} MiB/s   ", done as f64 / MIB, total as f64 / MIB);
+            print!(
+                "\r  #{index}: {:.0}/{:.0} MiB  {rate:.1} MiB/s   ",
+                done as f64 / MIB,
+                total as f64 / MIB
+            );
             let _ = std::io::stdout().flush();
         }
         FileEvent::Saved { index, path, .. } => println!("\r  #{index}: saved {}", path.display()),
@@ -252,7 +309,11 @@ fn bench_file(path: &Path, gib: f64) -> Result<()> {
         n += 1;
     }
     f.flush()?;
-    println!("wrote {} ({:.2} GiB)", path.display(), total as f64 / (1024.0 * MIB));
+    println!(
+        "wrote {} ({:.2} GiB)",
+        path.display(),
+        total as f64 / (1024.0 * MIB)
+    );
     Ok(())
 }
 

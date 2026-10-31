@@ -8,6 +8,7 @@ pub mod node;
 pub mod pairing;
 pub mod sanitize;
 pub mod trust;
+pub mod usb;
 
 pub use ferry_proto::v1 as proto;
 

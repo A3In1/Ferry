@@ -65,7 +65,10 @@ impl FromStr for Ticket {
 
     /// Tickets come from a camera, so everything is validated; unknown keys are ignored.
     fn from_str(s: &str) -> Result<Self> {
-        let query = s.trim().strip_prefix(TICKET_PREFIX).context("not a ferry pairing ticket")?;
+        let query = s
+            .trim()
+            .strip_prefix(TICKET_PREFIX)
+            .context("not a ferry pairing ticket")?;
         let (mut v, mut id, mut secret, mut name, mut addrs) = (None, None, None, None, None);
         for pair in query.split('&') {
             let (k, val) = pair.split_once('=').context("malformed ticket field")?;
@@ -79,16 +82,26 @@ impl FromStr for Ticket {
             }
         }
         ensure!(v == Some("1"), "unsupported ticket version");
-        let id = crate::identity::parse_device_id(id.context("ticket has no id")?).context("bad ticket id")?;
+        let id = crate::identity::parse_device_id(id.context("ticket has no id")?)
+            .context("bad ticket id")?;
         let mut sec = [0u8; 32];
-        hex::decode_to_slice(secret.context("ticket has no secret")?, &mut sec).map_err(|_| anyhow!("bad ticket secret"))?;
+        hex::decode_to_slice(secret.context("ticket has no secret")?, &mut sec)
+            .map_err(|_| anyhow!("bad ticket secret"))?;
         let name = clean_name(&pct_decode(name.unwrap_or(""))?);
         let addrs: Vec<SocketAddr> = match addrs.unwrap_or("") {
             "" => Vec::new(),
-            a => a.split(',').map(|x| x.parse().map_err(|_| anyhow!("bad ticket address"))).collect::<Result<_>>()?,
+            a => a
+                .split(',')
+                .map(|x| x.parse().map_err(|_| anyhow!("bad ticket address")))
+                .collect::<Result<_>>()?,
         };
         ensure!(addrs.len() <= MAX_TICKET_ADDRS, "too many ticket addresses");
-        Ok(Ticket { id, secret: sec, name, addrs })
+        Ok(Ticket {
+            id,
+            secret: sec,
+            name,
+            addrs,
+        })
     }
 }
 
@@ -112,7 +125,9 @@ fn pct_decode(s: &str) -> Result<String> {
     while i < b.len() {
         if b[i] == b'%' {
             let hex = b.get(i + 1..i + 3).context("truncated percent escape")?;
-            let hex = std::str::from_utf8(hex).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+            let hex = std::str::from_utf8(hex)
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
             out.push(hex.context("bad percent escape")?);
             i += 3;
         } else {
@@ -125,7 +140,11 @@ fn pct_decode(s: &str) -> Result<String> {
 
 /// Peer-supplied device names: no control characters, bounded length.
 pub(crate) fn clean_name(s: &str) -> String {
-    let name: String = s.chars().filter(|c| !c.is_control()).take(MAX_NAME_CHARS).collect();
+    let name: String = s
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_NAME_CHARS)
+        .collect();
     match name.trim() {
         "" => "Unnamed device".into(),
         n => n.into(),
@@ -146,7 +165,8 @@ pub(crate) struct Me<'a> {
 
 fn exporter(conn: &Connection, label: &[u8]) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
-    conn.export_keying_material(&mut out, label, b"").map_err(|e| anyhow!("TLS exporter: {e:?}"))?;
+    conn.export_keying_material(&mut out, label, b"")
+        .map_err(|e| anyhow!("TLS exporter: {e:?}"))?;
     Ok(out)
 }
 
@@ -161,28 +181,52 @@ fn proof_ok(got: &[u8], want: &blake3::Hash) -> bool {
 
 fn sas_code(conn: &Connection) -> Result<String> {
     let e = exporter(conn, LABEL_SAS)?;
-    Ok(format!("{:06}", u32::from_le_bytes([e[0], e[1], e[2], e[3]]) % 1_000_000))
+    Ok(format!(
+        "{:06}",
+        u32::from_le_bytes([e[0], e[1], e[2], e[3]]) % 1_000_000
+    ))
 }
 
 fn hello(me: &Me<'_>, proof: blake3::Hash) -> PairHello {
-    PairHello { device_name: me.name.into(), proof: proof.as_bytes().to_vec(), presence_key: me.presence_key.to_vec() }
+    PairHello {
+        device_name: me.name.into(),
+        proof: proof.as_bytes().to_vec(),
+        presence_key: me.presence_key.to_vec(),
+    }
 }
 
 fn peer_from(h: PairHello) -> Result<PairedPeer> {
-    let presence_key = <[u8; 32]>::try_from(h.presence_key.as_slice()).map_err(|_| anyhow!("bad presence key"))?;
-    Ok(PairedPeer { name: clean_name(&h.device_name), presence_key })
+    let presence_key =
+        <[u8; 32]>::try_from(h.presence_key.as_slice()).map_err(|_| anyhow!("bad presence key"))?;
+    Ok(PairedPeer {
+        name: clean_name(&h.device_name),
+        presence_key,
+    })
 }
 
 /// Scanner (phone) side, on a fresh ALPN_PAIR connection to the ticket's id.
-pub(crate) async fn scan(conn: &Connection, ticket: &Ticket, me: &Me<'_>, confirm: &ConfirmFn) -> Result<PairedPeer> {
+pub(crate) async fn scan(
+    conn: &Connection,
+    ticket: &Ticket,
+    me: &Me<'_>,
+    confirm: &ConfirmFn,
+) -> Result<PairedPeer> {
     let res = async {
-        let (mut send, mut recv) = timeout(NET_TIMEOUT, conn.open_bi()).await.context("open stream timed out")??;
+        let (mut send, mut recv) = timeout(NET_TIMEOUT, conn.open_bi())
+            .await
+            .context("open stream timed out")??;
         write_prefix(&mut send, CH_CONTROL).await?;
-        write_msg(&mut send, &hello(me, proof(&ticket.secret, conn, LABEL_SCANNER)?)).await?;
+        write_msg(
+            &mut send,
+            &hello(me, proof(&ticket.secret, conn, LABEL_SCANNER)?),
+        )
+        .await?;
         let reply: PairHello = match timeout(NET_TIMEOUT, read_msg(&mut recv)).await {
             Ok(Ok(r)) => r,
             _ if conn.close_reason().is_some() => {
-                bail!("the other device rejected the ticket (expired, already used, or not current)")
+                bail!(
+                    "the other device rejected the ticket (expired, already used, or not current)"
+                )
             }
             Ok(Err(e)) => return Err(e),
             Err(_) => bail!("no pairing reply"),
@@ -208,11 +252,18 @@ pub(crate) async fn show(
     confirm: &ConfirmFn,
 ) -> Result<PairedPeer> {
     let res = async {
-        let (mut send, mut recv) = timeout(NET_TIMEOUT, conn.accept_bi()).await.context("no pairing stream")??;
-        ensure!(timeout(NET_TIMEOUT, read_prefix(&mut recv)).await?? == CH_CONTROL, "wrong pairing channel");
+        let (mut send, mut recv) = timeout(NET_TIMEOUT, conn.accept_bi())
+            .await
+            .context("no pairing stream")??;
+        ensure!(
+            timeout(NET_TIMEOUT, read_prefix(&mut recv)).await?? == CH_CONTROL,
+            "wrong pairing channel"
+        );
         let h: PairHello = timeout(NET_TIMEOUT, read_msg(&mut recv)).await??;
         let secret = take_secret();
-        let valid = secret.map(|s| proof(&s, conn, LABEL_SCANNER).map(|p| proof_ok(&h.proof, &p))).transpose()?;
+        let valid = secret
+            .map(|s| proof(&s, conn, LABEL_SCANNER).map(|p| proof_ok(&h.proof, &p)))
+            .transpose()?;
         let Some((secret, true)) = secret.zip(valid) else {
             conn.close(ERR_PAIR_REJECTED.into(), b"invalid ticket");
             bail!("pairing attempt with an invalid, expired or used ticket");
@@ -237,9 +288,15 @@ async fn confirm_both(
     confirm: &ConfirmFn,
 ) -> Result<()> {
     let code = sas_code(conn)?;
-    let mine = timeout(CONFIRM_TIMEOUT, confirm(PairingPrompt { peer_name: peer_name.into(), code }))
-        .await
-        .unwrap_or(false);
+    let mine = timeout(
+        CONFIRM_TIMEOUT,
+        confirm(PairingPrompt {
+            peer_name: peer_name.into(),
+            code,
+        }),
+    )
+    .await
+    .unwrap_or(false);
     write_msg(&mut send, &PairConfirm { accepted: mine }).await?;
     send.finish()?;
     let theirs: PairConfirm = timeout(CONFIRM_TIMEOUT + NET_TIMEOUT, read_msg(&mut recv))
@@ -262,7 +319,10 @@ mod tests {
             id: iroh::SecretKey::generate().public(),
             secret: [7; 32],
             name: "Vara's MacBook Pro & co/ü".into(),
-            addrs: vec!["192.168.1.5:4433".parse().unwrap(), "[fe80::1]:4433".parse().unwrap()],
+            addrs: vec![
+                "192.168.1.5:4433".parse().unwrap(),
+                "[fe80::1]:4433".parse().unwrap(),
+            ],
         }
     }
 
@@ -338,7 +398,11 @@ mod tests {
         })
         .await
         .unwrap();
-        Dev { node, codes, _dir: dir }
+        Dev {
+            node,
+            codes,
+            _dir: dir,
+        }
     }
 
     /// Tickets leave out loopback; tests dial it explicitly.
@@ -363,19 +427,30 @@ mod tests {
         let (mac, phone) = (dev("Mac", true).await, dev("Phone", true).await);
         let t = local_ticket(&mac).to_string();
         let codes = Arc::new(Mutex::new(Vec::new()));
-        let peer = phone.node.pair_with_ticket(&t, confirm_fn(true, codes.clone())).await.unwrap();
+        let peer = phone
+            .node
+            .pair_with_ticket(&t, confirm_fn(true, codes.clone()))
+            .await
+            .unwrap();
         assert_eq!(peer.id, mac.node.device_id());
         assert_eq!(peer.name, "Mac");
         assert_eq!(wait_peers(&mac.node, 1).await, 1);
         assert_eq!(mac.node.peers()[0].id, phone.node.device_id());
         assert_eq!(mac.node.peers()[0].name, "Phone");
-        let (a, b) = (codes.lock().unwrap().clone(), mac.codes.lock().unwrap().clone());
+        let (a, b) = (
+            codes.lock().unwrap().clone(),
+            mac.codes.lock().unwrap().clone(),
+        );
         assert_eq!(a.len(), 1);
         assert_eq!(a, b, "both sides must show the same code");
         assert!(a[0].len() == 6 && a[0].bytes().all(|c| c.is_ascii_digit()));
 
         // single use
-        let err = phone.node.pair_with_ticket(&t, confirm_fn(true, codes)).await.unwrap_err();
+        let err = phone
+            .node
+            .pair_with_ticket(&t, confirm_fn(true, codes))
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("rejected"), "{err:#}");
     }
 
@@ -385,7 +460,11 @@ mod tests {
             let (mac, phone) = (dev("Mac", mac_says).await, dev("Phone", true).await);
             let t = local_ticket(&mac).to_string();
             let codes = Arc::new(Mutex::new(Vec::new()));
-            let err = phone.node.pair_with_ticket(&t, confirm_fn(phone_says, codes)).await.unwrap_err();
+            let err = phone
+                .node
+                .pair_with_ticket(&t, confirm_fn(phone_says, codes))
+                .await
+                .unwrap_err();
             assert!(format!("{err:#}").contains("declined"), "{err:#}");
             tokio::time::sleep(Duration::from_millis(200)).await;
             assert!(phone.node.peers().is_empty());
@@ -397,12 +476,30 @@ mod tests {
     async fn wrong_secret_fails_and_burns_the_ticket() {
         let (mac, phone) = (dev("Mac", true).await, dev("Phone", true).await);
         let good = local_ticket(&mac);
-        let bad = Ticket { secret: [0; 32], ..good.clone() };
+        let bad = Ticket {
+            secret: [0; 32],
+            ..good.clone()
+        };
         let codes = Arc::new(Mutex::new(Vec::new()));
-        assert!(phone.node.pair_with_ticket(&bad.to_string(), confirm_fn(true, codes.clone())).await.is_err());
-        assert!(codes.lock().unwrap().is_empty() && mac.codes.lock().unwrap().is_empty(), "no code shown");
+        assert!(
+            phone
+                .node
+                .pair_with_ticket(&bad.to_string(), confirm_fn(true, codes.clone()))
+                .await
+                .is_err()
+        );
+        assert!(
+            codes.lock().unwrap().is_empty() && mac.codes.lock().unwrap().is_empty(),
+            "no code shown"
+        );
         // the real ticket was consumed by the failed attempt
-        assert!(phone.node.pair_with_ticket(&good.to_string(), confirm_fn(true, codes)).await.is_err());
+        assert!(
+            phone
+                .node
+                .pair_with_ticket(&good.to_string(), confirm_fn(true, codes))
+                .await
+                .is_err()
+        );
         assert!(mac.node.peers().is_empty() && phone.node.peers().is_empty());
     }
 }

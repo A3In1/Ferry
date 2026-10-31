@@ -18,7 +18,10 @@ pub fn load_or_create(data_dir: &Path) -> Result<Identity> {
     std::fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
     let secret = load_or_create_key(&data_dir.join("identity.key"))?;
     let presence_key = load_or_create_key(&data_dir.join("presence.key"))?;
-    Ok(Identity { secret_key: SecretKey::from_bytes(&secret), presence_key })
+    Ok(Identity {
+        secret_key: SecretKey::from_bytes(&secret),
+        presence_key,
+    })
 }
 
 fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
@@ -26,7 +29,11 @@ fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
         Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
             Ok(k) => Ok(k),
             // never silently replace a damaged key: that would change the Device ID
-            Err(_) => bail!("{} is corrupt ({} bytes, want 32)", path.display(), bytes.len()),
+            Err(_) => bail!(
+                "{} is corrupt ({} bytes, want 32)",
+                path.display(),
+                bytes.len()
+            ),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key: [u8; 32] = rand::random();
@@ -41,7 +48,11 @@ fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
 /// *standard* base32, which would silently decode a z32 string to a different key.)
 pub fn parse_device_id(s: &str) -> Result<iroh::EndpointId> {
     let s = s.trim();
-    let id = if s.len() == 64 { s.parse().ok() } else { iroh::EndpointId::from_z32(s).ok() };
+    let id = if s.len() == 64 {
+        s.parse().ok()
+    } else {
+        iroh::EndpointId::from_z32(s).ok()
+    };
     id.with_context(|| format!("not a device id: {s}"))
 }
 
@@ -52,7 +63,9 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    let mut f = opts.open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let mut f = opts
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
     f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
@@ -74,7 +87,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.path().join("identity.key")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(dir.path().join("identity.key"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         let id = a.secret_key.public();
