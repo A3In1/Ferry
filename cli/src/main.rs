@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use ferry_core::file::FileEvent;
 use ferry_core::node::{ConfirmFn, Node, NodeConfig, PairingPrompt};
+use ferry_core::proto::Event;
 use ferry_core::{identity, trust::TrustStore};
 
 #[derive(Parser)]
@@ -59,6 +60,12 @@ enum Cmd {
         peer: String,
         #[arg(required = true)]
         files: Vec<PathBuf>,
+    },
+    /// Send one Phase 2 event: clip <text> | link <url> | ring | stop-ring | play-pause | next | prev
+    Event {
+        peer: String,
+        kind: String,
+        arg: Option<String>,
     },
     /// Create a random file of <gib> GiB (for throughput tests)
     BenchFile { path: PathBuf, gib: f64 },
@@ -172,7 +179,10 @@ async fn main() -> Result<()> {
             let p = res?;
             println!("paired with {} ({})", p.name, p.id);
         }
-        Cmd::Send { peer, files } => send(&data_dir, &name, &peer, &files).await?,
+        Cmd::Send { peer, files } => send(&data_dir, &name, &peer, Ok(&files)).await?,
+        Cmd::Event { peer, kind, arg } => {
+            send(&data_dir, &name, &peer, Err(event(&kind, arg)?)).await?
+        }
         Cmd::BenchFile { path, gib } => bench_file(&path, gib)?,
     }
     Ok(())
@@ -186,6 +196,8 @@ async fn start(data_dir: &Path, name: &str, download_dir: PathBuf, yes: bool) ->
         accept: Arc::new(|o| vec![true; o.items.len()]), // only paired peers get this far
         events: event_printer(),
         confirm_pairing: confirm_fn(yes),
+        // Phase 2 events from the phone, printed for testing
+        on_event: Arc::new(|peer, ev| println!("event from {}: {:?}", &peer[..10], ev.kind)),
     })
     .await
 }
@@ -277,7 +289,33 @@ async fn usb_pair(node: &Arc<Node>, serial: Option<String>, adb: Option<PathBuf>
     bail!("the phone did not pair within 10 minutes")
 }
 
-async fn send(data_dir: &Path, name: &str, peer: &str, files: &[PathBuf]) -> Result<()> {
+fn event(kind: &str, arg: Option<String>) -> Result<Event> {
+    use ferry_core::proto::{event::Kind, media_command::Cmd, *};
+    let text = || {
+        arg.clone()
+            .with_context(|| format!("`{kind}` needs a text argument"))
+    };
+    let media = |cmd: Cmd| Kind::MediaCommand(MediaCommand { cmd: cmd.into() });
+    let kind = match kind {
+        "clip" => Kind::Clipboard(Clipboard { text: text()? }),
+        "link" => Kind::Link(Link { url: text()? }),
+        "ring" => Kind::Ring(Ring { start: true }),
+        "stop-ring" => Kind::Ring(Ring { start: false }),
+        "play-pause" => media(Cmd::PlayPause),
+        "next" => media(Cmd::Next),
+        "prev" => media(Cmd::Previous),
+        _ => bail!("unknown event `{kind}`"),
+    };
+    Ok(Event { kind: Some(kind) })
+}
+
+/// Sends files (Ok) or one event (Err) to a paired device.
+async fn send(
+    data_dir: &Path,
+    name: &str,
+    peer: &str,
+    what: Result<&[PathBuf], Event>,
+) -> Result<()> {
     let node = start(data_dir, name, PathBuf::from("received"), false).await?;
     let res = async {
         let peers = node.peers();
@@ -326,6 +364,14 @@ async fn send(data_dir: &Path, name: &str, peer: &str, files: &[PathBuf]) -> Res
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
+        let files = match what {
+            Ok(files) => files,
+            Err(ev) => {
+                node.send_event(&id, &ev).await?;
+                println!("sent {:?}", ev.kind);
+                return Ok(());
+            }
+        };
         let r = node.send_files(&id, files).await?;
         let secs = r.elapsed.as_secs_f64();
         println!(

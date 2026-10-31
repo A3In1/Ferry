@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use ferry_core::file::{AcceptFn, EventSink, FileEvent};
 use ferry_core::node::{ConfirmFn, Node, NodeConfig, PairingPrompt};
+use ferry_core::proto;
 use ferry_core::trust::TrustedPeer;
 
 uniffi::setup_scaffolding!();
@@ -42,6 +43,204 @@ pub trait FerryDelegate: Send + Sync {
     fn on_file_event(&self, event: FfiFileEvent);
     /// Show `code` and ask the user whether it matches the other device.
     async fn confirm_pairing(&self, peer_name: String, code: String) -> bool;
+    /// A Phase 2 event (notification, clipboard, media, battery, ring, link) from a paired peer.
+    fn on_event(&self, peer_id: String, event: FfiEvent);
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiNotifButton {
+    pub id: String,
+    pub title: String,
+    /// Takes text input (a reply action).
+    pub reply: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum FfiMediaCmd {
+    PlayPause,
+    Next,
+    Previous,
+}
+
+/// Mirror of the protobuf `Event` oneof (proto/ferry.proto) for Swift and Kotlin.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum FfiEvent {
+    /// phone → Mac; the same key again is an update
+    Notification {
+        key: String,
+        app_name: String,
+        package: String,
+        title: String,
+        text: String,
+        posted_unix_ms: i64,
+        buttons: Vec<FfiNotifButton>,
+    },
+    NotificationRemoved {
+        key: String,
+    },
+    /// Mac → phone: press a button (with optional reply text) or dismiss
+    NotificationAction {
+        key: String,
+        button_id: String,
+        reply_text: String,
+        dismiss: bool,
+    },
+    Clipboard {
+        text: String,
+    },
+    /// phone → Mac; active = false clears it
+    NowPlaying {
+        active: bool,
+        app_name: String,
+        title: String,
+        artist: String,
+        playing: bool,
+        duration_ms: i64,
+        position_ms: i64,
+    },
+    MediaCommand {
+        cmd: FfiMediaCmd,
+    },
+    Battery {
+        percent: u32,
+        charging: bool,
+    },
+    /// Mac → phone: find my phone (start = false stops ringing)
+    Ring {
+        start: bool,
+    },
+    Link {
+        url: String,
+    },
+}
+
+impl FfiEvent {
+    /// None for event kinds this version doesn't know.
+    fn from_proto(e: proto::Event) -> Option<Self> {
+        use proto::event::Kind;
+        Some(match e.kind? {
+            Kind::Notification(n) => Self::Notification {
+                key: n.key,
+                app_name: n.app_name,
+                package: n.package,
+                title: n.title,
+                text: n.text,
+                posted_unix_ms: n.posted_unix_ms,
+                buttons: (n.buttons.into_iter())
+                    .map(|b| FfiNotifButton {
+                        id: b.id,
+                        title: b.title,
+                        reply: b.reply,
+                    })
+                    .collect(),
+            },
+            Kind::NotificationRemoved(n) => Self::NotificationRemoved { key: n.key },
+            Kind::NotificationAction(a) => Self::NotificationAction {
+                key: a.key,
+                button_id: a.button_id,
+                reply_text: a.reply_text,
+                dismiss: a.dismiss,
+            },
+            Kind::Clipboard(c) => Self::Clipboard { text: c.text },
+            Kind::NowPlaying(n) => Self::NowPlaying {
+                active: n.active,
+                app_name: n.app_name,
+                title: n.title,
+                artist: n.artist,
+                playing: n.playing,
+                duration_ms: n.duration_ms,
+                position_ms: n.position_ms,
+            },
+            Kind::MediaCommand(m) => Self::MediaCommand {
+                cmd: match proto::media_command::Cmd::try_from(m.cmd).ok()? {
+                    proto::media_command::Cmd::PlayPause => FfiMediaCmd::PlayPause,
+                    proto::media_command::Cmd::Next => FfiMediaCmd::Next,
+                    proto::media_command::Cmd::Previous => FfiMediaCmd::Previous,
+                },
+            },
+            Kind::Battery(b) => Self::Battery {
+                percent: b.percent,
+                charging: b.charging,
+            },
+            Kind::Ring(r) => Self::Ring { start: r.start },
+            Kind::Link(l) => Self::Link { url: l.url },
+        })
+    }
+
+    fn into_proto(self) -> proto::Event {
+        use proto::event::Kind;
+        let kind = match self {
+            Self::Notification {
+                key,
+                app_name,
+                package,
+                title,
+                text,
+                posted_unix_ms,
+                buttons,
+            } => Kind::Notification(proto::Notification {
+                key,
+                app_name,
+                package,
+                title,
+                text,
+                posted_unix_ms,
+                buttons: (buttons.into_iter())
+                    .map(|b| proto::NotifButton {
+                        id: b.id,
+                        title: b.title,
+                        reply: b.reply,
+                    })
+                    .collect(),
+            }),
+            Self::NotificationRemoved { key } => {
+                Kind::NotificationRemoved(proto::NotificationRemoved { key })
+            }
+            Self::NotificationAction {
+                key,
+                button_id,
+                reply_text,
+                dismiss,
+            } => Kind::NotificationAction(proto::NotificationAction {
+                key,
+                button_id,
+                reply_text,
+                dismiss,
+            }),
+            Self::Clipboard { text } => Kind::Clipboard(proto::Clipboard { text }),
+            Self::NowPlaying {
+                active,
+                app_name,
+                title,
+                artist,
+                playing,
+                duration_ms,
+                position_ms,
+            } => Kind::NowPlaying(proto::NowPlaying {
+                active,
+                app_name,
+                title,
+                artist,
+                playing,
+                duration_ms,
+                position_ms,
+            }),
+            Self::MediaCommand { cmd } => Kind::MediaCommand(proto::MediaCommand {
+                cmd: match cmd {
+                    FfiMediaCmd::PlayPause => proto::media_command::Cmd::PlayPause,
+                    FfiMediaCmd::Next => proto::media_command::Cmd::Next,
+                    FfiMediaCmd::Previous => proto::media_command::Cmd::Previous,
+                }
+                .into(),
+            }),
+            Self::Battery { percent, charging } => {
+                Kind::Battery(proto::Battery { percent, charging })
+            }
+            Self::Ring { start } => Kind::Ring(proto::Ring { start }),
+            Self::Link { url } => Kind::Link(proto::Link { url }),
+        };
+        proto::Event { kind: Some(kind) }
+    }
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -200,6 +399,14 @@ impl FerryNode {
             accept,
             events,
             confirm_pairing: confirm_fn(delegate.clone()),
+            on_event: {
+                let d = delegate.clone();
+                Arc::new(move |peer, ev| {
+                    if let Some(ev) = FfiEvent::from_proto(ev) {
+                        d.on_event(peer, ev)
+                    }
+                })
+            },
         })
         .await?;
         Ok(Arc::new(Self { node, delegate }))
@@ -277,6 +484,11 @@ impl FerryNode {
     }
 
     /// Send with display names (Android: path `/proc/self/fd/N` + the document's name).
+    /// Send one event to a paired peer over the shared session.
+    pub async fn send_event(&self, peer_id: String, event: FfiEvent) -> Result<()> {
+        Ok(self.node.send_event(&peer_id, &event.into_proto()).await?)
+    }
+
     pub async fn send_named(
         &self,
         peer_id: String,
@@ -339,5 +551,61 @@ mod tests {
     #[test]
     fn hex_encodes() {
         assert_eq!(super::hex(&[0x00, 0xab, 0x0f]), "00ab0f");
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+
+    #[test]
+    fn every_event_round_trips_through_proto() {
+        let all = [
+            FfiEvent::Notification {
+                key: "k".into(),
+                app_name: "Chat".into(),
+                package: "com.chat".into(),
+                title: "Ann".into(),
+                text: "hi".into(),
+                posted_unix_ms: 7,
+                buttons: vec![FfiNotifButton {
+                    id: "r".into(),
+                    title: "Reply".into(),
+                    reply: true,
+                }],
+            },
+            FfiEvent::NotificationRemoved { key: "k".into() },
+            FfiEvent::NotificationAction {
+                key: "k".into(),
+                button_id: "r".into(),
+                reply_text: "ok".into(),
+                dismiss: false,
+            },
+            FfiEvent::Clipboard { text: "x".into() },
+            FfiEvent::NowPlaying {
+                active: true,
+                app_name: "Music".into(),
+                title: "Song".into(),
+                artist: "Band".into(),
+                playing: true,
+                duration_ms: 1000,
+                position_ms: 10,
+            },
+            FfiEvent::MediaCommand {
+                cmd: FfiMediaCmd::Next,
+            },
+            FfiEvent::Battery {
+                percent: 42,
+                charging: true,
+            },
+            FfiEvent::Ring { start: true },
+            FfiEvent::Link {
+                url: "https://example.com".into(),
+            },
+        ];
+        for e in all {
+            assert_eq!(FfiEvent::from_proto(e.clone().into_proto()), Some(e));
+        }
+        assert_eq!(FfiEvent::from_proto(proto::Event { kind: None }), None);
     }
 }

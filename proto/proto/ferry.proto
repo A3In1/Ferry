@@ -51,3 +51,72 @@ message ItemResult {
   string error = 3;
   string saved_as = 4; // final file name after sanitising and conflict handling
 }
+
+// --- Events channel: small realtime messages (Phase 2), one Event per message ---
+// Unknown oneof variants decode as an empty Event; receivers ignore them (forward compatible).
+message Event {
+  oneof kind {
+    Notification notification = 1;
+    NotificationRemoved notification_removed = 2;
+    NotificationAction notification_action = 3;
+    Clipboard clipboard = 4;
+    NowPlaying now_playing = 5;
+    MediaCommand media_command = 6;
+    Battery battery = 7;
+    Ring ring = 8;
+    Link link = 9;
+  }
+}
+message NotifButton {
+  string id = 1;
+  string title = 2;
+  bool reply = 3; // takes text input (RemoteInput)
+}
+message Notification { // phone → Mac; same key again = update
+  string key = 1;
+  string app_name = 2;
+  string package = 3;
+  string title = 4;
+  string text = 5;
+  int64 posted_unix_ms = 6;
+  repeated NotifButton buttons = 7;
+}
+message NotificationRemoved { // phone → Mac
+  string key = 1;
+}
+message NotificationAction { // Mac → phone
+  string key = 1;
+  string button_id = 2; // empty with dismiss = true
+  string reply_text = 3;
+  bool dismiss = 4;
+}
+message Clipboard { // both ways
+  string text = 1;
+}
+message NowPlaying { // phone → Mac; active = false clears it
+  bool active = 1;
+  string app_name = 2;
+  string title = 3;
+  string artist = 4;
+  bool playing = 5;
+  int64 duration_ms = 6;
+  int64 position_ms = 7;
+}
+message MediaCommand { // Mac → phone
+  enum Cmd {
+    PLAY_PAUSE = 0;
+    NEXT = 1;
+    PREVIOUS = 2;
+  }
+  Cmd cmd = 1;
+}
+message Battery { // phone → Mac
+  uint32 percent = 1;
+  bool charging = 2;
+}
+message Ring { // Mac → phone: find my phone
+  bool start = 1; // false = stop ringing
+}
+message Link { // both ways: open this URL on the other device
+  string url = 1;
+}

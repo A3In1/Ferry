@@ -395,6 +395,7 @@ mod tests {
             accept: Arc::new(|o| vec![true; o.items.len()]),
             events: Arc::new(|_| {}),
             confirm_pairing: confirm_fn(answer, codes.clone()),
+            on_event: Arc::new(|_, _| {}),
         })
         .await
         .unwrap();

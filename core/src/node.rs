@@ -22,10 +22,12 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::channel::{CH_CONTROL, CH_FILE, read_msg, read_prefix, write_msg, write_prefix};
+use crate::channel::{
+    CH_CONTROL, CH_EVENTS, CH_FILE, read_msg, read_prefix, write_msg, write_prefix,
+};
 use crate::file::{self, AcceptFn, EventSink, Receiver, SendReport};
 use crate::pairing::{self, Me, PairedPeer, TICKET_TTL, Ticket};
-use crate::proto::Hello;
+use crate::proto::{Event, Hello};
 use crate::trust::{TrustStore, TrustedPeer};
 use crate::{ALPN_PAIR, ALPN_SESSION, PROTOCOL_VERSION, discovery, identity};
 
@@ -48,7 +50,11 @@ pub struct NodeConfig {
     pub events: EventSink,
     /// Asked on the ticket-showing side when someone scans our QR.
     pub confirm_pairing: ConfirmFn,
+    /// Events from paired peers: (peer id, event).
+    pub on_event: EventFn,
 }
+
+pub type EventFn = Arc<dyn Fn(String, Event) + Send + Sync>;
 
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connection close codes (application level).
@@ -79,6 +85,9 @@ pub struct Node {
     /// The live incoming session per peer. A reconnecting peer (e.g. after a crash) replaces
     /// its old one at once instead of waiting for the idle timeout, which frees its partial files.
     sessions: Mutex<HashMap<EndpointId, Connection>>,
+    /// Serialises dialing so concurrent sends to one peer share a single new session.
+    dial: tokio::sync::Mutex<()>,
+    on_event: EventFn,
     #[cfg(feature = "mdns")]
     mdns: Mutex<Option<discovery::Mdns>>,
 }
@@ -122,6 +131,8 @@ impl Node {
             receiver: Receiver::new(cfg.download_dir, cfg.accept, cfg.events.clone()),
             events: cfg.events,
             sessions: Mutex::default(),
+            dial: tokio::sync::Mutex::default(),
+            on_event: cfg.on_event,
             #[cfg(feature = "mdns")]
             mdns: Mutex::new(None),
         });
@@ -259,7 +270,11 @@ impl Node {
             .map_or(0, |a| a.port())
     }
 
-    pub async fn send_files(&self, peer_id: &str, paths: &[PathBuf]) -> Result<SendReport> {
+    pub async fn send_files(
+        self: &Arc<Self>,
+        peer_id: &str,
+        paths: &[PathBuf],
+    ) -> Result<SendReport> {
         let files: Vec<(PathBuf, Option<String>)> =
             paths.iter().map(|p| (p.clone(), None)).collect();
         self.send_named(peer_id, &files).await
@@ -267,11 +282,42 @@ impl Node {
 
     /// [`Node::send_files`] with an optional display name per file (see [`file::send_named`]).
     pub async fn send_named(
-        &self,
+        self: &Arc<Self>,
         peer_id: &str,
         files: &[(PathBuf, Option<String>)],
     ) -> Result<SendReport> {
         let id = self.trusted(peer_id)?;
+        let conn = self.session(id).await?;
+        match file::send_named(&conn, files, self.events.clone()).await {
+            // the cached session died under us (peer restarted): one retry on a fresh one
+            Err(_) if conn.close_reason().is_some() => {
+                let conn = self.session(id).await?;
+                file::send_named(&conn, files, self.events.clone()).await
+            }
+            r => r,
+        }
+    }
+
+    /// Send one event (notification, clipboard, ...) to a paired peer.
+    pub async fn send_event(self: &Arc<Self>, peer_id: &str, ev: &Event) -> Result<()> {
+        let id = self.trusted(peer_id)?;
+        let conn = self.session(id).await?;
+        match send_event_on(&conn, ev).await {
+            Err(_) if conn.close_reason().is_some() => {
+                send_event_on(&self.session(id).await?, ev).await
+            }
+            r => r,
+        }
+    }
+
+    /// The live session with `id` (either direction), or a newly dialed one.
+    async fn session(self: &Arc<Self>, id: EndpointId) -> Result<Connection> {
+        let _dialing = self.dial.lock().await;
+        if let Some(c) = self.sessions.lock().unwrap().get(&id)
+            && c.close_reason().is_none()
+        {
+            return Ok(c.clone());
+        }
         let conn = timeout(
             NET_TIMEOUT,
             // iroh skips the lookup when it already has a path; name the USB one explicitly
@@ -283,19 +329,40 @@ impl Node {
         .await
         .context("connecting timed out (is the other device on this network?)")?
         .context("connect")?;
-        let res = async {
-            let _control = hello_initiate(&conn, self.hello())
-                .await
-                .with_context(|| match conn.close_reason() {
-                    Some(r) => format!("session refused: {r}"),
-                    None => "session handshake".into(),
-                })?;
-            file::send_named(&conn, files, self.events.clone()).await
+        let control = hello_initiate(&conn, self.hello()).await.with_context(|| {
+            match conn.close_reason() {
+                Some(r) => format!("session refused: {r}"),
+                None => "session handshake".into(),
+            }
+        })?;
+        self.adopt(id, &conn);
+        let node = self.clone();
+        let c = conn.clone();
+        tokio::spawn(async move {
+            let _control = control; // keep the control stream open for the session's life
+            node.serve_streams(&c).await;
+            node.drop_session(id, &c);
+        });
+        Ok(conn)
+    }
+
+    /// Makes `conn` the session for `id`, closing any older one.
+    fn adopt(&self, id: EndpointId, conn: &Connection) {
+        if let Some(old) = self.sessions.lock().unwrap().insert(id, conn.clone())
+            && old.stable_id() != conn.stable_id()
+        {
+            old.close(ERR_REPLACED.into(), b"replaced by a new session");
         }
-        .await;
-        // send_files returns only after every ItemResult arrived, so nothing is cut off
-        conn.close(0u32.into(), b"done");
-        res
+    }
+
+    fn drop_session(&self, id: EndpointId, conn: &Connection) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions
+            .get(&id)
+            .is_some_and(|c| c.stable_id() == conn.stable_id())
+        {
+            sessions.remove(&id);
+        }
     }
 
     pub async fn shutdown(&self) {
@@ -318,7 +385,7 @@ impl Node {
         Hello {
             protocol_version: PROTOCOL_VERSION,
             device_name: self.name.clone(),
-            channels: vec![CH_CONTROL.into(), CH_FILE.into()],
+            channels: vec![CH_CONTROL.into(), CH_FILE.into(), CH_EVENTS.into()],
         }
     }
 
@@ -413,29 +480,23 @@ impl Node {
         if let Some(a) = from.filter(|a| !self.is_usb_addr(*a)) {
             self.remember_addrs(id, &[a]);
         }
-        if let Some(old) = self.sessions.lock().unwrap().insert(id, conn.clone()) {
-            old.close(ERR_REPLACED.into(), b"replaced by a new session");
-        }
-        let res = self.serve_session(&conn).await;
-        let mut sessions = self.sessions.lock().unwrap();
-        if sessions
-            .get(&id)
-            .is_some_and(|c| c.stable_id() == conn.stable_id())
-        {
-            sessions.remove(&id);
-        }
-        res
-    }
-
-    async fn serve_session(&self, conn: &Connection) -> Result<()> {
-        let id = conn.remote_id();
-        let _control = match hello_respond(conn, self.hello()).await {
+        let _control = match hello_respond(&conn, self.hello()).await {
             Ok(c) => c,
             Err(e) => {
                 conn.close(ERR_HELLO.into(), b"bad hello");
                 return Err(e.context("session hello"));
             }
         };
+        self.adopt(id, &conn);
+        self.serve_streams(&conn).await;
+        self.drop_session(id, &conn);
+        Ok(())
+    }
+
+    /// Routes the peer's streams until the connection ends. Both directions run this, so
+    /// either side can push files or events over one session.
+    async fn serve_streams(&self, conn: &Connection) {
+        let peer = conn.remote_id().to_z32();
         loop {
             tokio::select! {
                 bi = conn.accept_bi() => {
@@ -444,13 +505,22 @@ impl Node {
                 }
                 uni = conn.accept_uni() => {
                     let Ok(recv) = uni else { break };
-                    tokio::spawn(route_uni(self.receiver.clone(), recv));
+                    tokio::spawn(route_uni(self.receiver.clone(), self.on_event.clone(), peer.clone(), recv));
                 }
             }
         }
-        debug!(remote = %id.fmt_short(), reason = ?conn.close_reason(), "session ended");
-        Ok(())
+        debug!(remote = %peer, reason = ?conn.close_reason(), "session ended");
     }
+}
+
+async fn send_event_on(conn: &Connection, ev: &Event) -> Result<()> {
+    let mut s = timeout(NET_TIMEOUT, conn.open_uni()).await??;
+    write_prefix(&mut s, CH_EVENTS).await?;
+    write_msg(&mut s, ev).await?;
+    s.finish()?;
+    // shortcut: one stream per event, so two events sent back to back may arrive out of
+    // order; use a single ordered stream per session if that ever matters (notif add/remove).
+    Ok(())
 }
 
 /// Unknown channels are refused per stream, never per connection, so newer peers keep working.
@@ -469,13 +539,19 @@ async fn route_bi(rx: Arc<Receiver>, mut send: SendStream, mut recv: RecvStream)
     }
 }
 
-async fn route_uni(rx: Arc<Receiver>, mut recv: RecvStream) {
+async fn route_uni(rx: Arc<Receiver>, on_event: EventFn, peer: String, mut recv: RecvStream) {
     match timeout(NET_TIMEOUT, read_prefix(&mut recv)).await {
         Ok(Ok(CH_FILE)) => {
             if let Err(e) = rx.handle_data(recv).await {
                 warn!("file data stream: {e:#}");
             }
         }
+        Ok(Ok(CH_EVENTS)) => match timeout(NET_TIMEOUT, read_msg::<_, Event>(&mut recv)).await {
+            // an Event without a kind is a variant this version doesn't know: ignore it
+            Ok(Ok(ev)) if ev.kind.is_some() => on_event(peer, ev),
+            Ok(Ok(_)) => {}
+            other => warn!("event stream: {other:?}"),
+        },
         other => {
             debug!("refusing uni stream: {other:?}");
             let _ = recv.stop(ERR_UNKNOWN_CHANNEL.into());
