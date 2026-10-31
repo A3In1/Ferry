@@ -341,6 +341,58 @@ impl From<TrustedPeer> for FfiPeer {
     }
 }
 
+const STREAM_BUF: usize = 256 * 1024;
+
+/// Implemented by the app around its socket (e.g. Bluetooth L2CAP).
+#[uniffi::export(foreign)]
+pub trait ByteSink: Send + Sync {
+    /// Write all of `data` to the socket; false if it's closed.
+    fn write(&self, data: Vec<u8>) -> bool;
+    /// The bridge ended: close the socket.
+    fn close(&self);
+}
+
+#[derive(uniffi::Object)]
+pub struct StreamBridge {
+    to_core: tokio::sync::Mutex<Option<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    peer: tokio::sync::Mutex<
+        Option<tokio::sync::oneshot::Receiver<std::result::Result<String, String>>>,
+    >,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl StreamBridge {
+    /// Bytes read from the socket. Errors once the bridge has ended.
+    pub async fn push(&self, data: Vec<u8>) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut w = self.to_core.lock().await;
+        let w = w
+            .as_mut()
+            .ok_or_else(|| FerryError::from(anyhow::anyhow!("bridge closed")))?;
+        w.write_all(&data)
+            .await
+            .map_err(|e| FerryError::from(anyhow::Error::from(e)))
+    }
+
+    /// The socket closed (or the app is done): ends the bridge.
+    pub async fn close(&self) {
+        self.to_core.lock().await.take();
+    }
+
+    /// The paired device on the other end, once the bridge hello completes (first call only).
+    pub async fn wait_peer(&self) -> Result<String> {
+        let rx = self
+            .peer
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| FerryError::from(anyhow::anyhow!("already awaited")))?;
+        rx.await
+            .map_err(|_| FerryError::from(anyhow::anyhow!("bridge task ended")))?
+            .map_err(|e| FerryError::from(anyhow::anyhow!(e)))
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiUsbLink {
     pub serial: String,
@@ -484,6 +536,48 @@ impl FerryNode {
     }
 
     /// Send with display names (Android: path `/proc/self/fd/N` + the document's name).
+    /// Carry the session over an app-owned byte stream (Bluetooth L2CAP). Feed bytes read from
+    /// the socket to `push`; the core writes outgoing bytes through `sink`. `label` e.g. "ble:<addr>".
+    /// Async so it runs on the tokio runtime: it spawns the bridge tasks.
+    pub async fn open_stream_bridge(
+        &self,
+        label: String,
+        sink: Arc<dyn ByteSink>,
+    ) -> Arc<StreamBridge> {
+        let (core_end, app_end) = tokio::io::duplex(STREAM_BUF);
+        let (mut from_core, to_core) = tokio::io::split(app_end);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let node = self.node.clone();
+        tokio::spawn(async move {
+            let _ = done_tx.send(
+                node.attach_stream(core_end, label)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+            );
+        });
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 16 * 1024];
+            // core → socket; the sink may block on the radio, so call it off the async workers
+            while let Ok(n) = from_core.read(&mut buf).await {
+                let s = sink.clone();
+                let chunk = buf[..n].to_vec();
+                if n == 0
+                    || !tokio::task::spawn_blocking(move || s.write(chunk))
+                        .await
+                        .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+            sink.close();
+        });
+        Arc::new(StreamBridge {
+            to_core: tokio::sync::Mutex::new(Some(to_core)),
+            peer: tokio::sync::Mutex::new(Some(done_rx)),
+        })
+    }
+
     /// Re-announce our addresses to a paired peer after a network change (fresh session).
     pub async fn check_in(&self, peer_id: String) -> Result<()> {
         Ok(self.node.check_in(&peer_id).await?)

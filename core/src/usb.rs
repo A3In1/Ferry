@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use iroh::EndpointId;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -109,6 +109,7 @@ impl Node {
                 };
                 let n = n.clone();
                 tokio::spawn(async move {
+                    let _ = tcp.set_nodelay(true);
                     if let Err(e) = n.start_bridge(tcp, String::new()).await {
                         debug!(%from, "USB bridge refused: {e:#}");
                     }
@@ -129,7 +130,18 @@ impl Node {
         .await
         .context("USB bridge connect timed out")?
         .with_context(|| format!("connect to 127.0.0.1:{tcp_port}"))?;
+        tcp.set_nodelay(true)?;
         Ok(self.start_bridge(tcp, serial).await?.to_z32())
+    }
+
+    /// Bridge over any reliable byte stream the app owns, e.g. a Bluetooth L2CAP channel
+    /// (`label` like "ble:<address>"). Same hello and framing as USB; returns the peer's id.
+    /// A Bluetooth bridge never replaces a live USB one (far faster).
+    pub async fn attach_stream<S>(self: &Arc<Self>, stream: S, label: String) -> Result<String>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        Ok(self.start_bridge(stream, label).await?.to_z32())
     }
 
     /// Mac side: background task that attaches/detaches phones as they are plugged in.
@@ -202,13 +214,12 @@ impl Node {
         }
     }
 
-    async fn start_bridge(
-        self: &Arc<Self>,
-        mut tcp: TcpStream,
-        serial: String,
-    ) -> Result<EndpointId> {
-        tcp.set_nodelay(true)?;
-        let peer = hello(&mut tcp, self.endpoint.id()).await?;
+    async fn start_bridge<S>(self: &Arc<Self>, stream: S, serial: String) -> Result<EndpointId>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let mut stream = Box::pin(stream);
+        let peer = hello(&mut stream, self.endpoint.id()).await?;
         let port = self.port();
         ensure!(port != 0, "endpoint has no IPv4 socket");
         let endpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -221,10 +232,16 @@ impl Node {
             usb.bridges.len() < MAX_BRIDGES || usb.bridges.contains_key(&peer),
             "too many USB bridges"
         );
+        if serial.starts_with("ble:")
+            && let Some(b) = usb.bridges.get(&peer)
+            && !b.serial.starts_with("ble:")
+        {
+            bail!("{} already has a USB bridge", peer.fmt_short());
+        }
         let (n, b) = (self.clone(), bytes.clone());
         // spawned under the lock, so its cleanup can't run before the insert below
         let task = tokio::spawn(async move {
-            let (r, w) = tcp.split();
+            let (r, w) = tokio::io::split(stream);
             let res = tokio::select! {
                 r = tcp_to_udp(r, &udp, endpoint, &b) => r,
                 r = udp_to_tcp(&udp, endpoint, w, &b) => r,

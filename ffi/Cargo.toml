@@ -21,6 +21,7 @@ default = ["mdns"]
 mdns = ["ferry-core/mdns"]
 
 [dependencies]
+tokio.workspace = true
 ferry-core.workspace = true
 anyhow.workspace = true
 uniffi = { version = "=0.32.2", features = ["tokio"] }
