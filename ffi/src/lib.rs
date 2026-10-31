@@ -162,6 +162,183 @@ pub enum FfiEvent {
     Link {
         url: String,
     },
+    /// Mac → phone; answered with SmsThreads
+    SmsThreadsRequest {
+        limit: i32,
+    },
+    SmsThreads {
+        threads: Vec<FfiSmsThread>,
+    },
+    /// Mac → phone; answered with SmsMessages
+    SmsMessagesRequest {
+        thread_id: i64,
+        limit: i32,
+    },
+    SmsMessages {
+        thread_id: i64,
+        messages: Vec<FfiSmsMessage>,
+    },
+    /// phone → Mac: a text just arrived
+    SmsNew {
+        message: FfiSmsMessage,
+    },
+    /// Mac → phone: the user pressed Send on the Mac
+    SmsSend {
+        address: String,
+        body: String,
+    },
+    Call {
+        state: FfiCallState,
+        number: String,
+        name: String,
+    },
+    CallCommand {
+        cmd: FfiCallCmd,
+    },
+    CallLogRequest {
+        limit: i32,
+    },
+    CallLog {
+        calls: Vec<FfiCallEntry>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiSmsThread {
+    pub thread_id: i64,
+    pub address: String,
+    pub name: String,
+    pub snippet: String,
+    pub date_ms: i64,
+    pub unread: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiSmsMessage {
+    pub id: i64,
+    pub thread_id: i64,
+    pub address: String,
+    pub name: String,
+    pub body: String,
+    pub date_ms: i64,
+    pub outgoing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum FfiCallState {
+    Idle,
+    Ringing,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum FfiCallCmd {
+    Answer,
+    Decline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum FfiCallKind {
+    Incoming,
+    Outgoing,
+    Missed,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiCallEntry {
+    pub number: String,
+    pub name: String,
+    pub date_ms: i64,
+    pub duration_s: i32,
+    pub kind: FfiCallKind,
+}
+
+impl From<proto::SmsThread> for FfiSmsThread {
+    fn from(t: proto::SmsThread) -> Self {
+        let proto::SmsThread {
+            thread_id,
+            address,
+            name,
+            snippet,
+            date_ms,
+            unread,
+        } = t;
+        Self {
+            thread_id,
+            address,
+            name,
+            snippet,
+            date_ms,
+            unread,
+        }
+    }
+}
+
+impl From<FfiSmsThread> for proto::SmsThread {
+    fn from(t: FfiSmsThread) -> Self {
+        let FfiSmsThread {
+            thread_id,
+            address,
+            name,
+            snippet,
+            date_ms,
+            unread,
+        } = t;
+        Self {
+            thread_id,
+            address,
+            name,
+            snippet,
+            date_ms,
+            unread,
+        }
+    }
+}
+
+impl From<proto::SmsMessage> for FfiSmsMessage {
+    fn from(m: proto::SmsMessage) -> Self {
+        let proto::SmsMessage {
+            id,
+            thread_id,
+            address,
+            name,
+            body,
+            date_ms,
+            outgoing,
+        } = m;
+        Self {
+            id,
+            thread_id,
+            address,
+            name,
+            body,
+            date_ms,
+            outgoing,
+        }
+    }
+}
+
+impl From<FfiSmsMessage> for proto::SmsMessage {
+    fn from(m: FfiSmsMessage) -> Self {
+        let FfiSmsMessage {
+            id,
+            thread_id,
+            address,
+            name,
+            body,
+            date_ms,
+            outgoing,
+        } = m;
+        Self {
+            id,
+            thread_id,
+            address,
+            name,
+            body,
+            date_ms,
+            outgoing,
+        }
+    }
 }
 
 impl FfiEvent {
@@ -214,6 +391,56 @@ impl FfiEvent {
             },
             Kind::Ring(r) => Self::Ring { start: r.start },
             Kind::Link(l) => Self::Link { url: l.url },
+            Kind::SmsThreadsRequest(r) => Self::SmsThreadsRequest { limit: r.limit },
+            Kind::SmsThreads(t) => Self::SmsThreads {
+                threads: t.threads.into_iter().map(Into::into).collect(),
+            },
+            Kind::SmsMessagesRequest(r) => Self::SmsMessagesRequest {
+                thread_id: r.thread_id,
+                limit: r.limit,
+            },
+            Kind::SmsMessages(m) => Self::SmsMessages {
+                thread_id: m.thread_id,
+                messages: m.messages.into_iter().map(Into::into).collect(),
+            },
+            Kind::SmsNew(m) => Self::SmsNew { message: m.into() },
+            Kind::SmsSend(m) => Self::SmsSend {
+                address: m.address,
+                body: m.body,
+            },
+            Kind::Call(c) => Self::Call {
+                state: match proto::call::State::try_from(c.state).ok()? {
+                    proto::call::State::Idle => FfiCallState::Idle,
+                    proto::call::State::Ringing => FfiCallState::Ringing,
+                    proto::call::State::Active => FfiCallState::Active,
+                },
+                number: c.number,
+                name: c.name,
+            },
+            Kind::CallCommand(c) => Self::CallCommand {
+                cmd: match proto::call_command::Cmd::try_from(c.cmd).ok()? {
+                    proto::call_command::Cmd::Answer => FfiCallCmd::Answer,
+                    proto::call_command::Cmd::Decline => FfiCallCmd::Decline,
+                },
+            },
+            Kind::CallLogRequest(r) => Self::CallLogRequest { limit: r.limit },
+            Kind::CallLog(l) => Self::CallLog {
+                calls: (l.calls.into_iter())
+                    .filter_map(|c| {
+                        Some(FfiCallEntry {
+                            kind: match proto::call_entry::Kind::try_from(c.kind).ok()? {
+                                proto::call_entry::Kind::Incoming => FfiCallKind::Incoming,
+                                proto::call_entry::Kind::Outgoing => FfiCallKind::Outgoing,
+                                proto::call_entry::Kind::Missed => FfiCallKind::Missed,
+                            },
+                            number: c.number,
+                            name: c.name,
+                            date_ms: c.date_ms,
+                            duration_s: c.duration_s,
+                        })
+                    })
+                    .collect(),
+            },
         })
     }
 
@@ -288,6 +515,62 @@ impl FfiEvent {
             }
             Self::Ring { start } => Kind::Ring(proto::Ring { start }),
             Self::Link { url } => Kind::Link(proto::Link { url }),
+            Self::SmsThreadsRequest { limit } => {
+                Kind::SmsThreadsRequest(proto::SmsThreadsRequest { limit })
+            }
+            Self::SmsThreads { threads } => Kind::SmsThreads(proto::SmsThreads {
+                threads: threads.into_iter().map(Into::into).collect(),
+            }),
+            Self::SmsMessagesRequest { thread_id, limit } => {
+                Kind::SmsMessagesRequest(proto::SmsMessagesRequest { thread_id, limit })
+            }
+            Self::SmsMessages {
+                thread_id,
+                messages,
+            } => Kind::SmsMessages(proto::SmsMessages {
+                thread_id,
+                messages: messages.into_iter().map(Into::into).collect(),
+            }),
+            Self::SmsNew { message } => Kind::SmsNew(message.into()),
+            Self::SmsSend { address, body } => Kind::SmsSend(proto::SmsSend { address, body }),
+            Self::Call {
+                state,
+                number,
+                name,
+            } => Kind::Call(proto::Call {
+                state: match state {
+                    FfiCallState::Idle => proto::call::State::Idle,
+                    FfiCallState::Ringing => proto::call::State::Ringing,
+                    FfiCallState::Active => proto::call::State::Active,
+                }
+                .into(),
+                number,
+                name,
+            }),
+            Self::CallCommand { cmd } => Kind::CallCommand(proto::CallCommand {
+                cmd: match cmd {
+                    FfiCallCmd::Answer => proto::call_command::Cmd::Answer,
+                    FfiCallCmd::Decline => proto::call_command::Cmd::Decline,
+                }
+                .into(),
+            }),
+            Self::CallLogRequest { limit } => Kind::CallLogRequest(proto::CallLogRequest { limit }),
+            Self::CallLog { calls } => Kind::CallLog(proto::CallLog {
+                calls: (calls.into_iter())
+                    .map(|c| proto::CallEntry {
+                        number: c.number,
+                        name: c.name,
+                        date_ms: c.date_ms,
+                        duration_s: c.duration_s,
+                        kind: match c.kind {
+                            FfiCallKind::Incoming => proto::call_entry::Kind::Incoming,
+                            FfiCallKind::Outgoing => proto::call_entry::Kind::Outgoing,
+                            FfiCallKind::Missed => proto::call_entry::Kind::Missed,
+                        }
+                        .into(),
+                    })
+                    .collect(),
+            }),
         };
         proto::Event { kind: Some(kind) }
     }
@@ -734,6 +1017,15 @@ mod event_tests {
 
     #[test]
     fn every_event_round_trips_through_proto() {
+        let sms = FfiSmsMessage {
+            id: 1,
+            thread_id: 3,
+            address: "+911".into(),
+            name: "Ann".into(),
+            body: "code 123456".into(),
+            date_ms: 8,
+            outgoing: false,
+        };
         let all = [
             FfiEvent::Notification {
                 key: "k".into(),
@@ -775,6 +1067,48 @@ mod event_tests {
             FfiEvent::Ring { start: true },
             FfiEvent::Link {
                 url: "https://example.com".into(),
+            },
+            FfiEvent::SmsThreadsRequest { limit: 5 },
+            FfiEvent::SmsThreads {
+                threads: vec![FfiSmsThread {
+                    thread_id: 3,
+                    address: "+911".into(),
+                    name: "Ann".into(),
+                    snippet: "hi".into(),
+                    date_ms: 9,
+                    unread: 1,
+                }],
+            },
+            FfiEvent::SmsMessagesRequest {
+                thread_id: 3,
+                limit: 0,
+            },
+            FfiEvent::SmsMessages {
+                thread_id: 3,
+                messages: vec![sms.clone()],
+            },
+            FfiEvent::SmsNew { message: sms },
+            FfiEvent::SmsSend {
+                address: "+911".into(),
+                body: "ok".into(),
+            },
+            FfiEvent::Call {
+                state: FfiCallState::Ringing,
+                number: "+911".into(),
+                name: "Ann".into(),
+            },
+            FfiEvent::CallCommand {
+                cmd: FfiCallCmd::Decline,
+            },
+            FfiEvent::CallLogRequest { limit: 0 },
+            FfiEvent::CallLog {
+                calls: vec![FfiCallEntry {
+                    number: "+911".into(),
+                    name: "".into(),
+                    date_ms: 4,
+                    duration_s: 60,
+                    kind: FfiCallKind::Missed,
+                }],
             },
         ];
         for e in all {

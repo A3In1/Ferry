@@ -68,6 +68,16 @@ message Event {
     Battery battery = 7;
     Ring ring = 8;
     Link link = 9;
+    SmsThreadsRequest sms_threads_request = 10;
+    SmsThreads sms_threads = 11;
+    SmsMessagesRequest sms_messages_request = 12;
+    SmsMessages sms_messages = 13;
+    SmsMessage sms_new = 14;
+    SmsSend sms_send = 15;
+    Call call = 16;
+    CallCommand call_command = 17;
+    CallLogRequest call_log_request = 18;
+    CallLog call_log = 19;
   }
 }
 message NotifButton {
@@ -122,4 +132,76 @@ message Ring { // Mac → phone: find my phone
 }
 message Link { // both ways: open this URL on the other device
   string url = 1;
+}
+
+// --- Phase 5: messages and calls (phone is the source of truth; the Mac only asks and shows) ---
+message SmsThreadsRequest { // Mac → phone; answered with SmsThreads
+  int32 limit = 1; // 0 = phone default (50)
+}
+message SmsThread {
+  int64 thread_id = 1;
+  string address = 2;
+  string name = 3; // contact name, empty if unknown
+  string snippet = 4;
+  int64 date_ms = 5;
+  int32 unread = 6;
+}
+message SmsThreads { // phone → Mac, newest first
+  repeated SmsThread threads = 1;
+}
+message SmsMessagesRequest { // Mac → phone; answered with SmsMessages
+  int64 thread_id = 1;
+  int32 limit = 2; // 0 = phone default (100)
+}
+message SmsMessage {
+  int64 id = 1;
+  int64 thread_id = 2;
+  string address = 3;
+  string name = 4;
+  string body = 5;
+  int64 date_ms = 6;
+  bool outgoing = 7;
+}
+message SmsMessages { // phone → Mac, oldest first
+  int64 thread_id = 1;
+  repeated SmsMessage messages = 2;
+}
+message SmsSend { // Mac → phone: the user pressed Send on the Mac
+  string address = 1;
+  string body = 2;
+}
+message Call { // phone → Mac on every call state change
+  enum State {
+    IDLE = 0;
+    RINGING = 1;
+    ACTIVE = 2;
+  }
+  State state = 1;
+  string number = 2;
+  string name = 3;
+}
+message CallCommand { // Mac → phone
+  enum Cmd {
+    ANSWER = 0;
+    DECLINE = 1; // also hangs up an active call
+  }
+  Cmd cmd = 1;
+}
+message CallLogRequest { // Mac → phone; answered with CallLog
+  int32 limit = 1; // 0 = phone default (50)
+}
+message CallEntry {
+  enum Kind {
+    INCOMING = 0;
+    OUTGOING = 1;
+    MISSED = 2;
+  }
+  string number = 1;
+  string name = 2;
+  int64 date_ms = 3;
+  int32 duration_s = 4;
+  Kind kind = 5;
+}
+message CallLog { // phone → Mac, newest first
+  repeated CallEntry calls = 1;
 }
