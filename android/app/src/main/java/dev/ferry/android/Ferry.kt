@@ -149,8 +149,19 @@ object Ferry {
             awaitNode() ?: return@launch toast(app, "Ferry isn't running")
             refreshPeers()
             if (peers.value.isEmpty()) return@launch toast(app, "No paired Mac yet")
-            Outbox.broadcast(event)
-            toast(app, done)
+            // The user is waiting: send directly (not via Outbox, which drops while a Mac is parked)
+            // and report what really happened.
+            val node = node.value ?: return@launch toast(app, "Ferry isn't running")
+            val errors = peers.value.mapNotNull { p ->
+                try {
+                    node.sendEvent(p.id, event); null
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("Ferry", "send to ${p.name} failed: ${e.text()}"); e.text()
+                }
+            }
+            toast(app, if (errors.size < peers.value.size) done else "Couldn't reach your Mac: ${errors.first()}")
         }
     }
 

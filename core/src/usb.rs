@@ -255,6 +255,7 @@ impl Node {
             usb.bridges.remove(&peer);
             self.usb_lookup.remove_endpoint_info(peer);
         }
+        usb.kick.notify_one(); // let the Mac's watcher reattach now rather than at its next check
         let mib = bytes as f64 / (1 << 20) as f64;
         match res {
             Ok(()) => info!(peer = %peer.fmt_short(), "USB bridge closed after {mib:.1} MiB"),

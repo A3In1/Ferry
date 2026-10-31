@@ -65,6 +65,7 @@ const ERR_HELLO: u32 = 0x02;
 const ERR_UNKNOWN_CHANNEL: u32 = 0x03;
 const ERR_REPLACED: u32 = 0x04;
 const ERR_FORGOTTEN: u32 = 0x05;
+const ERR_IDLE: u32 = 0x06;
 const MAX_LAST_ADDRS: usize = 8;
 const MAX_TICKET_ADDRS: usize = 6;
 
@@ -107,17 +108,34 @@ impl Node {
             }
         }
         // Minimal = crypto provider only: no n0 DNS/pkarr lookup; relays and UPnP off.
-        // Default IP transports bind 0.0.0.0:0 and [::]:0 (v6 may fail harmlessly).
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .secret_key(ident.secret_key)
-            .alpns(vec![ALPN_SESSION.to_vec(), ALPN_PAIR.to_vec()])
-            .relay_mode(RelayMode::Disabled)
-            .portmapper_config(PortmapperConfig::Disabled)
-            .address_lookup(lookup.clone())
-            .address_lookup(usb_lookup.clone())
-            .bind()
-            .await
-            .context("bind endpoint")?;
+        // Default IP transports bind 0.0.0.0 and [::] (v6 may fail harmlessly).
+        let builder = |port: u16| -> Result<iroh::endpoint::Builder> {
+            Ok(Endpoint::builder(presets::Minimal)
+                .secret_key(ident.secret_key.clone())
+                .alpns(vec![ALPN_SESSION.to_vec(), ALPN_PAIR.to_vec()])
+                .relay_mode(RelayMode::Disabled)
+                .portmapper_config(PortmapperConfig::Disabled)
+                .address_lookup(lookup.clone())
+                .address_lookup(usb_lookup.clone())
+                .bind_addr(SocketAddr::from(([0, 0, 0, 0], port)))?)
+        };
+        // Keep the same UDP port across restarts so addresses peers remember stay valid
+        // (networks that block mDNS have nothing else); fall back to any port if it's taken.
+        let port_file = cfg.data_dir.join("port");
+        let saved = std::fs::read_to_string(&port_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .filter(|&p| p != 0);
+        let endpoint = match saved {
+            Some(p) => match builder(p)?.bind().await {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("port {p} unavailable ({e}), using a new one");
+                    builder(0)?.bind().await.context("bind endpoint")?
+                }
+            },
+            None => builder(0)?.bind().await.context("bind endpoint")?,
+        };
         let node = Arc::new(Node {
             endpoint,
             lookup,
@@ -137,6 +155,13 @@ impl Node {
             #[cfg(feature = "mdns")]
             mdns: Mutex::new(None),
         });
+
+        if saved != Some(node.port())
+            && let Err(e) = std::fs::write(&port_file, node.port().to_string())
+        {
+            warn!("save port: {e:#}");
+        }
+        tokio::spawn(reap_idle_sessions(Arc::downgrade(&node)));
 
         let n = node.clone();
         tokio::spawn(async move {
@@ -173,15 +198,7 @@ impl Node {
     pub fn new_pairing_ticket(&self) -> Result<String> {
         let secret: [u8; 32] = rand::random();
         *self.ticket.lock().unwrap() = Some((secret, Instant::now() + TICKET_TTL));
-        let mut addrs: Vec<SocketAddr> = self
-            .endpoint
-            .addr()
-            .ip_addrs()
-            .copied()
-            .filter(|a| !a.ip().is_loopback() && !is_link_local_v6(a))
-            .collect();
-        addrs.sort_by_key(|a| a.is_ipv6()); // v4 first: shorter and what phones usually reach
-        addrs.truncate(MAX_TICKET_ADDRS);
+        let addrs = self.lan_addrs();
         Ok(Ticket {
             id: self.endpoint.id(),
             secret,
@@ -262,6 +279,11 @@ impl Node {
         *self.presence_nonce.lock().unwrap() = (rand::random(), Instant::now());
     }
 
+    /// Live sessions (tests, diagnostics).
+    pub fn session_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
+    }
+
     /// The UDP port our endpoint is bound to (for native mDNS registration).
     pub fn port(&self) -> u16 {
         self.endpoint
@@ -332,12 +354,13 @@ impl Node {
         .await
         .context("connecting timed out (is the other device on this network?)")?
         .context("connect")?;
-        let control = hello_initiate(&conn, self.hello()).await.with_context(|| {
+        let (control, theirs) = hello_initiate(&conn, self.hello()).await.with_context(|| {
             match conn.close_reason() {
                 Some(r) => format!("session refused: {r}"),
                 None => "session handshake".into(),
             }
         })?;
+        self.learn_addrs(id, &theirs);
         self.adopt(id, &conn);
         let node = self.clone();
         let c = conn.clone();
@@ -389,6 +412,29 @@ impl Node {
             protocol_version: PROTOCOL_VERSION,
             device_name: self.name.clone(),
             channels: vec![CH_CONTROL.into(), CH_FILE.into(), CH_EVENTS.into()],
+            addrs: self.lan_addrs().iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Our current directly reachable addresses (as in tickets: no loopback/link-local v6).
+    fn lan_addrs(&self) -> Vec<SocketAddr> {
+        let mut addrs: Vec<SocketAddr> = (self.endpoint.addr().ip_addrs().copied())
+            .filter(|a| !a.ip().is_loopback() && !is_link_local_v6(a))
+            .collect();
+        addrs.sort_by_key(|a| a.is_ipv6()); // v4 first: shorter and what phones usually reach
+        addrs.truncate(MAX_TICKET_ADDRS);
+        addrs
+    }
+
+    /// Records the LAN addresses a peer announced in its Hello, for later Wi-Fi dialing.
+    fn learn_addrs(&self, id: EndpointId, h: &Hello) {
+        let addrs: Vec<SocketAddr> = (h.addrs.iter().take(MAX_TICKET_ADDRS))
+            .filter_map(|a| a.parse().ok())
+            .filter(|a: &SocketAddr| !a.ip().is_loopback() && !a.ip().is_unspecified())
+            .collect();
+        if !addrs.is_empty() {
+            self.lookup.add_endpoint_info(addr_of(id, &addrs));
+            self.remember_addrs(id, &addrs);
         }
     }
 
@@ -484,7 +530,10 @@ impl Node {
             self.remember_addrs(id, &[a]);
         }
         let _control = match hello_respond(&conn, self.hello()).await {
-            Ok(c) => c,
+            Ok((c, theirs)) => {
+                self.learn_addrs(id, &theirs);
+                c
+            }
             Err(e) => {
                 conn.close(ERR_HELLO.into(), b"bad hello");
                 return Err(e.context("session hello"));
@@ -513,6 +562,35 @@ impl Node {
             }
         }
         debug!(remote = %peer, reason = ?conn.close_reason(), "session ended");
+    }
+}
+
+/// Closes sessions with no stream traffic for two checks in a row (~30 s): iroh pings an
+/// open path every 5 s, which keeps a phone's Wi-Fi radio awake. Sends redial on demand.
+async fn reap_idle_sessions(node: std::sync::Weak<Node>) {
+    const EVERY: Duration = Duration::from_secs(15);
+    // stable_id -> (stream frames seen at last check, consecutive idle checks)
+    let mut seen: HashMap<usize, (u64, u8)> = HashMap::new();
+    loop {
+        tokio::time::sleep(EVERY).await;
+        let Some(node) = node.upgrade() else { return };
+        let conns: Vec<Connection> = node.sessions.lock().unwrap().values().cloned().collect();
+        let mut next = HashMap::new();
+        for c in conns {
+            let st = c.stats();
+            let frames = st.frame_tx.stream + st.frame_rx.stream;
+            let idle = match seen.get(&c.stable_id()) {
+                Some(&(f, n)) if f == frames => n + 1,
+                _ => 0,
+            };
+            if idle >= 2 {
+                debug!(remote = %c.remote_id().fmt_short(), "closing idle session");
+                c.close(ERR_IDLE.into(), b"idle");
+            } else {
+                next.insert(c.stable_id(), (frames, idle));
+            }
+        }
+        seen = next;
     }
 }
 
@@ -568,32 +646,38 @@ async fn route_uni(rx: Arc<Receiver>, on_event: EventFn, peer: String, mut recv:
 
 /// Initiator opens the long-lived control stream. Keep the returned streams alive for
 /// the life of the session.
-async fn hello_initiate(conn: &Connection, ours: Hello) -> Result<(SendStream, RecvStream)> {
+async fn hello_initiate(
+    conn: &Connection,
+    ours: Hello,
+) -> Result<((SendStream, RecvStream), Hello)> {
     let (mut send, mut recv) = timeout(NET_TIMEOUT, conn.open_bi()).await??;
     write_prefix(&mut send, CH_CONTROL).await?;
     write_msg(&mut send, &ours).await?;
-    check_hello(timeout(NET_TIMEOUT, read_msg(&mut recv)).await??)?;
-    Ok((send, recv))
+    let theirs = check_hello(timeout(NET_TIMEOUT, read_msg(&mut recv)).await??)?;
+    Ok(((send, recv), theirs))
 }
 
-async fn hello_respond(conn: &Connection, ours: Hello) -> Result<(SendStream, RecvStream)> {
+async fn hello_respond(
+    conn: &Connection,
+    ours: Hello,
+) -> Result<((SendStream, RecvStream), Hello)> {
     let (mut send, mut recv) = timeout(NET_TIMEOUT, conn.accept_bi()).await??;
     ensure!(
         timeout(NET_TIMEOUT, read_prefix(&mut recv)).await?? == CH_CONTROL,
         "first stream is not control"
     );
-    check_hello(timeout(NET_TIMEOUT, read_msg(&mut recv)).await??)?;
+    let theirs = check_hello(timeout(NET_TIMEOUT, read_msg(&mut recv)).await??)?;
     write_msg(&mut send, &ours).await?;
-    Ok((send, recv))
+    Ok(((send, recv), theirs))
 }
 
-fn check_hello(h: Hello) -> Result<()> {
+fn check_hello(h: Hello) -> Result<Hello> {
     ensure!(
         h.protocol_version == PROTOCOL_VERSION,
         "peer speaks protocol {}",
         h.protocol_version
     );
-    Ok(())
+    Ok(h)
 }
 
 pub(crate) fn addr_of(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {

@@ -19,6 +19,9 @@ use crate::usb::USB_PORT;
 
 const ADB_TIMEOUT: Duration = Duration::from_secs(15); // first call may start the adb server
 const TICK: Duration = Duration::from_secs(2);
+/// When every phone is attached: adb track-devices and bridge closes wake us, so this is
+/// only a safety net. Polling `adb devices` every 2 s forever would waste the Mac's battery.
+const TICK_IDLE: Duration = Duration::from_secs(60);
 const TICK_NO_ADB: Duration = Duration::from_secs(10);
 const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(10);
@@ -124,6 +127,7 @@ pub(crate) fn watch(node: &Arc<Node>, explicit: Option<PathBuf>) -> Result<()> {
 }
 
 async fn watch_loop(node: Arc<Node>, explicit: Option<PathBuf>, kick: Arc<Notify>) {
+    tokio::spawn(track_devices(explicit.clone(), kick.clone()));
     let mut phones: HashMap<String, Phone> = HashMap::new();
     let mut states: HashMap<String, String> = HashMap::new();
     let mut last_err: Option<String> = None; // adb trouble is logged once per change
@@ -141,6 +145,8 @@ async fn watch_loop(node: Arc<Node>, explicit: Option<PathBuf>, kick: Arc<Notify
         }
         let wait = if last_err.is_some() {
             TICK_NO_ADB
+        } else if states.values().all(|st| st != "device") || phones.values().all(|p| p.attached) {
+            TICK_IDLE // nothing to retry: wait for adb or a bridge to tell us something changed
         } else {
             TICK
         };
@@ -152,6 +158,30 @@ async fn watch_loop(node: Arc<Node>, explicit: Option<PathBuf>, kick: Arc<Notify
                 }
             }
         }
+    }
+}
+
+/// Runs `adb track-devices` (one long-lived process that prints on every plug/unplug or
+/// state change) and wakes the watcher on each change. Restarts it if adb goes away.
+async fn track_devices(explicit: Option<PathBuf>, kick: Arc<Notify>) {
+    use tokio::io::AsyncReadExt;
+    loop {
+        if let Ok(adb) = find_adb(explicit.as_deref())
+            && let Ok(mut child) = Command::new(&adb)
+                .arg("track-devices")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+            && let Some(mut out) = child.stdout.take()
+        {
+            let mut buf = [0u8; 4096];
+            while matches!(out.read(&mut buf).await, Ok(n) if n > 0) {
+                kick.notify_one();
+            }
+        }
+        sleep(TICK_NO_ADB).await;
     }
 }
 

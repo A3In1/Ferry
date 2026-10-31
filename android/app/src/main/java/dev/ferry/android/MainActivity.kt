@@ -145,7 +145,24 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
+    /** Set by the notification's "Send clipboard": read once we have window focus. */
+    private var clipPending = false
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && clipPending) {
+            clipPending = false
+            Clip.send(this, Clip.read(this))
+            moveTaskToBack(true) // back to whatever the user was doing
+        }
+    }
+
     private fun handle(intent: Intent?) {
+        if (intent?.getBooleanExtra(Clip.EXTRA_SEND, false) == true) {
+            intent.removeExtra(Clip.EXTRA_SEND)
+            clipPending = true
+            return
+        }
         if (intent?.action != Intent.ACTION_VIEW) return
         Tickets.extract(intent.dataString)?.let { Ferry.pair(this, it) }
     }
@@ -195,6 +212,10 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, li
                 Button(onClick = onScan, enabled = node != null) { Text("Scan QR") }
                 OutlinedButton(onClick = onPaste, enabled = node != null) { Text("Paste ticket") }
                 OutlinedButton(onClick = onSend, enabled = node != null && peers.isNotEmpty()) { Text("Send files") }
+                // The app has focus here, so Android lets it read the clipboard.
+                OutlinedButton(onClick = { Clip.send(ctx, Clip.read(ctx)) }, enabled = node != null && peers.isNotEmpty()) {
+                    Text("Send clipboard")
+                }
             }
 
             Text("Paired Macs", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))

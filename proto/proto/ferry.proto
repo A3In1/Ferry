@@ -7,6 +7,9 @@ message Hello {
   uint32 protocol_version = 1;
   string device_name = 2;
   repeated uint32 channels = 3; // channel ids this side supports
+  // Sender's current LAN addresses ("ip:port"). Learned over any path (e.g. USB) so the
+  // other side can reach us over Wi-Fi later without mDNS. Dial hints only; TLS authenticates.
+  repeated string addrs = 4;
 }
 
 // --- Pairing (ALPN "ferry/pair/1") ---

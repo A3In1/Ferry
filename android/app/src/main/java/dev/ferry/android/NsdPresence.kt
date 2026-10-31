@@ -41,17 +41,23 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
     private var job: Job? = null
 
     fun start(scope: CoroutineScope) {
-        // shortcut: holds the multicast lock for the whole service lifetime (some battery cost);
-        // release it between rounds once CDM presence events tell us when the Mac is near.
-        multicast.acquire()
         job = scope.launch {
             if (Build.VERSION.SDK_INT < 34) launch { for (info in toResolve) resolveLegacy(info)?.let(::onResolved) }
             // The presence tag rotates every 15 min: re-advertise, and restart discovery so a
             // network change can't leave it dead for long.
+            // Battery: discovery and the multicast lock (which keeps Wi-Fi awake for every
+            // multicast packet) run only for the first minute of each round. The advert stays up;
+            // on Android 14+ the system's mDNS answers queries for it. Once found, the core
+            // remembers the Mac's address, so later rounds rarely matter.
             while (isActive) {
                 advertise()
+                multicast.acquire()
                 discover()
-                delay(15 * 60 * 1000L)
+                delay(DISCOVER_MS)
+                discovery?.let { runCatching { nsd.stopServiceDiscovery(it) } }
+                discovery = null
+                if (multicast.isHeld) multicast.release()
+                delay(ROUND_MS - DISCOVER_MS)
                 stopRound()
             }
         }
@@ -167,5 +173,7 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
 
     private companion object {
         const val SERVICE_TYPE = "_ferry._udp"
+        private const val DISCOVER_MS = 60_000L
+        private const val ROUND_MS = 15 * 60_000L
     }
 }
