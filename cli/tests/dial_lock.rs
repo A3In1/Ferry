@@ -120,3 +120,64 @@ async fn concurrent_sends_share_one_session() {
         n.shutdown().await;
     }
 }
+
+/// Both sides dial each other at the same moment: they must agree on one session instead of
+/// each keeping the one the other just closed as "replaced".
+#[tokio::test(flavor = "multi_thread")]
+async fn simultaneous_dials_keep_one_session() {
+    let root = tempfile::tempdir().unwrap();
+    for round in 0..6 {
+        let (mac, mut mac_rx) = node(root.path(), &format!("mac{round}")).await;
+        let (phone, mut phone_rx) = node(root.path(), &format!("phone{round}")).await;
+        pair(&phone, &mac).await;
+        // the phone learns the mac's address from this first session; then drop it
+        mac.send_event(&phone.device_id(), &clip("hello")).await.unwrap();
+        phone_rx.recv().await.unwrap();
+        mac.check_in(&phone.device_id()).await.unwrap(); // fresh, so both sides know each other
+        for n in [&mac, &phone] {
+            n.close_sessions();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (mac_id, phone_id, m, p) = (mac.device_id(), phone.device_id(), clip("m"), clip("p"));
+        let (a, b) = tokio::join!(mac.send_event(&phone_id, &m), phone.send_event(&mac_id, &p));
+        a.unwrap();
+        b.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), mac_rx.recv()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            (mac.session_count(), phone.session_count()),
+            (1, 1),
+            "round {round}"
+        );
+        for n in [mac, phone] {
+            n.shutdown().await;
+        }
+    }
+}
+
+/// Sends queued behind a dial that fails share its failure instead of each waiting out
+/// another connect timeout (copies piling up for an unreachable phone).
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_sends_to_unreachable_peer_fail_together() {
+    let root = tempfile::tempdir().unwrap();
+    let (mac, _) = node(root.path(), "mac").await;
+    let (gone, _) = node(root.path(), "gone").await;
+    pair(&gone, &mac).await;
+    let gone_id = gone.device_id();
+    gone.shutdown().await;
+    drop(gone);
+
+    let t = Instant::now();
+    let sends: Vec<_> = (0..4)
+        .map(|i| {
+            let (mac, id) = (mac.clone(), gone_id.clone());
+            tokio::spawn(async move { mac.send_event(&id, &clip(&i.to_string())).await })
+        })
+        .collect();
+    for s in sends {
+        assert!(s.await.unwrap().is_err());
+    }
+    let took = t.elapsed();
+    assert!(took < Duration::from_secs(15), "4 queued sends took {took:?}");
+    mac.shutdown().await;
+}

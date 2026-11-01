@@ -93,7 +93,16 @@ const ERR_REPLACED: u32 = 0x04;
 const ERR_FORGOTTEN: u32 = 0x05;
 const ERR_IDLE: u32 = 0x06;
 const MAX_LAST_ADDRS: usize = 8;
+/// Two sessions with a peer starting this close together count as a simultaneous dial.
+const DIAL_RACE: Duration = Duration::from_secs(3);
 const MAX_TICKET_ADDRS: usize = 6;
+
+/// A live session and how it started (see [`Node::adopt`]).
+struct Session {
+    conn: Connection,
+    dialed: bool, // by us
+    since: Instant,
+}
 
 pub struct Node {
     pub(crate) endpoint: Endpoint,
@@ -112,7 +121,7 @@ pub struct Node {
     events: EventSink,
     /// The live incoming session per peer. A reconnecting peer (e.g. after a crash) replaces
     /// its old one at once instead of waiting for the idle timeout, which frees its partial files.
-    sessions: Mutex<HashMap<EndpointId, Connection>>,
+    sessions: Mutex<HashMap<EndpointId, Session>>,
     /// Per-peer dial locks, so concurrent sends to one peer share a single new session while
     /// a slow dial to one peer never holds up the others. Entries go when their last user does.
     dials: DialLocks,
@@ -272,8 +281,8 @@ impl Node {
             "not a paired device: {peer_id}"
         );
         self.lookup.remove_endpoint_info(id);
-        if let Some(c) = self.sessions.lock().unwrap().remove(&id) {
-            c.close(ERR_FORGOTTEN.into(), b"forgotten");
+        if let Some(s) = self.sessions.lock().unwrap().remove(&id) {
+            s.conn.close(ERR_FORGOTTEN.into(), b"forgotten");
         }
         Ok(())
     }
@@ -281,7 +290,6 @@ impl Node {
     /// Addresses found by native discovery (Bonjour / NsdManager) for a paired peer.
     pub fn add_peer_addrs(&self, peer_id: &str, addrs: Vec<SocketAddr>) -> Result<()> {
         let id = self.trusted(peer_id)?;
-        self.lookup.add_endpoint_info(addr_of(id, &addrs));
         self.remember_addrs(id, &addrs);
         Ok(())
     }
@@ -331,6 +339,14 @@ impl Node {
         self.sessions.lock().unwrap().len()
     }
 
+    /// Closes every session (tests); sends redial on demand.
+    #[doc(hidden)]
+    pub fn close_sessions(&self) {
+        for (_, s) in self.sessions.lock().unwrap().drain() {
+            s.conn.close(ERR_REPLACED.into(), b"closed");
+        }
+    }
+
     /// The UDP port our endpoint is bound to (for native mDNS registration).
     pub fn port(&self) -> u16 {
         self.endpoint
@@ -374,7 +390,7 @@ impl Node {
     pub async fn check_in(self: &Arc<Self>, peer_id: &str) -> Result<()> {
         let id = self.trusted(peer_id)?;
         if let Some(old) = self.sessions.lock().unwrap().remove(&id) {
-            old.close(ERR_REPLACED.into(), b"network changed");
+            old.conn.close(ERR_REPLACED.into(), b"network changed");
         }
         self.session(id).await.map(drop)
     }
@@ -409,13 +425,28 @@ impl Node {
     /// The live session with `id` (either direction), or a newly dialed one.
     async fn session(self: &Arc<Self>, id: EndpointId) -> Result<Connection> {
         let slot = DialSlot::new(&self.dials, id);
-        let _dialing = slot.lock.lock().await;
+        let queued = Instant::now();
+        let mut failed = slot.lock.lock().await;
         // re-checked under the lock: a concurrent caller may have just dialed
-        if let Some(c) = self.sessions.lock().unwrap().get(&id)
-            && c.close_reason().is_none()
-        {
-            return Ok(c.clone());
+        if let Some(c) = self.live_session(id) {
+            return Ok(c);
         }
+        // The dial we queued behind failed: don't spend another timeout finding out again
+        // (e.g. clipboard copies piling up for an unreachable phone).
+        if let Some((at, why)) = &*failed
+            && *at > queued
+        {
+            bail!("{why}");
+        }
+        let r = self.dial(id).await;
+        if let Err(e) = &r {
+            *failed = Some((Instant::now(), format!("{e:#}")));
+        }
+        r
+    }
+
+    /// Dials `id` and runs the new session (call with its dial lock held).
+    async fn dial(self: &Arc<Self>, id: EndpointId) -> Result<Connection> {
         let conn = timeout(
             NET_TIMEOUT,
             // iroh skips the lookup when it already has a path; name the USB one explicitly
@@ -425,14 +456,21 @@ impl Node {
         .await
         .context("connecting timed out (is the other device on this network?)")?
         .context("connect")?;
-        let (control, theirs) = hello_initiate(&conn, self.hello()).await.with_context(|| {
-            match conn.close_reason() {
-                Some(r) => format!("session refused: {r}"),
-                None => "session handshake".into(),
+        let (control, theirs) = match hello_initiate(&conn, self.hello()).await {
+            Ok(h) => h,
+            // the peer dialed us at the same moment and kept its own connection: use that one
+            Err(_) if let Some(c) = self.live_session(id) => return Ok(c),
+            Err(e) => {
+                return Err(e.context(match conn.close_reason() {
+                    Some(r) => format!("session refused: {r}"),
+                    None => "session handshake".into(),
+                }));
             }
-        })?;
+        };
         self.learn_addrs(id, &theirs);
-        self.adopt(id, &conn);
+        if let Err(winner) = self.adopt(id, &conn, true) {
+            return Ok(winner);
+        }
         let node = self.clone();
         let c = conn.clone();
         tokio::spawn(async move {
@@ -443,20 +481,49 @@ impl Node {
         Ok(conn)
     }
 
-    /// Makes `conn` the session for `id`, closing any older one.
-    fn adopt(&self, id: EndpointId, conn: &Connection) {
-        if let Some(old) = self.sessions.lock().unwrap().insert(id, conn.clone())
-            && old.stable_id() != conn.stable_id()
+    fn live_session(&self, id: EndpointId) -> Option<Connection> {
+        let sessions = self.sessions.lock().unwrap();
+        (sessions.get(&id))
+            .filter(|s| s.conn.close_reason().is_none())
+            .map(|s| s.conn.clone())
+    }
+
+    /// Makes `conn` (`dialed` by us, or accepted) the session for `id`, closing any older one.
+    ///
+    /// When both sides dial each other at once, each would keep the other's connection and
+    /// close its own, which is the one the other kept: both die. So within [`DIAL_RACE`] of
+    /// the older one starting, both sides keep the connection dialed by the larger id. Err:
+    /// `conn` lost that race and is closed; use the returned winner instead.
+    fn adopt(&self, id: EndpointId, conn: &Connection, dialed: bool) -> Result<(), Connection> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(old) = sessions.get(&id)
+            && old.conn.stable_id() != conn.stable_id()
+            && old.dialed != dialed
+            && old.since.elapsed() < DIAL_RACE
+            && old.conn.close_reason().is_none()
+            && old.dialed == (self.endpoint.id() > id)
         {
-            old.close(ERR_REPLACED.into(), b"replaced by a new session");
+            conn.close(ERR_REPLACED.into(), b"lost a simultaneous dial");
+            return Err(old.conn.clone());
         }
+        let new = Session {
+            conn: conn.clone(),
+            dialed,
+            since: Instant::now(),
+        };
+        if let Some(old) = sessions.insert(id, new)
+            && old.conn.stable_id() != conn.stable_id()
+        {
+            old.conn.close(ERR_REPLACED.into(), b"replaced by a new session");
+        }
+        Ok(())
     }
 
     fn drop_session(&self, id: EndpointId, conn: &Connection) {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions
             .get(&id)
-            .is_some_and(|c| c.stable_id() == conn.stable_id())
+            .is_some_and(|s| s.conn.stable_id() == conn.stable_id())
         {
             sessions.remove(&id);
         }
@@ -509,7 +576,6 @@ impl Node {
             .filter(|a: &SocketAddr| !a.ip().is_loopback() && !a.ip().is_unspecified())
             .collect();
         if !addrs.is_empty() {
-            self.lookup.add_endpoint_info(addr_of(id, &addrs));
             self.remember_addrs(id, &addrs);
         }
     }
@@ -545,7 +611,9 @@ impl Node {
         Ok(peer)
     }
 
-    /// Newest addresses first; persisted only when the list changes.
+    /// Newest addresses first; persisted only when the list changes. The dial lookup gets the
+    /// same capped list (iroh's add_endpoint_info only ever adds, so it would grow with every
+    /// network the devices meet on, and each connect would probe every stale address).
     fn remember_addrs(&self, id: EndpointId, new: &[SocketAddr]) {
         let mut trust = self.trust.lock().unwrap();
         let Some(mut p) = trust.get(&id.to_z32()).cloned() else {
@@ -554,6 +622,7 @@ impl Node {
         let mut merged = new.to_vec();
         merged.extend(p.last_addrs.iter().filter(|a| !new.contains(a)));
         merged.truncate(MAX_LAST_ADDRS);
+        self.lookup.set_endpoint_info(addr_of(id, &merged));
         if merged != p.last_addrs {
             p.last_addrs = merged;
             if let Err(e) = trust.upsert(p) {
@@ -615,7 +684,9 @@ impl Node {
                 return Err(e.context("session hello"));
             }
         };
-        self.adopt(id, &conn);
+        if self.adopt(id, &conn, false).is_err() {
+            return Ok(());
+        }
         self.serve_streams(&conn).await;
         self.drop_session(id, &conn);
         Ok(())
@@ -642,14 +713,16 @@ impl Node {
     }
 }
 
-type DialLocks = Mutex<HashMap<EndpointId, Arc<tokio::sync::Mutex<()>>>>;
+/// Per peer: the dial lock, holding when and why the last dial failed.
+type DialLock = tokio::sync::Mutex<Option<(Instant, String)>>;
+type DialLocks = Mutex<HashMap<EndpointId, Arc<DialLock>>>;
 
 /// One caller's share of a peer's dial lock; the map entry is removed when the last one drops
 /// (also when the dialing future is cancelled).
 struct DialSlot<'a> {
     dials: &'a DialLocks,
     id: EndpointId,
-    lock: Arc<tokio::sync::Mutex<()>>,
+    lock: Arc<DialLock>,
 }
 
 impl<'a> DialSlot<'a> {
@@ -684,7 +757,8 @@ async fn reap_idle_sessions(node: std::sync::Weak<Node>) {
             seen.clear();
             continue;
         }
-        let conns: Vec<Connection> = node.sessions.lock().unwrap().values().cloned().collect();
+        let conns: Vec<Connection> =
+            (node.sessions.lock().unwrap().values()).map(|s| s.conn.clone()).collect();
         let mut next = HashMap::new();
         for c in conns {
             let st = c.stats();
@@ -705,14 +779,27 @@ async fn reap_idle_sessions(node: std::sync::Weak<Node>) {
 }
 
 async fn send_event_on(conn: &Connection, ev: &Event) -> Result<()> {
+    let heard = conn.stats().udp_rx.datagrams;
     let mut s = timeout(NET_TIMEOUT, conn.open_uni()).await??;
     write_prefix(&mut s, CH_EVENTS).await?;
     write_msg(&mut s, ev).await?;
     s.finish()?;
     // Wait for the peer's ack: finish() only buffers, so a dead session would drop it silently.
-    timeout(EVENT_ACK_TIMEOUT, s.stopped())
-        .await
-        .context("event not acknowledged")??;
+    let acked = s.stopped();
+    tokio::pin!(acked);
+    if let Ok(r) = timeout(EVENT_ACK_TIMEOUT, &mut acked).await {
+        r?;
+    } else {
+        // Still hearing from the peer: alive, just slow (a busy Bluetooth link queues seconds
+        // behind a transfer). Keep waiting; the caller's redial would kill that transfer.
+        ensure!(
+            conn.stats().udp_rx.datagrams > heard,
+            "event not acknowledged"
+        );
+        timeout(NET_TIMEOUT, acked)
+            .await
+            .context("event not acknowledged")??;
+    }
     // shortcut: one stream per event, so two events sent back to back may arrive out of
     // order; use a single ordered stream per session if that ever matters (notif add/remove).
     Ok(())
