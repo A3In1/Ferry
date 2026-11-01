@@ -23,3 +23,8 @@ tracing = "0.1"
 lto = true
 codegen-units = 1
 strip = true
+
+# Proc macros and build scripts never ship; stripping them with the current macOS `strip`
+# leaves dylibs dyld can't load ("mis-aligned LINKEDIT string pool"), failing release builds.
+[profile.release.build-override]
+strip = false
