@@ -25,14 +25,14 @@ object Clip {
     /** From a visible activity: sends [text] to the Macs if the grant allows, and toasts the outcome. */
     fun send(ctx: Context, text: String?) {
         val why = when {
-            Grant.CLIPBOARD !in Grants -> "Turn on Clipboard sync in Ferry first"
-            text.isNullOrEmpty() -> "Clipboard is empty"
-            text == fromMac -> "That came from your Mac"
+            Grant.CLIPBOARD !in Grants -> "Turn on Clipboard in Ferry first"
+            text.isNullOrEmpty() -> "The clipboard is empty"
+            text == fromMac -> "That text came from your Mac, so it's already there"
             else -> null
         }
         Log.w(CLIP_TAG, "send clipboard: ${why ?: "ok"}")
         if (why != null) return Ferry.toast(ctx, why)
-        Ferry.sendEvent(ctx, FfiEvent.Clipboard(text ?: return), "Clipboard sent to Mac")
+        Ferry.sendEvent(ctx, FfiEvent.Clipboard(text ?: return), "Clipboard sent to your Mac")
     }
 
     const val EXTRA_SEND = "dev.ferry.android.SEND_CLIPBOARD"

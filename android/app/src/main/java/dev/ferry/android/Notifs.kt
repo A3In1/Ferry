@@ -54,17 +54,19 @@ object Notifs {
 
     fun createChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
+        fun ch(id: String, name: String, importance: Int, about: String) = NotificationChannel(id, name, importance).apply { description = about }
+        // Re-created on every start: Android keeps the user's importance but updates names and descriptions.
         nm.createNotificationChannels(
             listOf(
-                NotificationChannel(CH_SERVICE, "Connection", NotificationManager.IMPORTANCE_LOW),
-                NotificationChannel(CH_PAIR, "Pairing requests", NotificationManager.IMPORTANCE_HIGH),
-                NotificationChannel(CH_PROGRESS, "Transfer progress", NotificationManager.IMPORTANCE_LOW),
-                NotificationChannel(CH_TRANSFER, "Received and sent files", NotificationManager.IMPORTANCE_DEFAULT),
+                ch(CH_SERVICE, "Ferry status", NotificationManager.IMPORTANCE_LOW, "Shows that Ferry is running, which Mac is connected, and what you share"),
+                ch(CH_PAIR, "Pairing requests", NotificationManager.IMPORTANCE_HIGH, "Asks you to check the code when a Mac wants to pair"),
+                ch(CH_PROGRESS, "File transfer progress", NotificationManager.IMPORTANCE_LOW, "Progress while files go to or from your Mac"),
+                ch(CH_TRANSFER, "Sent and received files", NotificationManager.IMPORTANCE_DEFAULT, "Tells you when a file arrives or a send finishes"),
                 // The ringer plays its own alarm sound; the channel stays silent.
-                NotificationChannel(CH_RING, "Find my phone", NotificationManager.IMPORTANCE_HIGH).apply { setSound(null, null) },
-                NotificationChannel(CH_LINKS, "Links from Mac", NotificationManager.IMPORTANCE_HIGH),
-                NotificationChannel(CH_SCREEN, "Screen sharing requests", NotificationManager.IMPORTANCE_HIGH),
-                NotificationChannel(CH_ASK, "Wi-Fi and Do Not Disturb from Mac", NotificationManager.IMPORTANCE_HIGH),
+                ch(CH_RING, "Find my phone", NotificationManager.IMPORTANCE_HIGH, "Shows while your Mac rings this phone, with a Stop button").apply { setSound(null, null) },
+                ch(CH_LINKS, "Links from your Mac", NotificationManager.IMPORTANCE_HIGH, "Links sent from your Mac, ready to open"),
+                ch(CH_SCREEN, "Screen sharing requests", NotificationManager.IMPORTANCE_HIGH, "Asks before your Mac can see your screen"),
+                ch(CH_ASK, "Requests from your Mac", NotificationManager.IMPORTANCE_HIGH, "Wi-Fi networks and Do Not Disturb changes your Mac sends"),
             ),
         )
     }
@@ -94,7 +96,7 @@ object Notifs {
         ctx,
         ID_PAIR,
         builder(ctx, CH_PAIR, "Pair with $peerName?")
-            .setContentText("Tap to compare the 6-digit code")
+            .setContentText("Tap to compare the 6-digit code with your Mac")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(openApp(ctx))
             .setAutoCancel(true)
@@ -102,11 +104,14 @@ object Notifs {
             .build(),
     )
 
-    fun progress(ctx: Context, id: Int, title: String, percent: Int) = post(
+    /** [percent] < 0: still connecting (indeterminate bar). */
+    fun progress(ctx: Context, id: Int, title: String, percent: Int, text: String? = null) = post(
         ctx,
         id,
         builder(ctx, CH_PROGRESS, title)
-            .setProgress(100, percent, false)
+            .setContentText(text ?: if (percent >= 0) "$percent%" else null)
+            .setProgress(100, percent.coerceAtLeast(0), percent < 0)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openApp(ctx))
@@ -122,7 +127,7 @@ object Notifs {
             ctx,
             id,
             builder(ctx, CH_TRANSFER, "Received $name")
-                .setContentText("Saved to Downloads/Ferry")
+                .setContentText("Saved to Downloads/Ferry. Tap to open.")
                 .setContentIntent(pi)
                 .setAutoCancel(true)
                 .build(),
@@ -135,12 +140,13 @@ object Notifs {
             ctx,
             ID_RING,
             builder(ctx, CH_RING, "$from is ringing this phone")
-                .setContentText("Tap Stop to silence it")
+                .setContentText("Tap to stop ringing")
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setOngoing(true)
+                .setContentIntent(stop)
                 .setDeleteIntent(stop)
-                .addAction(0, "Stop", stop)
+                .addAction(0, "Stop ringing", stop)
                 .build(),
         )
     }
@@ -155,6 +161,7 @@ object Notifs {
             id,
             builder(ctx, CH_LINKS, "Link from $from")
                 .setContentText(url)
+                .setSubText("Tap to open")
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pi)
                 .setAutoCancel(true)
@@ -184,7 +191,7 @@ object Notifs {
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setContentIntent(openApp(ctx))
-                .addAction(0, "Stop", stop)
+                .addAction(0, "Stop sharing", stop)
                 .build(),
         )
     }
@@ -195,8 +202,8 @@ object Notifs {
         post(
             ctx,
             ID_SCREEN_ASK,
-            builder(ctx, CH_SCREEN, "Tap to share your screen with $mac")
-                .setContentText("$mac asked to mirror this phone")
+            builder(ctx, CH_SCREEN, "$mac wants to see your screen")
+                .setContentText("Tap to choose whether to share it")
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(activity(ctx, 0, open))
                 .setAutoCancel(true)
@@ -209,8 +216,8 @@ object Notifs {
     fun wifi(ctx: Context, from: String, ssid: String, open: Intent) = post(
         ctx,
         ID_WIFI,
-        builder(ctx, CH_ASK, "$from shared Wi-Fi “$ssid”: tap to add")
-            .setContentText("Android asks before saving it")
+        builder(ctx, CH_ASK, "$from shared the Wi-Fi “$ssid”")
+            .setContentText("Tap to add it. Android asks before saving.")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(activity(ctx, ID_WIFI, open))
             .setAutoCancel(true)
@@ -224,7 +231,7 @@ object Notifs {
             ctx,
             ID_DND,
             builder(ctx, CH_ASK, "Allow Ferry to change Do Not Disturb")
-                .setContentText("$from asked to turn it ${if (on) "on" else "off"}. Tap, then turn on Ferry.")
+                .setContentText("$from asked to turn it ${if (on) "on" else "off"}. Tap, then allow Ferry in the list.")
                 .setContentIntent(activity(ctx, ID_DND, open))
                 .setAutoCancel(true)
                 .build(),

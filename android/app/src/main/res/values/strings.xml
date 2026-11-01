@@ -4,5 +4,5 @@
     <string name="share_label">Send to Mac</string>
     <string name="clip_tile">Send clipboard</string>
     <string name="control_label">Ferry control</string>
-    <string name="control_description">Lets your paired Mac tap, scroll and type on this phone while you use screen mirroring or the shared cursor. Ferry acts only while a Mac is connected to your screen, shows a notification with a Stop button the whole time, and doesn\'t collect or store what\'s on your screen.</string>
+    <string name="control_description">Lets your paired Mac tap, scroll and type on this phone during screen sharing or with the shared cursor. Ferry acts only while your Mac is connected to your screen, shows a notification with a Stop sharing button the whole time, and doesn\'t collect or store what\'s on your screen.</string>
 </resources>

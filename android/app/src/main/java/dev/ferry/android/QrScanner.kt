@@ -70,7 +70,7 @@ fun QrScanner(onTicket: (String) -> Unit, onError: (String) -> Unit, modifier: M
                     p.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 } catch (e: Exception) {
                     Log.w(TAG, "camera", e)
-                    onError("Camera unavailable: ${e.text()}")
+                    onError("Couldn't start the camera. Try again, or paste the pairing link instead.")
                 }
             }, ContextCompat.getMainExecutor(ctx))
             view

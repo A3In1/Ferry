@@ -35,21 +35,19 @@ class ShareActivity : ComponentActivity() {
         if (sending) return
         sending = true
         lifecycleScope.launch {
-            // Open while we still hold the share's URI grant.
-            val files = Ferry.open(this@ShareActivity, uris)
-            Ferry.send(this@ShareActivity, peer, files)
-            if (files.isNotEmpty()) Ferry.toast(this@ShareActivity, "Sending to ${peer.name}…")
+            // Opens while we still hold the share's URI grant.
+            Ferry.sendPicked(this@ShareActivity, peer, uris)
             finish()
         }
     }
 
     /** Shared text: a lone web URL goes as a Link (opens on the Mac), anything else as Clipboard. */
     private fun shareText(text: String?) {
-        if (intent.action != Intent.ACTION_SEND || text.isNullOrBlank()) return Ferry.toast(this, "Nothing to send")
+        if (intent.action != Intent.ACTION_SEND || text.isNullOrBlank()) return Ferry.toast(this, "There's nothing to send")
         val url = Links.sharedUrl(text)
         val (grant, event) = if (url != null) Grant.LINKS to FfiEvent.Link(url) else Grant.CLIPBOARD to FfiEvent.Clipboard(text)
-        if (grant !in Grants) return Ferry.toast(this, "Turn on “${grant.label}” in Ferry to send this")
-        Ferry.sendEvent(this, event, if (url != null) "Link sent to Mac" else "Text sent to Mac's clipboard")
+        if (grant !in Grants) return Ferry.toast(this, "Turn on ${grant.label} in Ferry to send this")
+        Ferry.sendEvent(this, event, if (url != null) "Link sent to your Mac" else "Text sent to your Mac's clipboard")
     }
 
     private fun sharedUris(intent: Intent): List<Uri> = when (intent.action) {

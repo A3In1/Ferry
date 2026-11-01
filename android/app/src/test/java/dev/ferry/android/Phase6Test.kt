@@ -18,7 +18,7 @@ class Phase6Test {
     @Test
     fun newGrantsOff() {
         assertEquals(emptySet<Grant>(), Grants.read { _, d -> d })
-        assertEquals("Let your Mac browse and copy files on this phone", Grant.FILES.why)
+        assertEquals("Let your Mac browse this phone's storage and copy files from it", Grant.FILES.why)
     }
 
     @Test

@@ -32,6 +32,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.launch
 import java.io.File
@@ -105,7 +106,7 @@ class FerryService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        goForeground(ongoing("Ferry is starting", ""))
+        goForeground(ongoing("Starting Ferry…", ""))
         // System broadcast: NOT_EXPORTED is fine (and required for runtime receivers on 34+).
         ContextCompat.registerReceiver(this, batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, bluetoothChanged, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -146,7 +147,9 @@ class FerryService : Service() {
         presence = null
         Ferry.usbListening.value = false
         Ferry.nearby.value = emptySet()
-        Ferry.status.value = "Stopped"
+        Ferry.usb.value = emptySet()
+        Transfers.clear(this)
+        Ferry.status.value = STOPPED
         Ferry.node.getAndUpdate { null }?.let { node ->
             Ferry.shutdownJob = Ferry.scope.launch { node.use { it.shutdown() } }
         }
@@ -155,16 +158,16 @@ class FerryService : Service() {
 
     private suspend fun run() {
         Ferry.shutdownJob?.join()
-        Ferry.status.value = "Starting…"
+        Ferry.status.value = STARTING
         val data = File(filesDir, "ferry").apply { mkdirs() }
         val incoming = Ferry.incomingDir(this).apply { mkdirs() }
         val node = catching { FerryNode.start(data.path, deviceName(), incoming.path, Bridge(applicationContext)) }.getOrElse { e ->
             Log.e(TAG, "node start failed", e)
-            Ferry.status.value = "Failed to start: ${e.text()}"
+            Ferry.status.value = FAILED + "Close Ferry and open it again. If it keeps happening, restart the phone. (${e.text().removePrefix("reason=")})"
             return
         }
         Ferry.node.value = node
-        Ferry.status.value = "Running"
+        Ferry.status.value = RUNNING
         Ferry.refreshPeers()
         presence = NsdPresence(this, node).also { it.start(Ferry.scope) }
         catching { node.usbServe() }
@@ -178,27 +181,36 @@ class FerryService : Service() {
                     sendBattery()
                 }
             }
+            // The core has no USB link events; a cheap poll keeps "Connected over USB" honest.
+            launch {
+                while (true) {
+                    Ferry.usb.value = catching { node.usbLinks().map { it.peerId }.toSet() }.getOrDefault(emptySet())
+                    delay(3_000)
+                }
+            }
             showStatus()
         }
     }
 
     private suspend fun showStatus() {
-        combine(Ferry.peers, Ferry.nearby, Grants.on, Ferry.ble) { peers, near, grants, ble ->
-            Shown(peers, peers.filter { it.id in near }.map { it.name }, grants, peers.firstOrNull { it.id == ble }?.name)
+        combine(Ferry.peers, Ferry.nearby, Grants.on, Ferry.ble, Ferry.usb) { peers, near, grants, ble, usb ->
+            Shown(peers, peers.associate { it.name to Ferry.links(it.id, near, usb, ble) }.filterValues { it.isNotEmpty() }, grants)
         }
-            .collect { (peers, near, grants, ble) ->
+            .distinctUntilChanged()
+            .collect { (peers, linked, grants) ->
                 Ble.sync(this@FerryService) // pairing or forgetting the last Mac starts/stops the presence scan
+                val via = joinAnd(linked.values.flatten().distinct())
                 val n = when {
-                    near.isNotEmpty() -> ongoing("Ferry is connected", near.joinToString(), grants)
-                    ble != null -> ongoing("Connected over Bluetooth", ble, grants)
-                    else -> ongoing("Ready to receive", if (peers.isEmpty()) "Open Ferry to pair a Mac" else "Waiting for a paired Mac on this network", grants)
+                    linked.isNotEmpty() -> ongoing("Connected to ${joinAnd(linked.keys.toList())}", "Over $via", grants)
+                    peers.isEmpty() -> ongoing("No Mac paired yet", "Open Ferry to pair with your Mac", grants)
+                    else -> ongoing("Waiting for your Mac", "Connects over the same Wi-Fi, a USB cable or Bluetooth", grants)
                 }
                 Notifs.post(this, Notifs.ID_ONGOING, n)
                 sendBattery() // a Mac appeared or the grant changed: tell it now, not in 5 min
             }
     }
 
-    private data class Shown(val peers: List<FfiPeer>, val near: List<String>, val grants: Set<Grant>, val ble: String?)
+    private data class Shown(val peers: List<FfiPeer>, val linked: Map<String, List<String>>, val grants: Set<Grant>)
 
     private fun goForeground(n: Notification) {
         notification = n
@@ -214,7 +226,7 @@ class FerryService : Service() {
     /** The visible indicator of what's shared: the active grants are always listed here. */
     private fun ongoing(title: String, text: String, grants: Set<Grant> = Grants.on.value): Notification {
         val stop = PendingIntent.getService(this, 0, Intent(this, FerryService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
-        val sharing = if (grants.isEmpty()) "Sharing nothing" else "Sharing: " + grants.sorted().joinToString { it.short }
+        val sharing = if (grants.isEmpty()) "Nothing shared" else "Sharing " + grants.sorted().joinToString { it.short }
         return Notifs.builder(this, Notifs.CH_SERVICE, title)
             .setContentText(if (text.isEmpty()) sharing else "$text · $sharing")
             .setStyle(NotificationCompat.BigTextStyle().bigText(listOf(text, sharing).filter { it.isNotEmpty() }.joinToString("\n")))
@@ -222,7 +234,7 @@ class FerryService : Service() {
             .setOnlyAlertOnce(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(Notifs.openApp(this))
-            .addAction(0, "Stop", stop)
+            .addAction(0, "Stop Ferry", stop)
             .apply { if (Grant.CLIPBOARD in grants) addAction(0, "Send clipboard", Clip.pendingIntent(this@FerryService)) }
             .build()
             .also { notification = it }
@@ -235,6 +247,12 @@ class FerryService : Service() {
         private const val ACTION_STOP = "dev.ferry.android.STOP"
 
         @Volatile var instance: FerryService? = null
+
+        // Ferry.status values the UI tells apart.
+        const val STARTING = "Starting…"
+        const val RUNNING = "Running"
+        const val STOPPED = "Stopped"
+        const val FAILED = "Couldn't start: "
 
         fun start(ctx: Context) = ContextCompat.startForegroundService(ctx, Intent(ctx, FerryService::class.java))
     }

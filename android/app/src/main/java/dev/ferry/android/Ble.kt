@@ -414,13 +414,14 @@ object Cdm {
 
             override fun onFailure(error: CharSequence?) {
                 Log.w(BLE_TAG, "CDM associate failed: $error")
-                Ferry.toast(ctx, "Couldn't set up background access (${error ?: "no Mac found"}). Turn on Bluetooth and Location, keep the Mac nearby, and try again.")
+                Ferry.toast(ctx, "Couldn't find your Mac. Turn on Bluetooth and Location, keep the Mac nearby with Ferry open, and try again.")
             }
         }
         try {
             if (Build.VERSION.SDK_INT >= 33) cdm.associate(request, ctx.mainExecutor, cb) else cdm.associate(request, cb, null)
         } catch (e: Exception) {
-            Ferry.toast(ctx, "Couldn't set up background access: ${e.text()}")
+            Log.w(BLE_TAG, "CDM associate threw: ${e.text()}")
+            Ferry.toast(ctx, "Couldn't set up background start. ${e.friendly()}")
         }
     }
 }

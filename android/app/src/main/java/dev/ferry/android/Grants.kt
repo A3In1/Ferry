@@ -8,25 +8,28 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import kotlinx.coroutines.flow.MutableStateFlow
 
-/** What the phone shares with / allows from paired Macs. Every grant starts OFF (Build_Plan §2). */
-enum class Grant(val key: String, val label: String, val short: String, val why: String = "", val permissions: List<String> = emptyList()) {
-    NOTIFICATIONS("notifications", "Notifications to Mac", "Notifications"),
-    MEDIA("media", "Media controls", "Media"),
-    CLIPBOARD("clipboard", "Clipboard sync", "Clipboard"),
-    BATTERY("battery", "Battery status", "Battery"),
-    RING("ring", "Allow Mac to ring phone", "Ring"),
-    LINKS("links", "Links", "Links"),
+/**
+ * What the phone shares with / allows from paired Macs. Every grant starts OFF (Build_Plan §2).
+ * [label] and [why] are the switch's text; [short] lists it in the ongoing notification.
+ */
+enum class Grant(val key: String, val label: String, val short: String, val why: String, val permissions: List<String> = emptyList()) {
+    NOTIFICATIONS("notifications", "Notifications", "Notifications", "Show this phone's notifications on your Mac, and reply or dismiss them there"),
+    MEDIA("media", "Media controls", "Media", "See what's playing here and play, pause or skip from your Mac"),
+    CLIPBOARD("clipboard", "Clipboard", "Clipboard", "Text you copy on your Mac lands here. To send this phone's clipboard, tap Send clipboard"),
+    BATTERY("battery", "Battery level", "Battery", "Show this phone's battery level on your Mac"),
+    RING("ring", "Find my phone", "Find my phone", "Let your Mac ring this phone at full volume, even on silent"),
+    LINKS("links", "Links", "Links", "Open links from your Mac with one tap, and share links from here to your Mac"),
+    DND("dnd", "Do Not Disturb", "Do Not Disturb", "Turning Do Not Disturb on or off on one does the same on the other"),
     MESSAGES(
-        "messages", "Messages", "Messages", "Show your texts on your Mac and send replies you type there",
+        "messages", "Messages", "Messages", "Read your texts on your Mac and send replies you type there",
         listOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS),
     ),
     CALLS(
-        "calls", "Calls", "Calls", "Show incoming calls on your Mac, answer or decline from there, and see recent calls",
+        "calls", "Calls", "Calls", "See incoming calls on your Mac, answer or decline there, and see recent calls",
         listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CONTACTS),
     ),
     /** Needs All files access (a special access, not a runtime permission; see [PhoneFiles]). */
-    FILES("files", "Files", "Files", "Let your Mac browse and copy files on this phone"),
-    DND("dnd", "Do Not Disturb sync", "Do Not Disturb", "Turn Do Not Disturb on or off on both together"),
+    FILES("files", "Files", "Files", "Let your Mac browse this phone's storage and copy files from it"),
 }
 
 // shortcut: grants are global, not per Mac, and don't expire after 30 days unused; make them

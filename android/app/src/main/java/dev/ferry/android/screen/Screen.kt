@@ -110,7 +110,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             override fun onReceive(c: Context, i: Intent) = end(Fsp.END_LOCKED, "phone locked")
         }
         ContextCompat.registerReceiver(ctx, screenOff, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
-        Notifs.screen(ctx, mac, "Waiting for $mac")
+        Notifs.screen(ctx, mac, "Getting ready…")
         try {
             coroutineScope {
                 val parser = FspParser()
@@ -164,7 +164,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             !m.video && !control -> return end(Fsp.END_NOT_ALLOWED, "turn on Ferry control")
         }
         if (!m.video) {
-            Notifs.screen(ctx, mac, "Can tap, scroll and type on this phone")
+            Notifs.screen(ctx, mac, "Ferry control is on: $mac can tap, scroll and type here")
             return screenSizes(ctx).collect { send(Msg.Info(it.w, it.h, caps(false))) }
         }
         val p = project() ?: return end(Fsp.END_NOT_ALLOWED, "screen sharing was not allowed on the phone")
@@ -175,7 +175,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             },
             Handler(Looper.getMainLooper()),
         )
-        Notifs.screen(ctx, mac, if (control) "Sharing your screen · can tap and type" else "Sharing your screen")
+        Notifs.screen(ctx, mac, if (control) "Screen sharing is on, and $mac can tap and type here" else "Screen sharing is on")
         Capture(ctx, p, m).also { capture = it }.run(::send)
     }
 

@@ -24,7 +24,7 @@ object PhoneFiles {
 
     /** Why this build/phone can't browse at all, or null. */
     fun unavailable(): String? = when {
-        !Flavor.ALL_FILES -> "Browsing phone files needs the full build of Ferry"
+        !Flavor.ALL_FILES -> "Browsing phone files needs the full version of Ferry"
         Build.VERSION.SDK_INT < 30 -> "Browsing phone files needs Android 11 or newer" // shortcut: no MANAGE_EXTERNAL_STORAGE on 10; use legacy storage if 10 matters
         else -> null
     }
@@ -99,7 +99,7 @@ object PhoneFiles {
         }
         val failed = bad.size + ok.size - sources.size
         Log.w(FILES_TAG, "get ${paths.size} path(s): sending ${sources.size}, refused $failed")
-        if (failed > 0) Ferry.toast(ctx, "Couldn't send $failed file(s) to ${peer.name}" + (bad.firstOrNull()?.let { ": $it" } ?: ""))
+        if (failed > 0) Ferry.toast(ctx, "Couldn't send ${count(failed, "file")} to ${peer.name}" + (bad.firstOrNull()?.let { ": $it" } ?: ""))
         if (sources.isNotEmpty()) Ferry.send(ctx, peer, sources)
     }
 }

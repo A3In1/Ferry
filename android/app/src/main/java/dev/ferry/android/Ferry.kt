@@ -33,7 +33,8 @@ import java.io.File
 
 const val TAG = "Ferry"
 
-data class Recent(val id: String, val text: String)
+/** A line in the app's recent activity; [progress] 0..1 while a transfer runs. */
+data class Recent(val id: String, val text: String, val progress: Float? = null)
 
 class PairPrompt(val peerName: String, val code: String) {
     val answer = CompletableDeferred<Boolean>()
@@ -56,6 +57,10 @@ object Ferry {
     val nearby = MutableStateFlow<Set<String>>(emptySet())
     /** Paired peer with a live Bluetooth bridge (see [Ble]), if any. */
     val ble = MutableStateFlow<String?>(null)
+    /** Paired peers with a live USB cable link (polled by [FerryService]). */
+    val usb = MutableStateFlow<Set<String>>(emptySet())
+    /** A pairing started here is in progress. */
+    val pairing = MutableStateFlow(false)
     val recent = MutableStateFlow<List<Recent>>(emptyList())
     val prompt = MutableStateFlow<PairPrompt?>(null)
 
@@ -73,9 +78,17 @@ object Ferry {
         peers.value = node.value?.peers() ?: emptyList()
     }
 
-    fun put(id: String, text: String) = recent.update { list ->
+    fun put(id: String, text: String, progress: Float? = null) = recent.update { list ->
+        val r = Recent(id, text, progress)
         val i = list.indexOfFirst { it.id == id }
-        if (i >= 0) list.toMutableList().also { it[i] = Recent(id, text) } else (listOf(Recent(id, text)) + list).take(5)
+        if (i >= 0) list.toMutableList().also { it[i] = r } else (listOf(r) + list).take(5)
+    }
+
+    /** How [peerId] is reachable right now, best first: "Wi-Fi", "USB", "Bluetooth". */
+    fun links(peerId: String, nearby: Set<String>, usb: Set<String>, ble: String?) = buildList {
+        if (peerId in nearby) add("Wi-Fi")
+        if (peerId in usb) add("USB")
+        if (peerId == ble) add("Bluetooth")
     }
 
     /** The running node, waiting briefly if the service is still starting it. */
@@ -83,12 +96,17 @@ object Ferry {
 
     fun pair(ctx: Context, ticket: String) {
         val app = ctx.applicationContext
-        toast(app, "Pairing…")
+        if (!pairing.compareAndSet(false, true)) return toast(app, "Already pairing. Finish that one first.")
+        toast(app, "Pairing with your Mac…")
         scope.launch {
-            val node = awaitNode() ?: return@launch toast(app, "Ferry isn't running")
-            catching { node.pairWithTicket(ticket) }
-                .onSuccess { refreshPeers(); toast(app, "Paired with ${it.name}") }
-                .onFailure { toast(app, "Pairing failed: ${it.text()}") }
+            try {
+                val node = awaitNode() ?: return@launch toast(app, NOT_RUNNING)
+                catching { node.pairWithTicket(ticket) }
+                    .onSuccess { refreshPeers(); toast(app, "Paired with ${it.name}") }
+                    .onFailure { Log.w(TAG, "pairing failed: ${it.text()}"); toast(app, "Couldn't pair. ${it.friendly()}") }
+            } finally {
+                pairing.value = false
+            }
         }
     }
 
@@ -96,10 +114,13 @@ object Ferry {
         try {
             node.value?.forgetPeer(peer.id)
         } catch (e: Exception) {
-            toast(ctx, "Couldn't forget ${peer.name}: ${e.text()}")
+            Log.w(TAG, "forget ${peer.name}: ${e.text()}")
+            return toast(ctx, "Couldn't forget ${peer.name}. ${e.friendly()}")
         }
         nearby.update { it - peer.id }
+        usb.update { it - peer.id }
         refreshPeers()
+        toast(ctx, "Forgot ${peer.name}. To use it again, pair from your Mac.")
     }
 
     /**
@@ -124,26 +145,42 @@ object Ferry {
         null
     }
 
-    /** Sends in [scope] so it survives leaving the UI; closes the fds when done. */
+    /**
+     * Sends in [scope] so it survives leaving the UI; closes the fds when done. One notification
+     * follows the send from "Sending…" to its result (see [Transfers.Outgoing]).
+     */
     fun send(ctx: Context, peer: FfiPeer, files: List<Source>) {
         val app = ctx.applicationContext
-        if (files.isEmpty()) return toast(app, "Couldn't open the selected files")
-        if (bluetoothOnly(peer.id)) toast(app, "Connected over Bluetooth — large files are slow; join the same Wi-Fi")
+        if (files.isEmpty()) return toast(app, "Couldn't open the selected files. Try picking them again.")
+        if (bluetoothOnly(peer.id)) toast(app, "Connected over Bluetooth only, so big files are slow. Join the same Wi-Fi as your Mac to speed it up.")
+        val out = Transfers.Outgoing(peer.name, files.map { it.name ?: "file" })
+        Transfers.sending(app, out)
         scope.launch {
             try {
-                val node = awaitNode() ?: error("Ferry isn't running")
+                val node = awaitNode() ?: error(NOT_RUNNING)
                 // The core opens the path itself; /proc/self/fd/N reopens our fd.
                 val r = node.sendNamed(peer.id, files.map { FfiSource("/proc/self/fd/${it.pfd.fd}", it.name) })
                 val size = Formatter.formatShortFileSize(app, r.bytesSent.toLong())
-                Notifs.result(app, "Sent ${r.filesSent} file(s) to ${peer.name}", "$size in ${"%.1f".format(r.elapsedMs.toLong() / 1000.0)} s")
+                Transfers.done(app, out, "Sent ${count(r.filesSent.toInt(), "file")} to ${peer.name}", "$size in ${"%.1f".format(r.elapsedMs.toLong() / 1000.0)} s")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Notifs.result(app, "Send to ${peer.name} failed", e.text())
+                Log.w(TAG, "send to ${peer.name} failed: ${e.text()}")
+                Transfers.done(app, out, "Couldn't send to ${peer.name}", e.friendly())
             } finally {
+                Transfers.end(app, out)
                 files.forEach { runCatching { it.pfd.close() } }
             }
         }
+    }
+
+    /** From the file picker or share sheet: opens [uris] (while the caller holds their grant), sends, and says so. */
+    suspend fun sendPicked(ctx: Context, peer: FfiPeer, uris: List<Uri>) {
+        val files = open(ctx, uris)
+        send(ctx, peer, files)
+        if (files.isEmpty()) return
+        val skipped = uris.size - files.size
+        toast(ctx, "Sending ${count(files.size, "file")} to ${peer.name}…" + if (skipped > 0) " Couldn't open ${count(skipped, "other file")}." else "")
     }
 
     /**
@@ -154,21 +191,23 @@ object Ferry {
         val app = ctx.applicationContext
         FerryService.start(app)
         scope.launch {
-            val node = awaitNode() ?: return@launch toast(app, "Ferry isn't running")
+            val node = awaitNode() ?: return@launch toast(app, NOT_RUNNING)
             refreshPeers()
             val macs = peers.value
-            if (macs.isEmpty()) return@launch toast(app, "No paired Mac yet")
+            if (macs.isEmpty()) return@launch toast(app, "No Mac is paired yet. Open Ferry to pair one.")
             // The user is waiting: send directly (not via Outbox, which drops while a Mac is parked)
             // and report what really happened.
             val errors = macs.mapNotNull { p ->
-                catching { node.sendEvent(p.id, event) }.exceptionOrNull()?.text()?.also { Log.w(TAG, "send to ${p.name} failed: $it") }
+                catching { node.sendEvent(p.id, event) }.exceptionOrNull()?.also { Log.w(TAG, "send to ${p.name} failed: ${it.text()}") }
             }
-            toast(app, if (errors.size < macs.size) done else "Couldn't reach your Mac: ${errors.first()}")
+            toast(app, if (errors.size < macs.size) done else errors.first().friendly())
         }
     }
 
     /** Reached only through the Bluetooth bridge (no Wi-Fi presence). */
     fun bluetoothOnly(peerId: String) = ble.value == peerId && peerId !in nearby.value
+
+    const val NOT_RUNNING = "Ferry isn't running. Open the app and try again."
 
     fun toast(ctx: Context, text: String) {
         scope.launch(Dispatchers.Main) { Toast.makeText(ctx.applicationContext, text, Toast.LENGTH_LONG).show() }

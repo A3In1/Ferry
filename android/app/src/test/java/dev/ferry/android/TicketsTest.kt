@@ -2,6 +2,7 @@ package dev.ferry.android
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TicketsTest {
@@ -14,6 +15,25 @@ class TicketsTest {
         assertNull(Tickets.extract("ferry://pair?"))
         assertNull(Tickets.extract("https://example.com/?ferry://pair?v=1"))
         assertNull(Tickets.extract("ferry://other?v=1"))
+    }
+
+    @Test
+    fun friendlyErrors() {
+        assertEquals("Pairing was declined on your Mac.", Errors.friendly("reason=pairing declined on the other device"))
+        assertTrue(Errors.friendly("reason=connect to the other device: timed out").startsWith("Couldn't reach your Mac"))
+        assertTrue(Errors.friendly("pairing attempt with an invalid, expired or used ticket").startsWith("That QR code has expired"))
+        assertEquals("Disk exploded", Errors.friendly("reason=disk exploded"))
+        assertEquals("Something went wrong. Try again.", Errors.friendly("reason="))
+    }
+
+    @Test
+    fun wording() {
+        assertEquals("1 file", count(1, "file"))
+        assertEquals("3 files", count(3, "file"))
+        assertEquals("", joinAnd(emptyList()))
+        assertEquals("Wi-Fi", joinAnd(listOf("Wi-Fi")))
+        assertEquals("Wi-Fi and USB", joinAnd(listOf("Wi-Fi", "USB")))
+        assertEquals("Wi-Fi, USB and Bluetooth", joinAnd(listOf("Wi-Fi", "USB", "Bluetooth")))
     }
 
     @Test

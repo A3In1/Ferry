@@ -17,7 +17,7 @@ object Wifi {
 
     fun fromMac(ctx: Context, from: String, ssid: String, password: String) {
         if (ssid.isEmpty()) return
-        if (Build.VERSION.SDK_INT < 30) return Ferry.toast(ctx, "$from shared Wi-Fi “$ssid”: adding it needs Android 11 or newer")
+        if (Build.VERSION.SDK_INT < 30) return Ferry.toast(ctx, "$from shared the Wi-Fi “$ssid”, but adding it needs Android 11 or newer")
         Log.w(FILES_TAG, "wifi shared, open=${password.isEmpty()}") // never the password (or the SSID)
         val open = Intent(ctx, WifiActivity::class.java).putExtra(EXTRA_SSID, ssid).putExtra(EXTRA_PASSWORD, password)
         if (Ferry.uiVisible > 0) ctx.startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) else Notifs.wifi(ctx, from, ssid, open)
@@ -43,7 +43,7 @@ class WifiActivity : Activity() {
             startActivityForResult(Wifi.addIntent(ssid, intent.getStringExtra(Wifi.EXTRA_PASSWORD).orEmpty()), 1)
         } catch (e: Exception) {
             Log.w(FILES_TAG, "can't offer the network: ${e.javaClass.simpleName}") // the message may echo the passphrase
-            Ferry.toast(this, "Couldn't add Wi-Fi “$ssid”")
+            Ferry.toast(this, "Couldn't add the Wi-Fi “$ssid”. Check the name and password on your Mac.")
             finish()
         }
     }
