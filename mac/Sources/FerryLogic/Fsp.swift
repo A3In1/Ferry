@@ -105,7 +105,7 @@ public struct FspParser {
             return .info(width: Int(u16(p, 0)), height: Int(u16(p, 2)), caps: p[4])
         case 0x02:
             try need(9)
-            return .frame(pts: UInt64(u32(p, 0)) << 32 | UInt64(u32(p, 4)), flags: p[8], data: Data(p.dropFirst(9)))
+            return .frame(pts: UInt64(u32(p, 0)) << 32 | UInt64(u32(p, 4)), flags: p[8], data: p.dropFirst(9))
         case 0x03:
             try need(1)
             return .end(reason: p[0], detail: String(decoding: p.dropFirst(), as: UTF8.self))
@@ -114,7 +114,7 @@ public struct FspParser {
         }
     }
 
-    /// `at` is an absolute index (payloads are fresh `Data`, so theirs start at 0).
+    /// `at` is an absolute index (payloads are fresh `Data`, so theirs start at 0; FRAME data is a slice of one).
     private func u16(_ d: Data, _ at: Int) -> UInt16 { UInt16(d[at]) << 8 | UInt16(d[at + 1]) }
     private func u32(_ d: Data, _ at: Int) -> UInt32 { UInt32(u16(d, at)) << 16 | UInt32(u16(d, at + 2)) }
 }
@@ -125,30 +125,36 @@ public enum H264 {
 
     /// NAL units between 3- or 4-byte start codes (no start codes, no trailing zero bytes).
     public static func nalUnits(_ d: Data) -> [Data] {
-        let b = [UInt8](d)
-        var out: [Data] = [], start: Int?
-        var i = 0
-        func close(_ end: Int) {
-            guard let s = start else { return }
-            var e = end
-            while e > s, b[e - 1] == 0 { e -= 1 } // a NAL never ends in 0x00; these belong to a 4-byte start code
-            if e > s { out.append(Data(b[s..<e])) }
+        d.withUnsafeBytes { b in
+            var out: [Data] = [], start: Int?
+            var i = 0
+            func close(_ end: Int) {
+                guard let s = start else { return }
+                var e = end
+                while e > s, b[e - 1] == 0 { e -= 1 } // a NAL never ends in 0x00; these belong to a 4-byte start code
+                if e > s { out.append(Data(b[s..<e])) }
+            }
+            while i + 2 < b.count {
+                if b[i] == 0, b[i + 1] == 0, b[i + 2] == 1 {
+                    close(i)
+                    i += 3
+                    start = i
+                } else { i += 1 }
+            }
+            close(b.count)
+            return out
         }
-        while i + 2 < b.count {
-            if b[i] == 0, b[i + 1] == 0, b[i + 2] == 1 {
-                close(i)
-                i += 3
-                start = i
-            } else { i += 1 }
-        }
-        close(b.count)
-        return out
     }
 
     public static func type(_ nal: Data) -> UInt8 { (nal.first ?? 0) & 0x1F }
 
     /// NALs with 4-byte big-endian length prefixes (the format CMVideoFormatDescription uses with header length 4).
     public static func avcc(_ nals: [Data]) -> Data {
-        nals.reduce(into: Data()) { $0 += Fsp.be(UInt32($1.count)) + $1 }
+        var out = Data(capacity: nals.reduce(0) { $0 + 4 + $1.count })
+        for n in nals {
+            out += Fsp.be(UInt32(n.count))
+            out += n
+        }
+        return out
     }
 }

@@ -2,6 +2,7 @@ import CoreBluetooth
 import FerryCore
 import FerryLogic
 import Foundation
+import os
 
 /// Phase 3: the Mac as a BLE peripheral. Advertises the rotating presence UUID (no local name), serves
 /// the L2CAP PSM on a fixed GATT service and carries the core's session over each L2CAP channel the
@@ -61,7 +62,7 @@ final class Bluetooth: NSObject, CBPeripheralManagerDelegate, @unchecked Sendabl
         psm = nil
         advertised = nil
         onNote(nil)
-        NSLog("Ferry: Bluetooth stopped")
+        logger.info("Bluetooth stopped")
     }
 
     /// (Re)starts advertising when the presence UUID changed (or after power-on).
@@ -77,7 +78,7 @@ final class Bluetooth: NSObject, CBPeripheralManagerDelegate, @unchecked Sendabl
 
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         guard peripheral === manager else { return }
-        NSLog("Ferry: Bluetooth state \(peripheral.state.rawValue)")
+        logger.info("Bluetooth state \(peripheral.state.rawValue)")
         switch peripheral.state {
         case .poweredOn:
             onNote(nil)
@@ -102,19 +103,19 @@ final class Bluetooth: NSObject, CBPeripheralManagerDelegate, @unchecked Sendabl
     }
 
     func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: (any Error)?) {
-        if let error { NSLog("Ferry: Bluetooth advertising failed: \(error)") } else {
-            NSLog("Ferry: Bluetooth advertising \(advertised ?? "?")")
+        if let error { logger.error("Bluetooth advertising failed: \(error, privacy: .public)") } else {
+            logger.info("Bluetooth advertising \(self.advertised ?? "?", privacy: .public)")
         }
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: (any Error)?) {
-        if let error { NSLog("Ferry: adding the Bluetooth GATT service failed: \(error)") }
+        if let error { logger.error("adding the Bluetooth GATT service failed: \(error, privacy: .public)") }
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didPublishL2CAPChannel PSM: CBL2CAPPSM, error: (any Error)?) {
-        if let error { return NSLog("Ferry: publishing the L2CAP channel failed: \(error)") }
+        if let error { return logger.error("publishing the L2CAP channel failed: \(error, privacy: .public)") }
         psm = PSM
-        NSLog("Ferry: L2CAP PSM \(PSM)")
+        logger.info("L2CAP PSM \(PSM)")
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
@@ -128,9 +129,9 @@ final class Bluetooth: NSObject, CBPeripheralManagerDelegate, @unchecked Sendabl
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didOpen channel: CBL2CAPChannel?, error: (any Error)?) {
-        guard let channel, error == nil else { return NSLog("Ferry: L2CAP channel failed to open: \(String(describing: error))") }
+        guard let channel, error == nil else { return logger.error("L2CAP channel failed to open: \(String(describing: error), privacy: .public)") }
         let label = "ble:\(channel.peer.identifier.uuidString.prefix(8))"
-        NSLog("Ferry: L2CAP channel open (\(label))")
+        logger.info("L2CAP channel open (\(label, privacy: .public))")
         // shortcut: unbounded buffer between radio and core; fine at BLE rates (≤100 KB/s) into a local pipe.
         let (chunks, input) = AsyncStream.makeStream(of: Data.self)
         let pump = StreamPump(input: channel.inputStream, output: channel.outputStream,
@@ -148,12 +149,12 @@ final class Bluetooth: NSObject, CBPeripheralManagerDelegate, @unchecked Sendabl
                     let peer = try await bridge.waitPeer()
                     // The bridge hello is only a routing hint; still, don't carry traffic for strangers.
                     guard node.peers().contains(where: { $0.id == peer }) else {
-                        NSLog("Ferry: closing L2CAP channel from an unpaired device")
+                        logger.notice("closing L2CAP channel from an unpaired device")
                         return link.finish()
                     }
-                    NSLog("Ferry: Bluetooth bridge up (\(label))")
+                    logger.info("Bluetooth bridge up (\(label, privacy: .public))")
                 } catch {
-                    NSLog("Ferry: Bluetooth bridge hello failed (\(label)): \(error)")
+                    logger.error("Bluetooth bridge hello failed (\(label, privacy: .public)): \(error, privacy: .public)")
                     link.finish()
                 }
             }
@@ -162,7 +163,7 @@ final class Bluetooth: NSObject, CBPeripheralManagerDelegate, @unchecked Sendabl
             }
             await bridge.finish()
             link.finish()
-            NSLog("Ferry: L2CAP channel closed (\(label))")
+            logger.info("L2CAP channel closed (\(label, privacy: .public))")
             self.queue.async { self.links[id] = nil }
         }
     }

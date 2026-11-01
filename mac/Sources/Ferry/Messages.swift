@@ -30,29 +30,17 @@ func displayName(_ name: String, _ number: String) -> String {
 }
 
 extension AppModel {
-    func texts(_ peer: String) -> PhoneTexts {
-        if let t = phoneTexts[peer] { return t }
-        let t = PhoneTexts()
-        phoneTexts[peer] = t
-        return t
-    }
+    func texts(_ peer: String) -> PhoneTexts { phoneTexts.value(peer, orInsert: PhoneTexts.init) }
 
     func openMessages(_ peer: FfiPeer) {
-        if let w = messageWindows[peer.id] {
-            NSApp.activate()
-            return w.window.makeKeyAndOrderFront(nil)
-        }
-        messageWindows[peer.id] = MessagesWindow(model: self, peer: peer)
+        showWindow(\.messageWindows, for: peer) { MessagesWindow(model: self, peer: peer) }
     }
 
     /// Asks the phone; if nothing on that feed comes back within 5 s, the window says how to turn it on.
     private func ask(_ event: FfiEvent, _ feed: PhoneTexts.Feed, peer: String) {
-        let t = texts(peer), n = t.heard[feed, default: 0]
+        let t = texts(peer)
+        ifUnanswered({ t.heard[feed, default: 0] }) { t.silent.insert(feed) }
         broadcast(event, to: [peer])
-        Task {
-            try? await Task.sleep(for: .seconds(5))
-            if t.heard[feed, default: 0] == n { t.silent.insert(feed) }
-        }
     }
 
     // shortcut: limit 0 = the phone's defaults (50 threads/calls, 100 messages), no paging; add "load older" if people ask.
@@ -136,18 +124,14 @@ extension AppModel {
     }
 
     private func notifyText(_ m: FfiSmsMessage, peer: String) {
-        guard canNotify else { return }
         let sender = displayName(m.name, m.address)
         let code = oneTimeCode(in: m.body)
-        let content = UNMutableNotificationContent()
-        content.title = code.map { "\($0) · code from \(sender)" } ?? sender
-        content.body = m.body
-        content.threadIdentifier = "sms|\(peer)|\(m.threadId)"
-        content.categoryIdentifier = code == nil ? Notifications.sms : Notifications.smsCode
-        content.userInfo = [Notifications.peerKey: peer, Notifications.addressKey: m.address,
-                            Notifications.threadKey: m.threadId, Notifications.codeKey: code ?? ""]
-        UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: "\(Notifications.smsPrefix)\(peer)|\(m.id)", content: content, trigger: nil))
+        notify(code.map { "\($0) · code from \(sender)" } ?? sender, m.body, id: "\(Notifications.smsPrefix)\(peer)|\(m.id)") {
+            $0.threadIdentifier = "sms|\(peer)|\(m.threadId)"
+            $0.categoryIdentifier = code == nil ? Notifications.sms : Notifications.smsCode
+            $0.userInfo = [Notifications.peerKey: peer, Notifications.addressKey: m.address,
+                           Notifications.threadKey: m.threadId, Notifications.codeKey: code ?? ""]
+        }
     }
 
     private func call(_ state: FfiCallState, who: String, peer: String) {
@@ -157,16 +141,13 @@ extension AppModel {
         onChange()
         switch state {
         case .ringing:
-            guard canNotify else { return }
-            let content = UNMutableNotificationContent()
-            content.title = "\(who) is calling"
-            content.body = "On \(peerName(peer) ?? "your phone"). The call's audio stays on the phone."
-            content.sound = .default
-            // Time-sensitive only breaks through Focus with the entitlement; without it macOS shows it as active.
-            content.interruptionLevel = .timeSensitive
-            content.categoryIdentifier = Notifications.call
-            content.userInfo = [Notifications.peerKey: peer]
-            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+            notify("\(who) is calling", "On \(peerName(peer) ?? "your phone"). The call's audio stays on the phone.", id: id) {
+                $0.sound = .default
+                // Time-sensitive only breaks through Focus with the entitlement; without it macOS shows it as active.
+                $0.interruptionLevel = .timeSensitive
+                $0.categoryIdentifier = Notifications.call
+                $0.userInfo = [Notifications.peerKey: peer]
+            }
         case .idle:
             if messageWindows[peer] != nil { ask(.callLogRequest(limit: 0), .calls, peer: peer) }
         case .active:
@@ -201,7 +182,7 @@ extension AppModel {
             pb.setString(code, forType: .string)
             seenClipboardChange = pb.changeCount // don't sync the code back to the phone
         case UNNotificationDefaultActionIdentifier:
-            guard let thread, let p = peers.first(where: { $0.id == peer }) else { return }
+            guard let thread, let p = self.peer(peer) else { return }
             texts(peer).composeTo = nil
             texts(peer).selected = thread
             openMessages(p)
@@ -212,48 +193,12 @@ extension AppModel {
 }
 
 /// "Messages <phone>": threads (or recent calls) on the left, the selected conversation on the right.
-@MainActor final class MessagesWindow: NSObject, NSWindowDelegate {
-    let window: NSWindow
-    private let model: AppModel
-    private let peerId: String
-
+final class MessagesWindow: PeerWindow {
     init(model: AppModel, peer: FfiPeer) {
-        self.model = model
-        peerId = peer.id
-        window = EditingWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 560),
-                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        super.init()
-        window.title = "Messages — \(peer.name)"
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.contentViewController = NSHostingController(rootView: MessagesView(model: model, peer: peer.id, texts: model.texts(peer.id)))
-        window.setContentSize(NSSize(width: 780, height: 560))
+        super.init(model: model, peer: peer, title: "Messages — \(peer.name)", size: NSSize(width: 780, height: 560))
+        host(MessagesView(model: model, peer: peer.id, texts: model.texts(peer.id)))
         model.refreshTexts(peer.id)
-        window.center()
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        model.messageWindows[peerId] = nil
-    }
-}
-
-/// No main menu in a menu-bar app, so text editing shortcuts and ⌘W are wired here.
-final class EditingWindow: NSWindow {
-    override func performKeyEquivalent(with e: NSEvent) -> Bool {
-        guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return super.performKeyEquivalent(with: e) }
-        let action: Selector? = switch e.charactersIgnoringModifiers {
-        case "x": #selector(NSText.cut(_:))
-        case "c": #selector(NSText.copy(_:))
-        case "v": #selector(NSText.paste(_:))
-        case "a": #selector(NSText.selectAll(_:))
-        case "z": Selector(("undo:"))
-        case "w": #selector(NSWindow.performClose(_:))
-        default: nil
-        }
-        if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
-        return super.performKeyEquivalent(with: e)
+        present()
     }
 }
 

@@ -20,19 +20,10 @@ extension FfiFsEntry: Identifiable {
 }
 
 extension AppModel {
-    func files(_ peer: String) -> PhoneFiles {
-        if let f = phoneFiles[peer] { return f }
-        let f = PhoneFiles()
-        phoneFiles[peer] = f
-        return f
-    }
+    func files(_ peer: String) -> PhoneFiles { phoneFiles.value(peer, orInsert: PhoneFiles.init) }
 
     func openFiles(_ peer: FfiPeer) {
-        if let w = fileWindows[peer.id] {
-            NSApp.activate()
-            return w.window.makeKeyAndOrderFront(nil)
-        }
-        fileWindows[peer.id] = FilesWindow(model: self, peer: peer)
+        showWindow(\.fileWindows, for: peer) { FilesWindow(model: self, peer: peer) }
     }
 
     /// Entries are cleared first: their names only make sense joined to the folder they came from.
@@ -44,15 +35,12 @@ extension AppModel {
         f.entries = []
         f.error = ""
         f.loading = true
-        let n = f.heard
-        broadcast(.fsListRequest(path: path), to: [peer])
-        Task {
-            try? await Task.sleep(for: .seconds(5))
-            if f.heard == n, f.path == path {
-                f.silent = true
-                f.loading = false
-            }
+        ifUnanswered({ f.heard }) {
+            guard f.path == path else { return }
+            f.silent = true
+            f.loading = false
         }
+        broadcast(.fsListRequest(path: path), to: [peer])
     }
 
     func goBack(peer: String) {
@@ -66,14 +54,14 @@ extension AppModel {
             .compactMap { e in phonePath(f.path, e.name).map { (name: e.name, path: $0) } }
         guard !picked.isEmpty else { return }
         broadcast(.fsGet(paths: picked.map(\.path)), to: [peer], what: "the download request")
-        f.note = "Requested \(picked.count == 1 ? picked[0].name : "\(picked.count) files"), arriving in Downloads…"
+        f.note = "Requested \(describe(picked.map(\.name))), arriving in Downloads…"
     }
 
     func uploadFiles(_ urls: [URL], to peer: FfiPeer) {
         let urls = urls.filter(\.isFileURL)
         guard !urls.isEmpty else { return }
         send(urls, to: peer)
-        files(peer.id).note = "Sending \(urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files"): they land in Download/Ferry on the phone"
+        files(peer.id).note = "Sending \(describe(urls.map(\.lastPathComponent))): they land in Download/Ferry on the phone"
     }
 
     /// From the phone (Sync.swift). Answers for a folder we've since left are dropped.
@@ -89,30 +77,12 @@ extension AppModel {
 }
 
 /// "Browse <phone>": path bar, folder listing, Download / Upload (or drop Mac files on the window).
-@MainActor final class FilesWindow: NSObject, NSWindowDelegate {
-    let window: NSWindow
-    private let model: AppModel
-    private let peerId: String
-
+final class FilesWindow: PeerWindow {
     init(model: AppModel, peer: FfiPeer) {
-        self.model = model
-        peerId = peer.id
-        window = EditingWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
-                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        super.init()
-        window.title = "Browse \(peer.name)"
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.contentViewController = NSHostingController(rootView: FilesView(model: model, peer: peer, files: model.files(peer.id)))
-        window.setContentSize(NSSize(width: 720, height: 520))
+        super.init(model: model, peer: peer, title: "Browse \(peer.name)", size: NSSize(width: 720, height: 520))
+        host(FilesView(model: model, peer: peer, files: model.files(peer.id)))
         model.listFiles(model.files(peer.id).path, peer: peer.id, remember: false)
-        window.center()
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        model.fileWindows[peerId] = nil
+        present()
     }
 }
 
@@ -132,7 +102,7 @@ struct FilesView: View {
                     Label(e.name, systemImage: e.dir ? "folder.fill" : "doc").lineLimit(1)
                 }
                 TableColumn("Size") { e in
-                    Text(e.dir ? "" : ByteCountFormatter.string(fromByteCount: Int64(e.size), countStyle: .file))
+                    Text(e.dir ? "" : byteCount(e.size))
                         .foregroundStyle(.secondary)
                 }
                 .width(min: 60, ideal: 80, max: 120)

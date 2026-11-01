@@ -1,9 +1,9 @@
 import AppKit
 import FerryCore
+import os
 import UserNotifications
 
-/// Watch adb for phones plugged in over USB (usbWatch at startup, usbLinks poll, "Pair phone over USB").
-let usbEnabled = true
+let logger = Logger(subsystem: "dev.ferry.mac", category: "app")
 
 /// App state; everything here runs on the main actor.
 @MainActor
@@ -46,6 +46,8 @@ final class AppModel {
     var categories: [String: UNNotificationCategory] = [:]
     /// Last general-pasteboard changeCount we've seen or caused (echo suppression).
     var seenClipboardChange = NSPasteboard.general.changeCount
+    /// The 1 s clipboard poll; only runs while "Sync clipboard to phone" is on.
+    var clipboardPoll: Task<Void, Never>?
     // Phase 4 (Screen.swift, Crossing.swift): open viewer windows by peer id, and cursor sharing.
     var viewers: [String: ScreenWindow] = [:]
     var crossing: Crossing?
@@ -60,18 +62,8 @@ final class AppModel {
 
     init() {
         startTask = Task { await start() }
-        Task {
-            while true {
-                try? await Task.sleep(for: .seconds(2))
-                tick()
-            }
-        }
-        Task {
-            while true {
-                try? await Task.sleep(for: .seconds(1))
-                pollClipboard()
-            }
-        }
+        Task { while (try? await Task.sleep(for: .seconds(2))) != nil { tick() } }
+        updateClipboardPoll()
     }
 
     /// Returns once the node has started (or failed to).
@@ -92,9 +84,7 @@ final class AppModel {
             )
             self.node = node
             status = "\(node.deviceName()) · \(node.deviceId().prefix(8))"
-            if usbEnabled {
-                do { try await node.usbWatch(adbPath: nil) } catch { put("usb", "USB unavailable: \(error)") }
-            }
+            do { try await node.usbWatch(adbPath: nil) } catch { put("usb", "USB unavailable: \(error)") }
             bluetooth = Bluetooth(node: node) { [weak self] note in
                 Task { @MainActor in
                     self?.bluetoothNote = note
@@ -130,9 +120,9 @@ final class AppModel {
         peers = node?.peers() ?? []
     }
 
-    func peerName(_ id: String) -> String? {
-        peers.first { $0.id == id }?.name
-    }
+    func peer(_ id: String) -> FfiPeer? { peers.first { $0.id == id } }
+
+    func peerName(_ id: String) -> String? { peer(id)?.name }
 
     /// Drop / Services target: the only peer, else the last one we sent to.
     var preferredPeer: FfiPeer? {
@@ -142,7 +132,15 @@ final class AppModel {
     }
 
     func forget(_ peer: FfiPeer) {
-        do { try node?.forgetPeer(peerId: peer.id) } catch { showAlert("Couldn't forget \(peer.name)", "\(error)") }
+        do {
+            try node?.forgetPeer(peerId: peer.id)
+            // Else its battery, now-playing and call lines stay in the menu.
+            battery[peer.id] = nil
+            nowPlaying[peer.id] = nil
+            activeCalls[peer.id] = nil
+        } catch {
+            showAlert("Couldn't forget \(peer.name)", "\(error)")
+        }
         refreshPeers()
     }
 
@@ -163,14 +161,13 @@ final class AppModel {
         guard let node, !urls.isEmpty else { return }
         UserDefaults.standard.set(peer.id, forKey: "lastPeerId")
         let id = "send-\(UUID().uuidString)"
-        let what = urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files"
+        let what = describe(urls.map(\.lastPathComponent))
         put(id, "↑ Sending \(what) to \(peer.name)…")
         Task {
             do {
                 let r = try await node.sendFiles(peerId: peer.id, paths: urls.map(\.path))
-                let secs = max(Double(r.elapsedMs) / 1000, 0.001)
-                put(id, "Sent \(what) to \(peer.name) · \(size(r.bytesSent)), "
-                    + String(format: "%.1f MB/s", Double(r.bytesSent) / 1e6 / secs))
+                put(id, "Sent \(what) to \(peer.name) · \(byteCount(r.bytesSent)), "
+                    + rate(Double(r.bytesSent), seconds: max(Double(r.elapsedMs) / 1000, 0.001)))
             } catch {
                 put(id, "Sending \(what) to \(peer.name) failed")
                 showAlert("Send to \(peer.name) failed", "\(error)")
@@ -184,7 +181,7 @@ final class AppModel {
     }
 
     func pairOverUSB() {
-        guard usbEnabled, let node else { return }
+        guard let node else { return }
         Task {
             do {
                 try await node.usbPushTicket(serial: nil)
@@ -198,20 +195,14 @@ final class AppModel {
     // MARK: called via Bridge
 
     func confirmPairing(peerName: String, code: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Pair with \(peerName)?"
-        alert.informativeText = "Check that \(peerName) shows the same code:\n\n\(code)"
-        alert.addButton(withTitle: "Match")
-        alert.addButton(withTitle: "Doesn't match")
-        NSApp.activate()
-        return alert.runModal() == .alertFirstButtonReturn
+        showAlert("Pair with \(peerName)?", "Check that \(peerName) shows the same code:\n\n\(code)", buttons: ["Match", "Doesn't match"])
     }
 
     func handle(_ event: FfiFileEvent) {
         switch event {
         case let .offered(tid, names, totalBytes):
             incoming[tid] = Incoming(names: names, totalBytes: totalBytes)
-            put(tid, "↓ Incoming \(describe(names)) (\(size(totalBytes)))")
+            put(tid, "↓ Incoming \(describe(names)) (\(byteCount(totalBytes)))")
         case let .progress(tid, index, done, _):
             guard var t = incoming[tid] else { return }
             let bytes = t.finishedBytes + done
@@ -221,7 +212,7 @@ final class AppModel {
             var text = "↓ \(t.names.count > 1 ? "\(index + 1)/\(t.names.count) " : "")\(name(t, index)) — \(pct)%"
             if case let (start, startBytes)? = t.rateStart {
                 let secs = Date.now.timeIntervalSince(start)
-                if secs > 0.5 { text += String(format: " · %.1f MB/s", (Double(bytes) - Double(startBytes)) / 1e6 / secs) }
+                if secs > 0.5 { text += " · " + rate(Double(bytes) - Double(startBytes), seconds: secs) }
             }
             put(tid, text)
         case let .saved(tid, _, path):
@@ -259,29 +250,18 @@ final class AppModel {
             kLSQuarantineAgentNameKey as String: "Ferry",
             kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
         ]
-        do { try url.setResourceValues(values) } catch { NSLog("Ferry: couldn't quarantine \(url.path): \(error)") }
+        do { try url.setResourceValues(values) } catch { logger.error("couldn't quarantine \(url.path): \(error, privacy: .public)") }
     }
 
     private func notifyReceived(_ urls: [URL], what: String) {
-        guard canNotify else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "Received \(what)"
-        content.body = "Saved to \(urls[0].deletingLastPathComponent().lastPathComponent)"
-        content.categoryIdentifier = Notifications.received
-        content.userInfo = [Notifications.pathsKey: urls.map(\.path)]
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
-    }
-
-    private func describe(_ names: [String]) -> String {
-        names.count == 1 ? names[0] : "\(names.count) files"
+        notify("Received \(what)", "Saved to \(urls[0].deletingLastPathComponent().lastPathComponent)") {
+            $0.categoryIdentifier = Notifications.received
+            $0.userInfo = [Notifications.pathsKey: urls.map(\.path)]
+        }
     }
 
     private func name(_ t: Incoming, _ index: UInt32) -> String {
         Int(index) < t.names.count ? t.names[Int(index)] : "File \(index + 1)"
-    }
-
-    private func size(_ bytes: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     private func put(_ id: String, _ text: String) {
@@ -294,12 +274,61 @@ final class AppModel {
         onChange()
     }
 
-    func showAlert(_ title: String, _ text: String) {
+    /// Modal alert; true if the first button was chosen. No `buttons` = a single OK.
+    @discardableResult func showAlert(_ title: String, _ text: String, buttons: [String] = []) -> Bool {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = text
+        buttons.forEach { alert.addButton(withTitle: $0) }
         NSApp.activate()
-        alert.runModal()
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    func confirm(_ title: String, _ text: String, _ ok: String) -> Bool {
+        showAlert(title, text, buttons: [ok, "Cancel"])
+    }
+
+    /// Posts a notification now (a later one with the same `id` replaces it); a no-op outside an app bundle.
+    /// `waitForCategories`: for a category set just now, else the first one shows without its buttons.
+    func notify(_ title: String, _ body: String, id: String = UUID().uuidString, waitForCategories: Bool = false,
+                _ configure: (UNMutableNotificationContent) -> Void = { _ in }) {
+        guard canNotify else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        configure(content)
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+        let center = UNUserNotificationCenter.current()
+        guard waitForCategories else { return center.add(request) }
+        Task {
+            _ = await center.notificationCategories()
+            do { try await center.add(request) } catch { logger.error("couldn't post notification: \(error, privacy: .public)") }
+        }
+    }
+
+    /// Runs `silent` in 5 s unless `heard()` has changed by then (the phone answered).
+    func ifUnanswered(_ heard: @escaping () -> Int, _ silent: @escaping () -> Void) {
+        let n = heard()
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            if heard() == n { silent() }
+        }
+    }
+}
+
+func describe(_ names: [String]) -> String { names.count == 1 ? names[0] : "\(names.count) files" }
+
+func byteCount(_ bytes: UInt64) -> String { ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
+
+func rate(_ bytes: Double, seconds: Double) -> String { String(format: "%.1f MB/s", bytes / 1e6 / seconds) }
+
+extension Dictionary {
+    /// The value for `key`, after inserting `make()` if there was none.
+    mutating func value(_ key: Key, orInsert make: () -> Value) -> Value {
+        if let v = self[key] { return v }
+        let v = make()
+        self[key] = v
+        return v
     }
 }
 

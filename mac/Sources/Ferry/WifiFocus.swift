@@ -45,16 +45,6 @@ extension AppModel {
         }
     }
 
-    private func confirm(_ title: String, _ text: String, _ ok: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        alert.addButton(withTitle: ok)
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
     /// Menu toggle "Phone Do Not Disturb". The check mark only moves when the phone reports back.
     func setPhoneDnd(_ on: Bool) {
         broadcast(.dnd(on: on), what: on ? "Do Not Disturb on" : "Do Not Disturb off")
@@ -69,7 +59,7 @@ extension AppModel {
         Task {
             let list = await runTool("/usr/bin/shortcuts", ["list"])
             if list.out.split(separator: "\n").contains(where: { $0 == name }) {
-                if await !runTool("/usr/bin/shortcuts", ["run", name]).ok { NSLog("Ferry: Shortcut \"\(name)\" failed") }
+                if await !runTool("/usr/bin/shortcuts", ["run", name]).ok { logger.error("Shortcut \"\(name, privacy: .public)\" failed") }
             } else if !UserDefaults.standard.bool(forKey: "focusHintShown") {
                 UserDefaults.standard.set(true, forKey: "focusHintShown")
                 showAlert("Have your Mac follow the phone's Do Not Disturb",

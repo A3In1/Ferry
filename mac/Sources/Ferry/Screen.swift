@@ -67,11 +67,8 @@ import FerryLogic
 }
 
 /// "Mirror <phone>": the phone's screen in a window, with touch, scroll and typing back to it.
-@MainActor final class ScreenWindow: NSObject, NSWindowDelegate {
-    let peerId: String
-    let window: NSWindow
+final class ScreenWindow: PeerWindow {
     private(set) var session: ScreenSession?
-    private let model: AppModel
     private let screen = ScreenView()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let reconnect = NSButton(title: "Reconnect", target: nil, action: nil)
@@ -81,15 +78,7 @@ import FerryLogic
     private var lastKeyframeAsk = Date.distantPast
 
     init(model: AppModel, peer: FfiPeer) {
-        self.model = model
-        peerId = peer.id
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 760),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        super.init()
-        window.title = peer.name
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-
+        super.init(model: model, peer: peer, title: peer.name, size: NSSize(width: 360, height: 760), editing: false)
         let content = NSView()
         screen.autoresizingMask = [.width, .height]
         content.addSubview(screen)
@@ -128,9 +117,7 @@ import FerryLogic
         screen.send = { [weak self] in self?.session?.send($0) }
         screen.nav = { [weak self] in self?.session?.send(Fsp.nav($0)) }
         connect()
-        window.center()
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        present()
         window.makeFirstResponder(screen)
     }
 
@@ -179,11 +166,11 @@ import FerryLogic
     /// Annex-B → AVCC sample buffers into the display layer, which decodes them.
     private func decode(pts: UInt64, flags: UInt8, _ data: Data) {
         let nals = H264.nalUnits(data)
-        var config = false
+        var config = false // only a changed SPS/PPS needs a new format (keyframes usually repeat them)
         for n in nals {
             switch H264.type(n) {
-            case H264.sps: sps = n; config = true
-            case H264.pps: pps = n; config = true
+            case H264.sps where n != sps: sps = n; config = true
+            case H264.pps where n != pps: pps = n; config = true
             default: break
             }
         }
@@ -224,15 +211,15 @@ import FerryLogic
             if !key { sample.sampleAttachments[0][.notSync] = true }
             return sample
         } catch {
-            NSLog("Ferry: bad video frame: \(error)")
+            logger.error("bad video frame: \(error, privacy: .public)")
             return nil
         }
     }
 
-    func windowWillClose(_ notification: Notification) {
+    override func windowWillClose(_ notification: Notification) {
         session?.finish()
         session = nil
-        model.viewers[peerId] = nil
+        super.windowWillClose(notification)
     }
 }
 
@@ -310,10 +297,6 @@ func wheelUnits(_ e: NSEvent) -> (Float, Float) {
 
 extension AppModel {
     func mirror(_ peer: FfiPeer) {
-        if let w = viewers[peer.id] {
-            NSApp.activate()
-            return w.window.makeKeyAndOrderFront(nil)
-        }
-        viewers[peer.id] = ScreenWindow(model: self, peer: peer)
+        showWindow(\.viewers, for: peer) { ScreenWindow(model: self, peer: peer) }
     }
 }

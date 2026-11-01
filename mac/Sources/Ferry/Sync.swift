@@ -9,7 +9,20 @@ extension AppModel {
 
     var syncClipboard: Bool {
         get { UserDefaults.standard.bool(forKey: Self.syncClipboardKey) } // default off
-        set { UserDefaults.standard.set(newValue, forKey: Self.syncClipboardKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.syncClipboardKey)
+            updateClipboardPoll()
+        }
+    }
+
+    /// Starts or stops the poll to match `syncClipboard`. Turning it on only picks up changes made from then on.
+    func updateClipboardPoll() {
+        guard syncClipboard != (clipboardPoll != nil) else { return }
+        clipboardPoll?.cancel()
+        clipboardPoll = nil
+        guard syncClipboard else { return }
+        seenClipboardChange = NSPasteboard.general.changeCount
+        clipboardPoll = Task { while (try? await Task.sleep(for: .seconds(1))) != nil { pollClipboard() } }
     }
 
     // MARK: incoming (via Bridge.onEvent)
@@ -33,7 +46,7 @@ extension AppModel {
             battery[peer] = (percent, charging)
             onChange()
         case let .link(url):
-            guard let url = webURL(url) else { NSLog("Ferry: ignored non-web link from phone: \(url)"); return }
+            guard let url = webURL(url) else { return logger.notice("ignored non-web link from phone: \(url)") }
             NSWorkspace.shared.open(url)
             notify("Opened link from \(peerName(peer) ?? "your phone")", url.absoluteString)
         case .smsThreads, .smsMessages, .smsNew, .call, .callLog:
@@ -71,7 +84,7 @@ extension AppModel {
                     for (id, name) in named {
                         group.addTask {
                             do { try await node.sendEvent(peerId: id, event: event); return nil } catch {
-                                NSLog("Ferry: sending \(what ?? "sync event") to \(name) failed: \(error)")
+                                logger.error("sending \(what ?? "sync event", privacy: .public) to \(name) failed: \(error, privacy: .public)")
                                 return "\(name): \(error)"
                             }
                         }
@@ -89,9 +102,9 @@ extension AppModel {
     /// Services "Send link to phone" and the menu's "Send clipboard to phone": a lone web URL goes as a
     /// link (the phone opens it), anything else as clipboard text.
     func sendText(_ text: String?) {
-        guard let text, !text.isEmpty else { return showAlert("Nothing to send", "There's no text to send.") }
+        guard let text, !text.isEmpty else { showAlert("Nothing to send", "There's no text to send."); return }
         if let url = webURL(text) { return broadcast(.link(url: url.absoluteString), what: "the link") }
-        guard text.utf8.count <= clipboardLimit else { return showAlert("Too much text", "Ferry sends up to 1 MB of text.") }
+        guard text.utf8.count <= clipboardLimit else { showAlert("Too much text", "Ferry sends up to 1 MB of text."); return }
         broadcast(.clipboard(text: text), what: "the text")
     }
 
@@ -99,7 +112,7 @@ extension AppModel {
         sendText(NSPasteboard.general.string(forType: .string))
     }
 
-    /// Every 1 s. Reading changeCount/types never triggers the macOS 15.4+ pasteboard-privacy alert;
+    /// Every 1 s while syncing. Reading changeCount/types never triggers the macOS 15.4+ pasteboard-privacy alert;
     /// reading the string does (once, then System Settings → Privacy & Security → Paste from Other Apps).
     func pollClipboard() {
         let pb = NSPasteboard.general
@@ -137,17 +150,11 @@ extension AppModel {
         peer: String, key: String, app: String, package: String, title: String, text: String, buttons: [FfiNotifButton]
     ) {
         guard canNotify else { return }
-        let content = UNMutableNotificationContent()
-        content.title = title.isEmpty ? app : "\(app): \(title)"
-        content.body = text
-        content.threadIdentifier = package
-        content.categoryIdentifier = category(for: buttons)
-        content.userInfo = [Notifications.peerKey: peer, Notifications.keyKey: key]
-        let request = UNNotificationRequest(identifier: phoneID(peer, key), content: content, trigger: nil) // same id replaces
-        Task {
-            let center = UNUserNotificationCenter.current()
-            _ = await center.notificationCategories() // waits for a just-set category, else the first one shows without buttons
-            do { try await center.add(request) } catch { NSLog("Ferry: couldn't post notification: \(error)") }
+        let category = category(for: buttons)
+        notify(title.isEmpty ? app : "\(app): \(title)", text, id: phoneID(peer, key), waitForCategories: true) {
+            $0.threadIdentifier = package
+            $0.categoryIdentifier = category
+            $0.userInfo = [Notifications.peerKey: peer, Notifications.keyKey: key]
         }
     }
 
@@ -188,13 +195,5 @@ extension AppModel {
             broadcast(.notificationAction(key: key, buttonId: button, replyText: reply, dismiss: false), to: [peer],
                       what: reply.isEmpty ? "the action" : "the reply")
         } // body click: nothing to do on the phone
-    }
-
-    func notify(_ title: String, _ body: String) {
-        guard canNotify else { return }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 }

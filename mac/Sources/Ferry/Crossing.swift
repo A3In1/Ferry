@@ -3,12 +3,14 @@ import FerryLogic
 
 /// "Share cursor with <phone>": pushing the pointer past the chosen screen edge hides and freezes the
 /// Mac cursor and drives the phone's overlay cursor (CURSOR/SCROLL/TEXT/KEY) until it comes back or
-/// Escape. An event tap reads the raw deltas and swallows input while crossed.
+/// Escape. A listen-only tap watches mouse moves for the push; a filtering tap, enabled only while
+/// crossed (so Ferry isn't in the path of every key and click otherwise), reads raw deltas and swallows input.
 @MainActor final class Crossing {
     let peerId: String
     let edge: ScreenEdge
     private let model: AppModel
     private var tap: CFMachPort?
+    private var watch: CFMachPort?
     private var own: ScreenSession? // control-only, used when no viewer window is open
     private var cursor: VirtualCursor?
     private var screen = CGRect.zero
@@ -23,26 +25,41 @@ import FerryLogic
         self.edge = edge
         let types: [CGEventType] = [.mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp,
                                     .rightMouseDragged, .otherMouseDown, .otherMouseUp, .otherMouseDragged, .scrollWheel, .keyDown, .keyUp]
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-            eventsOfInterest: types.reduce(0) { $0 | 1 << $1.rawValue },
-            callback: { _, type, event, me in
-                // The source is on the main run loop, so this runs on the main thread.
-                let crossing = Unmanaged<Crossing>.fromOpaque(me!).takeUnretainedValue()
-                let swallow = MainActor.assumeIsolated { crossing.handle(type, event) }
-                return swallow ? nil : Unmanaged.passUnretained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else { return nil }
+        // The sources are on the main run loop, so the callbacks run on the main thread.
+        guard let tap = addTap(.defaultTap, .headInsertEventTap, types, { _, type, event, me in
+            let crossing = Unmanaged<Crossing>.fromOpaque(me!).takeUnretainedValue()
+            let swallow = MainActor.assumeIsolated { crossing.handle(type, event) }
+            return swallow ? nil : Unmanaged.passUnretained(event)
+        }) else { return nil }
+        CGEvent.tapEnable(tap: tap, enable: false)
         self.tap = tap
-        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
+        // After the filtering tap, so it never sees what that one swallowed.
+        guard let watch = addTap(.listenOnly, .tailAppendEventTap, [.mouseMoved], { _, type, event, me in
+            let crossing = Unmanaged<Crossing>.fromOpaque(me!).takeUnretainedValue()
+            MainActor.assumeIsolated { crossing.watched(type, event) }
+            return Unmanaged.passUnretained(event)
+        }) else {
+            CFMachPortInvalidate(tap)
+            return nil
+        }
+        self.watch = watch
     }
 
-    /// Must run before the last reference goes (the tap holds an unretained pointer to self).
+    private func addTap(_ options: CGEventTapOptions, _ place: CGEventTapPlacement, _ types: [CGEventType],
+                        _ callback: CGEventTapCallBack) -> CFMachPort? {
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: place, options: options,
+                                          eventsOfInterest: types.reduce(0) { $0 | 1 << $1.rawValue }, callback: callback,
+                                          userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return nil }
+        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
+        return tap
+    }
+
+    /// Must run before the last reference goes (the taps hold an unretained pointer to self).
     func stop() {
         leave()
-        if let tap { CFMachPortInvalidate(tap) }
+        for t in [tap, watch].compactMap(\.self) { CFMachPortInvalidate(t) }
         tap = nil
+        watch = nil
         own?.finish()
         own = nil
     }
@@ -56,16 +73,18 @@ import FerryLogic
         return own?.isOpen == true ? own : nil
     }
 
-    private func handle(_ type: CGEventType, _ event: CGEvent) -> Bool {
+    private func watched(_ type: CGEventType, _ event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            leave() // never leave the cursor hidden and frozen without a working tap
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            return false
+            if let watch { CGEvent.tapEnable(tap: watch, enable: true) }
+        } else if type == .mouseMoved, cursor == nil {
+            checkEdge(event)
         }
-        guard var c = cursor else {
-            if type == .mouseMoved { checkEdge(event) }
-            return false
-        }
+    }
+
+    private func handle(_ type: CGEventType, _ event: CGEvent) -> Bool {
+        // Never leave the cursor hidden and frozen without a working tap. leave() keeps it off until the next crossing.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput { leave(); return false }
+        guard var c = cursor else { return false }
         guard let s = session else { leave(); return false }
         let dx = event.getDoubleValueField(.mouseEventDeltaX), dy = event.getDoubleValueField(.mouseEventDeltaY)
         switch type {
@@ -92,9 +111,10 @@ import FerryLogic
     }
 
     private func checkEdge(_ event: CGEvent) {
-        let p = event.location
-        guard let bounds = display(at: p),
-              pushesEdge(edge, x: p.x, dx: event.getDoubleValueField(.mouseEventDeltaX), screenMinX: bounds.minX, screenMaxX: bounds.maxX),
+        let p = event.location, dx = event.getDoubleValueField(.mouseEventDeltaX)
+        guard edge == .right ? dx > 0 : dx < 0, // cheap test first: this sees every mouse move
+              let bounds = display(at: p),
+              pushesEdge(edge, x: p.x, dx: dx, screenMinX: bounds.minX, screenMaxX: bounds.maxX),
               display(at: CGPoint(x: edge == .right ? bounds.maxX + 1 : bounds.minX - 1, y: p.y)) == nil // another screen there
         else { return }
         guard let s = session else { return Date.now >= retryAfter ? openControl() : () }
@@ -104,6 +124,7 @@ import FerryLogic
                               entryY: (p.y - bounds.minY) / bounds.height)
         cursor = c
         screen = bounds
+        if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
         // shortcut: CGDisplayHideCursor only sticks for the active app, so Ferry takes focus while crossed
         // (keys are swallowed by the tap anyway); upgrade if the focus flip is noticeable.
         previousApp = NSWorkspace.shared.frontmostApplication
@@ -115,6 +136,7 @@ import FerryLogic
 
     /// Back to the Mac: pointer to the edge at the same height, cursor shown, phone cursor hidden.
     private func leave() {
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         guard let c = cursor else { return }
         cursor = nil
         if pressed { session?.send(Fsp.cursor(.up, c.normalized.x, c.normalized.y)) }
@@ -136,7 +158,7 @@ import FerryLogic
             if session == nil { leave() }
             own = nil
             if reason != 0 { retryAfter = .now + 10 }
-            NSLog("Ferry: cursor stream ended (\(reason)) \(detail)")
+            logger.info("cursor stream ended (\(reason)) \(detail, privacy: .public)")
             if reason == 3 {
                 model.cursorPeer = nil
                 model.showAlert("Turn on Ferry control on the phone",
@@ -173,8 +195,8 @@ extension AppModel {
 
     /// Idempotent; also from tick (a forgotten phone turns it off).
     func updateCrossing() {
-        let want = node == nil ? nil : cursorPeer.flatMap { id in peers.contains { $0.id == id } ? id : nil }
-        if crossing?.peerId == want, crossing?.edge == cursorEdge { return }
+        let want = node == nil ? nil : cursorPeer.flatMap { peer($0)?.id }
+        if crossing?.peerId == want, want == nil || crossing?.edge == cursorEdge { return }
         crossing?.stop()
         crossing = nil
         guard let want else { return }

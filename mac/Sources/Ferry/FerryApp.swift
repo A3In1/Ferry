@@ -39,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
 
-        if Bundle.main.bundleIdentifier != nil {
+        if model.canNotify {
             let center = UNUserNotificationCenter.current()
             center.delegate = self
             model.registerCategories()
@@ -62,21 +62,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         menu.addItem(ClosureItem("Pair a device…") { [weak self] in self?.showPairWindow() }.enabled(model.node != nil))
         menu.addItem(ClosureItem("Pair phone over USB") { [weak self] in self?.model.pairOverUSB() }
-            .enabled(usbEnabled && model.node != nil))
+            .enabled(model.node != nil))
 
-        let devices = NSMenu()
-        if model.peers.isEmpty { devices.addItem(label("None yet")) }
-        for peer in model.peers {
-            let sub = NSMenu()
-            sub.addItem(ClosureItem("Send files to \(peer.name)…") { [weak self] in self?.model.chooseAndSend(to: peer) })
-            sub.addItem(ClosureItem("Forget") { [weak self] in self?.model.forget(peer) })
-            let item = NSMenuItem(title: peer.name, action: nil, keyEquivalent: "")
-            item.submenu = sub
-            devices.addItem(item)
+        let devices = model.peers.map { peer in
+            submenu(peer.name, [ClosureItem("Send files to \(peer.name)…") { [weak self] in self?.model.chooseAndSend(to: peer) },
+                                ClosureItem("Forget") { [weak self] in self?.model.forget(peer) }])
         }
-        let devicesItem = NSMenuItem(title: "Paired devices", action: nil, keyEquivalent: "")
-        devicesItem.submenu = devices
-        menu.addItem(devicesItem)
+        menu.addItem(submenu("Paired devices", devices.isEmpty ? [label("None yet")] : devices))
         let bluetooth = ClosureItem("Bluetooth") { [weak self] in self?.model.bluetoothEnabled.toggle() }
         bluetooth.state = model.bluetoothEnabled ? .on : .off
         bluetooth.toolTip = "Reach your paired phone over Bluetooth when you're not on the same Wi-Fi"
@@ -102,30 +94,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(dnd.enabled(hasPhone))
 
         menu.addItem(.separator())
+        let running = model.node != nil
         for peer in model.peers {
-            menu.addItem(ClosureItem("Messages \(peer.name)") { [weak self] in self?.model.openMessages(peer) }.enabled(model.node != nil))
-            menu.addItem(ClosureItem("Browse \(peer.name)") { [weak self] in self?.model.openFiles(peer) }.enabled(model.node != nil))
-            menu.addItem(ClosureItem("Share Wi-Fi with \(peer.name)") { [weak self] in self?.model.shareWifi(with: peer) }
-                .enabled(model.node != nil))
-            menu.addItem(ClosureItem("Mirror \(peer.name)") { [weak self] in self?.model.mirror(peer) }.enabled(model.node != nil))
+            menu.addItem(ClosureItem("Messages \(peer.name)") { [weak self] in self?.model.openMessages(peer) }.enabled(running))
+            menu.addItem(ClosureItem("Browse \(peer.name)") { [weak self] in self?.model.openFiles(peer) }.enabled(running))
+            menu.addItem(ClosureItem("Share Wi-Fi with \(peer.name)") { [weak self] in self?.model.shareWifi(with: peer) }.enabled(running))
+            menu.addItem(ClosureItem("Mirror \(peer.name)") { [weak self] in self?.model.mirror(peer) }.enabled(running))
             let share = ClosureItem("Share cursor with \(peer.name)") { [weak self] in
                 guard let model = self?.model else { return }
                 model.cursorPeer = model.cursorPeer == peer.id ? nil : peer.id
             }
             share.state = model.cursorPeer == peer.id ? .on : .off
             share.toolTip = "Push the pointer past the \(model.cursorEdge.rawValue) edge of the screen to use it on the phone; Escape comes back"
-            menu.addItem(share.enabled(model.node != nil))
+            menu.addItem(share.enabled(running))
         }
         if !model.peers.isEmpty {
-            let edges = NSMenu()
-            for edge in ScreenEdge.allCases {
+            menu.addItem(submenu("Cursor crosses at screen edge", ScreenEdge.allCases.map { edge in
                 let item = ClosureItem(edge == .left ? "Left" : "Right") { [weak self] in self?.model.cursorEdge = edge }
                 item.state = model.cursorEdge == edge ? .on : .off
-                edges.addItem(item)
-            }
-            let edgeItem = NSMenuItem(title: "Cursor crosses at screen edge", action: nil, keyEquivalent: "")
-            edgeItem.submenu = edges
-            menu.addItem(edgeItem)
+                return item
+            }))
         }
 
         menu.addItem(.separator())
@@ -177,6 +165,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func label(_ text: String) -> NSMenuItem {
         let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
         item.isEnabled = false
+        return item
+    }
+
+    private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = NSMenu()
+        item.submenu?.items = items
         return item
     }
 
@@ -276,29 +271,23 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     /// Texts ("s|…") and calls ("c|…"): reply, copy code, answer/decline; a click on a text opens its thread.
     /// Received-file notifications: body click and "Show in Finder" both reveal the files.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        let request = response.notification.request
-        let info = request.content.userInfo
-        if request.identifier.hasPrefix(Notifications.smsPrefix) || request.identifier.hasPrefix(Notifications.callPrefix) {
+        let id = response.notification.request.identifier, info = response.notification.request.content.userInfo
+        let action = response.actionIdentifier, reply = (response as? UNTextInputNotificationResponse)?.userText ?? ""
+        if id.hasPrefix(Notifications.smsPrefix) || id.hasPrefix(Notifications.callPrefix) {
             guard let peer = info[Notifications.peerKey] as? String else { return }
             let address = info[Notifications.addressKey] as? String ?? "", code = info[Notifications.codeKey] as? String ?? ""
-            let thread = info[Notifications.threadKey] as? Int64, action = response.actionIdentifier
-            let reply = (response as? UNTextInputNotificationResponse)?.userText ?? ""
+            let thread = info[Notifications.threadKey] as? Int64
             await MainActor.run {
                 model.textsResponse(peer: peer, action: action, reply: reply, address: address, code: code, thread: thread)
             }
             return
         }
-        if request.identifier.hasPrefix(Notifications.phonePrefix) {
-            guard let peer = request.content.userInfo[Notifications.peerKey] as? String,
-                  let key = request.content.userInfo[Notifications.keyKey] as? String else { return }
-            let action = response.actionIdentifier
-            let reply = (response as? UNTextInputNotificationResponse)?.userText ?? ""
+        if id.hasPrefix(Notifications.phonePrefix) {
+            guard let peer = info[Notifications.peerKey] as? String, let key = info[Notifications.keyKey] as? String else { return }
             await MainActor.run { model.phoneNotificationResponse(peer: peer, key: key, action: action, reply: reply) }
             return
         }
-        guard response.actionIdentifier != UNNotificationDismissActionIdentifier,
-              let paths = response.notification.request.content.userInfo[Notifications.pathsKey] as? [String]
-        else { return }
+        guard action != UNNotificationDismissActionIdentifier, let paths = info[Notifications.pathsKey] as? [String] else { return }
         await MainActor.run {
             NSWorkspace.shared.activateFileViewerSelecting(paths.map { URL(filePath: $0) })
         }

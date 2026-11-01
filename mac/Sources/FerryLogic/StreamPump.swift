@@ -30,7 +30,7 @@ public final class StreamPump: NSObject, StreamDelegate, @unchecked Sendable {
         // The thread keeps `self` alive until the streams close.
         let thread = Thread { [self] in
             runLoop = CFRunLoopGetCurrent()
-            for s in [input, output] as [Stream] {
+            for s in [self.input, self.output] as [Stream] {
                 s.delegate = self
                 s.schedule(in: .current, forMode: .default)
                 s.open()
