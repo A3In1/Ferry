@@ -79,6 +79,14 @@ private let expected: [Fsp.Message] = [
     #expect(H264.nalUnits(bytes([0, 0, 1]) + idr) == [idr])
     #expect(H264.nalUnits(Data()).isEmpty)
     #expect(H264.avcc([sps, pps]) == bytes([0, 0, 0, 4]) + sps + bytes([0, 0, 0, 4]) + pps)
+    // The decoder's path: ranges into a reused array, AVCC written in place.
+    var ranges: [Range<Int>] = [0..<1] // appended to, not cleared
+    stream.withUnsafeBytes { H264.nalRanges($0, into: &ranges) }
+    #expect(ranges.dropFirst().map { stream[$0] } == [sps, pps, idr].map { $0[...] })
+    let picked = Array(ranges.dropFirst().suffix(2))
+    var out = Data(count: H264.avccSize(picked))
+    stream.withUnsafeBytes { src in out.withUnsafeMutableBytes { H264.writeAVCC(src, picked, to: $0) } }
+    #expect(out == H264.avcc([pps, idr]))
 }
 
 @Test func edgePush() {

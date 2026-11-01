@@ -126,23 +126,43 @@ public enum H264 {
     /// NAL units between 3- or 4-byte start codes (no start codes, no trailing zero bytes).
     public static func nalUnits(_ d: Data) -> [Data] {
         d.withUnsafeBytes { b in
-            var out: [Data] = [], start: Int?
-            var i = 0
-            func close(_ end: Int) {
-                guard let s = start else { return }
-                var e = end
-                while e > s, b[e - 1] == 0 { e -= 1 } // a NAL never ends in 0x00; these belong to a 4-byte start code
-                if e > s { out.append(Data(b[s..<e])) }
-            }
-            while i + 2 < b.count {
-                if b[i] == 0, b[i + 1] == 0, b[i + 2] == 1 {
-                    close(i)
-                    i += 3
-                    start = i
-                } else { i += 1 }
-            }
-            close(b.count)
-            return out
+            var ranges: [Range<Int>] = []
+            nalRanges(b, into: &ranges)
+            return ranges.map { Data(b[$0]) }
+        }
+    }
+
+    /// Where the NAL units of an Annex-B buffer are, appended to `out` (callers reuse it, so no per-frame array).
+    public static func nalRanges(_ b: UnsafeRawBufferPointer, into out: inout [Range<Int>]) {
+        var start: Int?
+        var i = 0
+        func close(_ end: Int) {
+            guard let s = start else { return }
+            var e = end
+            while e > s, b[e - 1] == 0 { e -= 1 } // a NAL never ends in 0x00; these belong to a 4-byte start code
+            if e > s { out.append(s..<e) }
+        }
+        while i + 2 < b.count {
+            if b[i] == 0, b[i + 1] == 0, b[i + 2] == 1 {
+                close(i)
+                i += 3
+                start = i
+            } else { i += 1 }
+        }
+        close(b.count)
+    }
+
+    /// Bytes `writeAVCC` needs for these NALs.
+    public static func avccSize(_ nals: [Range<Int>]) -> Int { nals.reduce(0) { $0 + 4 + $1.count } }
+
+    /// The NALs at `nals` in `src` with 4-byte length prefixes, straight into `dst` (≥ `avccSize` bytes):
+    /// one copy from the FRAME payload into the sample's memory.
+    public static func writeAVCC(_ src: UnsafeRawBufferPointer, _ nals: [Range<Int>], to dst: UnsafeMutableRawBufferPointer) {
+        var o = 0
+        for r in nals {
+            withUnsafeBytes(of: UInt32(r.count).bigEndian) { dst.baseAddress!.advanced(by: o).copyMemory(from: $0.baseAddress!, byteCount: 4) }
+            dst.baseAddress!.advanced(by: o + 4).copyMemory(from: src.baseAddress!.advanced(by: r.lowerBound), byteCount: r.count)
+            o += 4 + r.count
         }
     }
 

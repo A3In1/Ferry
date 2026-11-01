@@ -152,7 +152,7 @@ import FerryLogic
 
     private func openControl() {
         guard let node = model.node else { return }
-        let s = ScreenSession(node: node, peerId: peerId, video: false)
+        let s = ScreenSession(node: node, peerId: peerId)
         s.onMessage = { [weak self] m in
             guard let self, case let .end(reason, detail) = m else { return }
             if session == nil { leave() }

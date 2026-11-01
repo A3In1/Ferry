@@ -3,20 +3,27 @@ import AppKit
 import FerryCore
 import FerryLogic
 
-/// One FSP1 stream to a phone (docs/screen-protocol.md). Writes go out in order; messages arrive on
-/// the main actor, and END (or EOF/error, as END 0/4) comes exactly once.
+/// One FSP1 stream to a phone (docs/screen-protocol.md). Writes go out in order. The stream is read
+/// off the main thread: FRAMEs go straight to `video` (if any), other messages arrive on the main actor,
+/// and END (or EOF/error, as END 0/4) comes exactly once.
 @MainActor final class ScreenSession {
     let peerId: String
     private(set) var info: (width: Int, height: Int, caps: UInt8)?
     private(set) var isOpen = true
     var onMessage: (Fsp.Message) -> Void = { _ in }
+    /// Once, when the first picture is on screen.
+    var onVideo: () -> Void = {}
     private let out: AsyncStream<Data>.Continuation
+    private let video: VideoDecoder?
 
-    init(node: FerryNode, peerId: String, video: Bool) {
+    /// `renderer` nil = control only (cursor crossing).
+    init(node: FerryNode, peerId: String, renderer: AVSampleBufferVideoRenderer? = nil) {
         self.peerId = peerId
         let (queue, out) = AsyncStream.makeStream(of: Data.self)
         self.out = out
-        out.yield(Fsp.magic + Fsp.start(video: video))
+        video = renderer.map { VideoDecoder(renderer: $0, send: { out.yield($0) }) }
+        out.yield(Fsp.magic + Fsp.start(video: renderer != nil))
+        video?.onShown = { [weak self] in Task { @MainActor in self?.shown() } }
         Task { await run(node, queue) }
     }
 
@@ -28,34 +35,48 @@ import FerryLogic
     func finish() {
         isOpen = false
         onMessage = { _ in }
+        onVideo = {}
+        video?.stop()
         out.finish()
     }
+
+    private func shown() { if isOpen { onVideo() } }
 
     private func run(_ node: FerryNode, _ queue: AsyncStream<Data>) async {
         let stream: ScreenStream
         do { stream = try await node.openScreen(peerId: peerId) } catch { return end(4, "\(error)") }
         guard isOpen else { return await stream.finish() } // closed while connecting
-        Task {
+        // Neither loop runs on the main actor, so a busy UI can't hold up the wire or the picture.
+        Task.detached(priority: .userInitiated) {
             for await data in queue {
                 do { try await stream.write(data: data) } catch { break }
             }
             await stream.finish()
         }
-        var parser = FspParser()
-        do {
-            while true {
-                let chunk = try await stream.read()
-                if chunk.isEmpty { break }
-                for m in try parser.push(chunk) where isOpen {
-                    if case let .end(reason, detail) = m { end(reason, detail); continue }
-                    if case let .info(w, h, caps) = m { info = (w, h, caps) }
-                    onMessage(m)
+        let video = video
+        let (reason, detail) = await Task.detached(priority: .userInitiated) { () async -> (UInt8, String) in
+            var parser = FspParser()
+            do {
+                while true {
+                    let chunk = try await stream.read()
+                    if chunk.isEmpty { return (0, "") }
+                    for m in try parser.push(chunk) {
+                        if case let .frame(pts, flags, data) = m { video?.decode(pts: pts, flags: flags, data); continue }
+                        if case let .end(reason, detail) = m { return (reason, detail) }
+                        await self.deliver(m)
+                    }
                 }
+            } catch {
+                return (4, "\(error)")
             }
-            end(0, "")
-        } catch {
-            end(4, "\(error)")
-        }
+        }.value
+        end(reason, detail)
+    }
+
+    private func deliver(_ m: Fsp.Message) {
+        guard isOpen else { return }
+        if case let .info(w, h, caps) = m { info = (w, h, caps) }
+        onMessage(m)
     }
 
     private func end(_ reason: UInt8, _ detail: String) {
@@ -63,6 +84,104 @@ import FerryLogic
         let handler = onMessage
         finish()
         handler(.end(reason: reason, detail: detail))
+    }
+}
+
+/// Annex-B FRAMEs → AVCC sample buffers into a display layer's renderer (which decodes them), on one
+/// background queue: AVSampleBufferVideoRenderer may be fed from any thread. The format description is
+/// reused until SPS/PPS change. All sessions share the queue, so a reconnect's flush lands after the old
+/// session's last frame.
+final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`; onShown is set before the first frame
+    private static let queue = DispatchQueue(label: "ferry.screen.video", qos: .userInteractive)
+    private let renderer: AVSampleBufferVideoRenderer
+    private let send: @Sendable (Data) -> Void
+    var onShown: @Sendable () -> Void = {}
+    private var sps: Data?, pps: Data?
+    private var format: CMVideoFormatDescription?
+    private var nals: [Range<Int>] = [], slices: [Range<Int>] = []
+    private var needKeyframe = true, shown = false, stopped = false
+    private var lastKeyframeAsk = DispatchTime(uptimeNanoseconds: 0)
+
+    /// `send` writes a Mac → phone message (KEYFRAME requests).
+    init(renderer: AVSampleBufferVideoRenderer, send: @escaping @Sendable (Data) -> Void) {
+        self.renderer = renderer
+        self.send = send
+        Self.queue.async { [self] in self.renderer.flush(removingDisplayedImage: true, completionHandler: nil) }
+    }
+
+    func decode(pts: UInt64, flags: UInt8, _ data: Data) {
+        Self.queue.async { [self] in if !stopped { enqueue(pts, flags, data) } }
+    }
+
+    /// No more frames from this session go to the renderer.
+    func stop() { Self.queue.async { [self] in stopped = true } }
+
+    private func enqueue(_ pts: UInt64, _ flags: UInt8, _ data: Data) {
+        data.withUnsafeBytes { raw in
+            nals.removeAll(keepingCapacity: true)
+            slices.removeAll(keepingCapacity: true)
+            H264.nalRanges(raw, into: &nals)
+            var config = false // only a changed SPS/PPS needs a new format (keyframes usually repeat them)
+            var key = flags & 1 != 0
+            for r in nals {
+                switch raw[r.lowerBound] & 0x1F {
+                case H264.sps where sps.map { !raw[r].elementsEqual($0) } ?? true: sps = Data(raw[r]); config = true
+                case H264.pps where pps.map { !raw[r].elementsEqual($0) } ?? true: pps = Data(raw[r]); config = true
+                case 5: slices.append(r); key = true
+                case 1...4: slices.append(r)
+                default: break
+                }
+            }
+            if config, let sps, let pps {
+                format = try? CMVideoFormatDescription(h264ParameterSets: [sps, pps], nalUnitHeaderLength: 4)
+            }
+            guard !slices.isEmpty else { return }
+            if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
+                renderer.flush()
+                needKeyframe = true
+            }
+            guard let format, key || !needKeyframe, let sample = sampleBuffer(raw, pts: pts, key: key, format: format)
+            else { return askKeyframe() }
+            needKeyframe = false
+            renderer.enqueue(sample)
+            if !shown {
+                shown = true
+                onShown()
+            }
+        }
+    }
+
+    private func askKeyframe() {
+        needKeyframe = true
+        guard DispatchTime.now().uptimeNanoseconds > lastKeyframeAsk.uptimeNanoseconds + 1_000_000_000 else { return }
+        lastKeyframeAsk = .now()
+        send(Fsp.keyframe)
+    }
+
+    /// One sample in CoreMedia-owned memory, filled straight from the FRAME payload.
+    private func sampleBuffer(_ raw: UnsafeRawBufferPointer, pts: UInt64, key: Bool, format: CMVideoFormatDescription) -> CMSampleBuffer? {
+        let size = H264.avccSize(slices)
+        var block: CMBlockBuffer?
+        var dst: UnsafeMutablePointer<CChar>?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: size,
+                                                 blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+                                                 dataLength: size, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr,
+            let block, CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: nil, dataPointerOut: &dst) == noErr,
+            let dst
+        else { return nil }
+        H264.writeAVCC(raw, slices, to: UnsafeMutableRawBufferPointer(start: dst, count: size))
+        do {
+            let timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMTime(value: CMTimeValue(pts), timescale: 1_000_000),
+                                            decodeTimeStamp: .invalid)
+            let sample = try CMSampleBuffer(dataBuffer: block, formatDescription: format, numSamples: 1,
+                                            sampleTimings: [timing], sampleSizes: [size])
+            sample.sampleAttachments[0][.displayImmediately] = true
+            if !key { sample.sampleAttachments[0][.notSync] = true }
+            return sample
+        } catch {
+            logger.error("bad video frame: \(error, privacy: .public)")
+            return nil
+        }
     }
 }
 
@@ -75,10 +194,6 @@ final class ScreenWindow: PeerWindow {
     private let reconnect = NSButton(title: "Reconnect", target: nil, action: nil)
     private let overlay = NSBox()
     private let peerName: String
-    private var sps: Data?, pps: Data?
-    private var format: CMVideoFormatDescription?
-    private var needKeyframe = true
-    private var lastKeyframeAsk = Date.distantPast
 
     init(model: AppModel, peer: FfiPeer) {
         peerName = peer.name
@@ -151,14 +266,10 @@ final class ScreenWindow: PeerWindow {
         guard let node = model.node else {
             return show(model.startFailed ? "Ferry couldn't start. Quit Ferry and open it again." : "Ferry is still starting. Try again in a moment.")
         }
-        sps = nil
-        pps = nil
-        format = nil
-        needKeyframe = true
-        screen.display.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
         show("Waiting for \(peerName)…\nOn the phone, tap Start now to share its screen.", reconnect: false)
-        let s = ScreenSession(node: node, peerId: peerId, video: true)
+        let s = ScreenSession(node: node, peerId: peerId, renderer: screen.display.sampleBufferRenderer)
         s.onMessage = { [weak self] in self?.handle($0) }
+        s.onVideo = { [weak self] in self?.show(nil) }
         session = s
     }
 
@@ -189,64 +300,11 @@ final class ScreenWindow: PeerWindow {
             let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? size
             let s = min(max(current.width, current.height) / long, visible.width * 0.9 / size.width, visible.height * 0.9 / size.height)
             window.setContentSize(NSSize(width: (size.width * s).rounded(), height: (size.height * s).rounded()))
-        case let .frame(pts, flags, data):
-            decode(pts: pts, flags: flags, data)
+        case .frame:
+            break // the session hands frames to its VideoDecoder
         case let .end(reason, detail):
             if !detail.isEmpty { logger.notice("screen sharing ended (\(reason)): \(detail, privacy: .public)") }
             show(Fsp.endText(reason: reason, detail: detail))
-        }
-    }
-
-    /// Annex-B → AVCC sample buffers into the display layer, which decodes them.
-    private func decode(pts: UInt64, flags: UInt8, _ data: Data) {
-        let nals = H264.nalUnits(data)
-        var config = false // only a changed SPS/PPS needs a new format (keyframes usually repeat them)
-        for n in nals {
-            switch H264.type(n) {
-            case H264.sps where n != sps: sps = n; config = true
-            case H264.pps where n != pps: pps = n; config = true
-            default: break
-            }
-        }
-        if config, let sps, let pps {
-            format = try? CMVideoFormatDescription(h264ParameterSets: [sps, pps], nalUnitHeaderLength: 4)
-        }
-        let slices = nals.filter { (1...5).contains(H264.type($0)) }
-        guard !slices.isEmpty else { return }
-        let key = flags & 1 != 0 || slices.contains { H264.type($0) == 5 }
-        let renderer = screen.display.sampleBufferRenderer
-        if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
-            renderer.flush()
-            needKeyframe = true
-        }
-        guard let format, key || !needKeyframe, let sample = sampleBuffer(H264.avcc(slices), pts: pts, key: key, format: format)
-        else { return askKeyframe() }
-        needKeyframe = false
-        renderer.enqueue(sample)
-        if !overlay.isHidden { show(nil) }
-    }
-
-    private func askKeyframe() {
-        needKeyframe = true
-        guard Date.now.timeIntervalSince(lastKeyframeAsk) > 1 else { return }
-        lastKeyframeAsk = .now
-        session?.send(Fsp.keyframe)
-    }
-
-    private func sampleBuffer(_ avcc: Data, pts: UInt64, key: Bool, format: CMVideoFormatDescription) -> CMSampleBuffer? {
-        do {
-            let block = try CMBlockBuffer(length: avcc.count)
-            try avcc.withUnsafeBytes { try block.replaceDataBytes(with: $0) }
-            let timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMTime(value: CMTimeValue(pts), timescale: 1_000_000),
-                                            decodeTimeStamp: .invalid)
-            let sample = try CMSampleBuffer(dataBuffer: block, formatDescription: format, numSamples: 1,
-                                            sampleTimings: [timing], sampleSizes: [avcc.count])
-            sample.sampleAttachments[0][.displayImmediately] = true
-            if !key { sample.sampleAttachments[0][.notSync] = true }
-            return sample
-        } catch {
-            logger.error("bad video frame: \(error, privacy: .public)")
-            return nil
         }
     }
 
