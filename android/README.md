@@ -1,7 +1,8 @@
-# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth · Phase 4: screen · Phase 5: messages + calls)
+# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth · Phase 4: screen · Phase 5: messages + calls · Phase 6: files, Wi-Fi, Do Not Disturb)
 
 Compose app over the shared Rust core (`ffi/`, UniFFI → Kotlin package `dev.ferry.core`, via JNA).
-Application id `dev.ferry.android` in both flavors (`play`, `full`; identical for now, Phase 5 included).
+Application id `dev.ferry.android` in both flavors (`play`, `full`). They differ only in Phase 6 file browsing:
+`full` declares All files access (`src/full/AndroidManifest.xml`, `Flavor.ALL_FILES`), `play` doesn't.
 
 ## Build
 
@@ -222,3 +223,49 @@ settings"): Settings → Apps → Ferry → ⋮ → Allow restricted settings. `
    Recent calls on the Mac → the last 50, incoming/outgoing/missed.
 7. Off: turn **Messages** off → threads/messages requests go unanswered, incoming texts aren't sent, Send does
    nothing. Same for **Calls**. Revoke SMS in Settings → Apps → Ferry → Permissions, reopen Ferry → the switch is off.
+
+## Phase 6: phone files, Wi-Fi from the Mac, Do Not Disturb
+
+Two more switches in **Share with your Mac**, both **off by default**. Code: `Files.kt` (path checks, listing, sending),
+`Wifi.kt` (`WifiActivity`), `Dnd.kt`, `Flavor.kt` per flavor. Logs: `adb logcat -s FerryFiles` (warn level; Wi-Fi
+passwords are never logged).
+
+| Feature | Enable | What it does |
+|---|---|---|
+| Files ("Let your Mac browse and copy files on this phone") | switch → Android's **All files access** screen → allow Ferry (full build, Android 11+) | `FsListRequest{path}` → `FsList` of that folder under shared storage (`/storage/emulated/0`): hidden dot-files skipped, folders first, then by name, at most 2000 entries. `FsGet{paths}` → those files sent to the Mac that asked, with their names (shows as a normal send). Paths must stay inside the root: absolute paths, `..` parts and symlinks that lead outside are refused; `FsGet` takes regular files only, refused ones are reported in a toast. Off, or access revoked → `FsList` carries an error ("Turn on Files in Ferry on the phone") and `FsGet` is ignored. Revoking All files access turns the switch off next time Ferry opens. |
+| Do Not Disturb sync | switch; for Mac → phone also **Do Not Disturb access** (Settings → Notifications → Do Not Disturb access → Ferry, or tap the "Allow Ferry to change Do Not Disturb" notification) | Phone → Mac: any change of the interruption filter (while the service runs) → `Dnd{on}` to every paired Mac (`on` = anything but "all"). Mac → phone: `Dnd{on}` sets Priority only (on) or All (off); a change Ferry just made isn't sent back for 2 s. Without the access, the notification asks for it. |
+
+**Wi-Fi from the Mac** needs no switch: Android's own **Save this network?** dialog is the consent, and Ferry never
+connects by itself. With Ferry open, the dialog shows at once; otherwise a notification "<Mac> shared Wi-Fi “SSID”:
+tap to add" opens it. WPA2 with a password, open without. Needs Android 11+.
+
+**Uploads from the Mac** are unchanged: Mac → phone files still land in **Downloads/Ferry** (not in the folder being browsed).
+
+**Play flavor:** no All files access (Play's policy doesn't allow it for this use). Turning on Files shows "Browsing phone
+files needs the full build of Ferry", and every `FsListRequest` is answered with that error.
+
+Limits: listing is capped at 2000 entries (no paging); folders can't be fetched whole (pick files); Ferry tells the Mac
+about a Do Not Disturb change only when it happens (not the current state when a Mac connects); Wi-Fi offers WPA2 or
+open only (no WPA3/enterprise/hidden networks).
+
+### Test on the phone (needs the Mac app's Phase 6 side)
+
+1. Install the **full** build, open Ferry, pair. Share with your Mac → **Files** on → All files access opens → allow Ferry →
+   back in Ferry the switch is on and the ongoing notification lists "Files".
+2. Browse: on the Mac open the phone's files → the root shows Android, DCIM, Download, Music… (folders first, no dot-files).
+   Open DCIM → Camera → photos with sizes and dates (log `FerryFiles`: nothing for a good listing, `list refused: …` otherwise).
+3. Copy: pick two photos on the Mac → they arrive in the Mac's Downloads with the same names; the phone shows the usual
+   "Sent 2 file(s) to <Mac>" notification (log `get 2 path(s): sending 2, refused 0`).
+4. Escape attempts (Mac CLI or a patched Mac app): `FsListRequest` for `../`, `/data`, `DCIM/../../..` → `FsList` with an
+   error; `FsGet` for `/data/system/x` or a folder → a toast "Couldn't send 1 file(s) to <Mac>: …", nothing sent.
+5. Off: turn **Files** off → browsing shows "Turn on Files in Ferry on the phone". Turn it on, then revoke All files access in
+   Settings → Apps → Ferry → reopen Ferry → the switch is off. Play build: the switch shows the "needs the full build" toast
+   and the Mac sees the same error.
+6. Upload: send a file Mac → phone → still lands in Downloads/Ferry.
+7. Wi-Fi with Ferry open: share a network from the Mac → **Save this network?** appears; Save → it's under Saved networks.
+   With Ferry in the background: the "shared Wi-Fi" notification appears; tap → the same dialog. Cancel → nothing saved.
+   Share an open network (no password) → saved as open.
+8. Do Not Disturb: **Do Not Disturb sync** on. Toggle DND in Quick Settings → the Mac shows it within a second (log `dnd on=true → Macs`).
+   From the Mac turn DND on before granting access → "Allow Ferry to change Do Not Disturb" notification → tap → turn Ferry on →
+   ask again from the Mac → DND turns on (Priority only, log `dnd on=true from Mac`) and the Mac gets no echo; off → back to All.
+   Switch off → DND changes aren't sent and Mac requests are ignored.

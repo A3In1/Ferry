@@ -35,6 +35,8 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <!-- Do Not Disturb sync: lists Ferry under Do Not Disturb access, so a Mac can set the filter once allowed. -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
     <!-- App names for mirrored notifications and now-playing (launcher apps only, no QUERY_ALL_PACKAGES). -->
     <queries>
@@ -96,6 +98,14 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Wi-Fi shared from the Mac: opens Android's "Save this network?" dialog for result, closes. -->
+        <activity
+            android:name=".WifiActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
             android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 

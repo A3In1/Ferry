@@ -211,9 +211,14 @@ class Bridge(private val ctx: Context) : FerryDelegate {
             }
             is FfiEvent.CallCommand -> if (Grants.allowed(ctx, Grant.CALLS)) Calls.command(ctx, e.cmd)
             is FfiEvent.CallLogRequest -> reply(peerId, Grant.CALLS) { Calls.log(ctx, e.limit) }
+            // Files answers with an error (not silence) when off, so the Mac can say why.
+            is FfiEvent.FsListRequest -> PhoneFiles.onList(peerId, e.path)
+            is FfiEvent.FsGet -> PhoneFiles.onGet(ctx, peerId, e.paths)
+            is FfiEvent.WifiNetwork -> Wifi.fromMac(ctx, from, e.ssid, e.password) // Android's own dialog is the consent
+            is FfiEvent.Dnd -> if (Grant.DND in Grants) Dnd.fromMac(ctx, from, e.on)
             // Phone → Mac kinds; a Mac shouldn't send them.
             is FfiEvent.Notification, is FfiEvent.NotificationRemoved, is FfiEvent.NowPlaying, is FfiEvent.Battery,
-            is FfiEvent.SmsThreads, is FfiEvent.SmsMessages, is FfiEvent.SmsNew, is FfiEvent.Call, is FfiEvent.CallLog -> {}
+            is FfiEvent.SmsThreads, is FfiEvent.SmsMessages, is FfiEvent.SmsNew, is FfiEvent.Call, is FfiEvent.CallLog, is FfiEvent.FsList -> {}
         }
     }
 

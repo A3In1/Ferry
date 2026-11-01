@@ -27,7 +27,7 @@ android {
 
     flavorDimensions += "dist"
     productFlavors {
-        // Phase 1: identical. Later `full` adds MANAGE_EXTERNAL_STORAGE (Build_Plan §5).
+        // `full` adds MANAGE_EXTERNAL_STORAGE (src/full/AndroidManifest.xml) for the Files grant; `play` can't browse.
         create("play") { dimension = "dist" }
         create("full") { dimension = "dist" }
     }

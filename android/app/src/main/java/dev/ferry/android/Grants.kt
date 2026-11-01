@@ -24,6 +24,9 @@ enum class Grant(val key: String, val label: String, val short: String, val why:
         "calls", "Calls", "Calls", "Show incoming calls on your Mac, answer or decline from there, and see recent calls",
         listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CONTACTS),
     ),
+    /** Needs All files access (a special access, not a runtime permission; see [PhoneFiles]). */
+    FILES("files", "Files", "Files", "Let your Mac browse and copy files on this phone"),
+    DND("dnd", "Do Not Disturb sync", "Do Not Disturb", "Turn Do Not Disturb on or off on both together"),
 }
 
 // shortcut: grants are global, not per Mac, and don't expire after 30 days unused; make them
@@ -43,9 +46,10 @@ object Grants {
 
     operator fun contains(g: Grant) = g in on.value
 
-    /** On, and Android still grants its runtime permissions (they can be revoked in Settings). */
+    /** On, and Android still grants its runtime permissions / special access (they can be revoked in Settings). */
     fun allowed(ctx: Context, g: Grant) =
-        g in this && g.permissions.all { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED }
+        g in this && g.permissions.all { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED } &&
+            (g != Grant.FILES || PhoneFiles.accessGranted())
 
     fun set(ctx: Context, g: Grant, enabled: Boolean) {
         prefs.edit { putBoolean(g.key, enabled) }

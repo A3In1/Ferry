@@ -1,6 +1,7 @@
 package dev.ferry.android
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
@@ -105,6 +106,7 @@ class FerryService : Service() {
         // System broadcast: NOT_EXPORTED is fine (and required for runtime receivers on 34+).
         ContextCompat.registerReceiver(this, batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, bluetoothChanged, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, Dnd.changed, IntentFilter(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(networkChanged)
         Calls.sync(this)
         // Main thread: startup bookkeeping can't interleave with onDestroy. Nothing here blocks.
@@ -129,6 +131,7 @@ class FerryService : Service() {
         job?.cancel()
         unregisterReceiver(batteryChanged)
         unregisterReceiver(bluetoothChanged)
+        unregisterReceiver(Dnd.changed)
         Calls.stop(this)
         // Only Stop ends the service, and Stop means stop: no Bluetooth wake-ups until the app is opened again.
         Ble.stopScan(this)

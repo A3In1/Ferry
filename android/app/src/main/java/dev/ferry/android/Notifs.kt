@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -41,12 +42,15 @@ object Notifs {
     const val CH_RING = "ring"
     const val CH_LINKS = "links"
     const val CH_SCREEN = "screen"
+    const val CH_ASK = "mac_requests"
 
     const val ID_ONGOING = 1
     const val ID_PAIR = 2
     const val ID_RING = 3
     const val ID_SCREEN = 4
     const val ID_SCREEN_ASK = 5
+    const val ID_WIFI = 6
+    const val ID_DND = 7
 
     fun createChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -60,6 +64,7 @@ object Notifs {
                 NotificationChannel(CH_RING, "Find my phone", NotificationManager.IMPORTANCE_HIGH).apply { setSound(null, null) },
                 NotificationChannel(CH_LINKS, "Links from Mac", NotificationManager.IMPORTANCE_HIGH),
                 NotificationChannel(CH_SCREEN, "Screen sharing requests", NotificationManager.IMPORTANCE_HIGH),
+                NotificationChannel(CH_ASK, "Wi-Fi and Do Not Disturb from Mac", NotificationManager.IMPORTANCE_HIGH),
             ),
         )
     }
@@ -193,6 +198,32 @@ object Notifs {
                 .setContentIntent(PendingIntent.getActivity(ctx, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
                 .setAutoCancel(true)
                 .setTimeoutAfter(120_000)
+                .build(),
+        )
+    }
+
+    /** Opens [WifiActivity] (Android's "Save this network?" dialog) when tapped. */
+    fun wifi(ctx: Context, from: String, ssid: String, open: Intent) = post(
+        ctx,
+        ID_WIFI,
+        builder(ctx, CH_ASK, "$from shared Wi-Fi “$ssid”: tap to add")
+            .setContentText("Android asks before saving it")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(PendingIntent.getActivity(ctx, ID_WIFI, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+            .setAutoCancel(true)
+            .build(),
+    )
+
+    /** The Mac asked to set Do Not Disturb but Ferry lacks notification-policy access. */
+    fun dndAsk(ctx: Context, from: String, on: Boolean) {
+        val open = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        post(
+            ctx,
+            ID_DND,
+            builder(ctx, CH_ASK, "Allow Ferry to change Do Not Disturb")
+                .setContentText("$from asked to turn it ${if (on) "on" else "off"}. Tap, then turn on Ferry.")
+                .setContentIntent(PendingIntent.getActivity(ctx, ID_DND, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+                .setAutoCancel(true)
                 .build(),
         )
     }

@@ -87,6 +87,11 @@ class MainActivity : ComponentActivity() {
         if (r.values.all { it }) Grants.set(this, g, true)
         else Ferry.toast(this, "${g.short} needs all of those permissions (Settings → Apps → Ferry → Permissions)")
     }
+    /** Files: the switch turns on only once All files access is granted. */
+    private val askStorage = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (PhoneFiles.accessGranted()) Grants.set(this, Grant.FILES, true)
+        else Ferry.toast(this, "Files needs All files access for Ferry")
+    }
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) toSend = uris
     }
@@ -123,7 +128,7 @@ class MainActivity : ComponentActivity() {
                         onPaste = { pasting = true },
                         onSend = { pickFiles.launch(arrayOf("*/*")) },
                         listenerOn = listenerOn,
-                        onAsk = { askGrant.launch(it.permissions.toTypedArray()) },
+                        onAsk = { if (it == Grant.FILES) askFiles() else askGrant.launch(it.permissions.toTypedArray()) },
                         bluetooth = BluetoothUi(
                             allowed = btAllowed,
                             canAssociate = Cdm.available(this) && !associated,
@@ -169,8 +174,8 @@ class MainActivity : ComponentActivity() {
         listenerOn = FerryListener.enabled(this) // may have changed in system settings
         btAllowed = Ble.allowed(this)
         associated = Cdm.associated(this)
-        // Permissions revoked in Settings: show the switch off rather than on-but-silent.
-        Grants.on.value.filter { it.permissions.isNotEmpty() && !Grants.allowed(this, it) }.forEach { Grants.set(this, it, false) }
+        // Permissions / All files access revoked in Settings: show the switch off rather than on-but-silent.
+        Grants.on.value.filter { !Grants.allowed(this, it) }.forEach { Grants.set(this, it, false) }
         FerryService.instance?.let(Calls::sync)
     }
 
@@ -199,6 +204,12 @@ class MainActivity : ComponentActivity() {
         }
         if (intent?.action != Intent.ACTION_VIEW) return
         Tickets.extract(intent.dataString)?.let { Ferry.pair(this, it) }
+    }
+
+    private fun askFiles() {
+        PhoneFiles.unavailable()?.let { return Ferry.toast(this, it) }
+        if (PhoneFiles.accessGranted()) Grants.set(this, Grant.FILES, true)
+        else if (Build.VERSION.SDK_INT >= 30) PhoneFiles.askAccess(this, askStorage::launch)
     }
 
     private fun send(peer: FfiPeer, uris: List<Uri>) {
@@ -333,7 +344,7 @@ private fun GrantsSection(listenerOn: Boolean, onAsk: (Grant) -> Unit) {
                 Text(g.label)
                 if (g.why.isNotEmpty()) Text(g.why, style = MaterialTheme.typography.bodySmall)
             }
-            Switch(checked = g in on, onCheckedChange = { if (it && g.permissions.isNotEmpty()) onAsk(g) else Grants.set(ctx, g, it) })
+            Switch(checked = g in on, onCheckedChange = { if (it && (g.permissions.isNotEmpty() || g == Grant.FILES)) onAsk(g) else Grants.set(ctx, g, it) })
         }
     }
     if ((Grant.NOTIFICATIONS in on || Grant.MEDIA in on) && !listenerOn) {
