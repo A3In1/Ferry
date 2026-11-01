@@ -78,10 +78,10 @@ impl From<ferry_core::node::Screen> for ScreenStream {
 impl ScreenStream {
     /// The next chunk of bytes; empty once the other side has finished.
     pub async fn read(&self) -> Result<Vec<u8>> {
-        let mut buf = vec![0u8; 64 * 1024];
-        let n = (self.recv.lock().await.read(&mut buf).await).map_err(anyhow::Error::from)?;
-        buf.truncate(n.unwrap_or(0));
-        Ok(buf)
+        // read_chunk hands over QUIC's own buffer: no zeroed 64 KiB per call on the frame path
+        let chunk = (self.recv.lock().await.read_chunk(64 * 1024).await)
+            .map_err(anyhow::Error::from)?;
+        Ok(chunk.map(|b| b.to_vec()).unwrap_or_default())
     }
 
     pub async fn write(&self, data: Vec<u8>) -> Result<()> {
