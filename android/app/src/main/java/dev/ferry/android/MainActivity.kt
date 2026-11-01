@@ -466,8 +466,10 @@ private fun Home(ui: HomeUi) {
                 TextButton(onClick = { Grants.allOff(ctx) }, enabled = on.isNotEmpty()) { Text("Turn off all sharing") }
             }
 
+            // remember: Home recomposes on every progress tick; these are binder / FFI calls.
+            val version = remember { "Ferry ${versionName(ctx)} · core ${coreVersion()}" }
             Text(
-                "Ferry ${versionName(ctx)} · core ${coreVersion()}",
+                version,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 16.dp),

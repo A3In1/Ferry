@@ -2,23 +2,46 @@ package dev.ferry.android
 
 import android.Manifest
 import android.content.Context
+import android.database.ContentObserver
 import android.database.Cursor
 import android.net.Uri
+import android.provider.ContactsContract
 import android.provider.ContactsContract.PhoneLookup
+import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 
 /** Contact names for phone numbers via PhoneLookup; "" when unknown or without READ_CONTACTS. */
 object Names {
-    // shortcut: never invalidated while the process lives (a renamed contact keeps its old name); add a
-    // ContactsContract ContentObserver if that matters.
+    /** Cleared whenever contacts change (see [watch]), so a new or renamed contact shows up. */
     private val cache = ConcurrentHashMap<String, String>()
+    @Volatile private var watching = false
 
     fun of(ctx: Context, number: String): String = lookup(ctx)(number)
 
     /** For a batch of numbers: checks READ_CONTACTS once, not per number. */
     fun lookup(ctx: Context): (String) -> String {
         if (!ctx.granted(Manifest.permission.READ_CONTACTS)) return { "" }
+        watch(ctx)
         return { number -> if (number.isBlank()) "" else cache[number] ?: find(ctx, number) }
+    }
+
+    /** Once per process (with READ_CONTACTS, which registering needs); lives as long as the cache. */
+    private fun watch(ctx: Context) {
+        if (watching) return
+        synchronized(this) {
+            if (watching) return
+            try {
+                ctx.applicationContext.contentResolver.registerContentObserver(
+                    ContactsContract.AUTHORITY_URI, true,
+                    object : ContentObserver(null) {
+                        override fun onChange(selfChange: Boolean) = cache.clear()
+                    },
+                )
+                watching = true
+            } catch (e: SecurityException) {
+                Log.w(PHONE_TAG, "can't watch contacts: ${e.text()}")
+            }
+        }
     }
 
     private fun find(ctx: Context, number: String): String {

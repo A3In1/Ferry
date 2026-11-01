@@ -28,7 +28,9 @@ import dev.ferry.core.FfiNotifButton
  */
 class FerryListener : NotificationListenerService() {
     private val main = Handler(Looper.getMainLooper())
-    private val forwarded = HashSet<String>() // keys the Macs know, so removals are sent only for those
+    // Key -> what the Macs were last sent: removals go only for these, and an identical re-post (apps
+    // re-notify on every sync or progress tick) isn't sent again.
+    private val forwarded = HashMap<String, FfiEvent.Notification>()
     private var sessions: MediaSessionManager? = null
     private var top: MediaController? = null
     private var lastPlaying: FfiEvent? = null
@@ -72,12 +74,13 @@ class FerryListener : NotificationListenerService() {
         val buttons = n.actions.orEmpty().mapIndexed { i, a ->
             FfiNotifButton(i.toString(), a.title?.toString().orEmpty(), a.remoteInputs.orEmpty().any { it.allowFreeFormInput })
         }
-        forwarded += sbn.key
-        Outbox.broadcast(FfiEvent.Notification(sbn.key, label(sbn.packageName), sbn.packageName, title, text, n.`when`.takeIf { it > 0 } ?: sbn.postTime, buttons))
+        val e = FfiEvent.Notification(sbn.key, label(sbn.packageName), sbn.packageName, title, text, n.`when`.takeIf { it > 0 } ?: sbn.postTime, buttons)
+        if (forwarded.put(sbn.key, e) == e) return
+        Outbox.broadcast(e)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
-        if (forwarded.remove(sbn.key) && Grant.NOTIFICATIONS in Grants) Outbox.broadcast(FfiEvent.NotificationRemoved(sbn.key))
+        if (forwarded.remove(sbn.key) != null && Grant.NOTIFICATIONS in Grants) Outbox.broadcast(FfiEvent.NotificationRemoved(sbn.key))
     }
 
     /** From the Mac: dismiss, or press button [buttonId] (an index into `actions`), with reply text for RemoteInputs. */

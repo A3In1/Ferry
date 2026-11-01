@@ -60,10 +60,13 @@ object PhoneFiles {
         val dir = resolve(root, rel) ?: return fail("Not allowed: $rel")
         if (!dir.isDirectory) return fail("Not a folder: $rel")
         val files = dir.listFiles() ?: return fail("Can't read $rel")
+        // Stat each file once up front: sorting on File.isDirectory stats it on every comparison
+        // (hundreds of thousands of syscalls for a big camera folder).
         val entries = files.filter { !it.name.startsWith(".") }
-            .sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() }, { it.name }))
+            .map { f -> val dir = f.isDirectory; FfiFsEntry(f.name, dir, if (dir) 0u else f.length().toULong(), f.lastModified()) to f.name.lowercase() }
+            .sortedWith(compareBy({ !it.first.dir }, { it.second }, { it.first.name }))
             .take(MAX_ENTRIES)
-            .map { FfiFsEntry(it.name, it.isDirectory, if (it.isDirectory) 0u else it.length().toULong(), it.lastModified()) }
+            .map { it.first }
         return FfiEvent.FsList(rel, entries, "")
     }
 
