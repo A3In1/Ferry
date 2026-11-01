@@ -431,44 +431,32 @@ impl Receiver {
     }
 }
 
-/// Send `paths` (regular files only) over an established session connection.
-pub async fn send_files(
-    conn: &Connection,
-    paths: &[PathBuf],
-    events: EventSink,
-) -> Result<SendReport> {
-    let files: Vec<(PathBuf, Option<String>)> = paths.iter().map(|p| (p.clone(), None)).collect();
-    send_named(conn, &files, events).await
-}
-
-/// Like [`send_files`], with an optional display name per file. Android passes shared
-/// `content://` files as `/proc/self/fd/N`, whose own name means nothing to the receiver.
+/// Send regular files over an established session connection, with an optional display
+/// name per file. Android passes shared `content://` files as `/proc/self/fd/N`, whose own
+/// name means nothing to the receiver.
 pub async fn send_named(
     conn: &Connection,
     files: &[(PathBuf, Option<String>)],
     events: EventSink,
 ) -> Result<SendReport> {
     let start = Instant::now();
-    let paths: Vec<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
     let mut items = Vec::with_capacity(files.len());
     for (p, name) in files {
         let mut item = file_item(p).await?;
         if let Some(n) = name {
-            item.name = n.clone();
+            item.name.clone_from(n);
         }
         items.push(item);
     }
     let id: [u8; 16] = rand::random();
     let (mut send, mut recv) = conn.open_bi().await?;
     write_prefix(&mut send, CH_FILE).await?;
-    write_msg(
-        &mut send,
-        &Offer {
-            transfer_id: id.to_vec(),
-            items: items.clone(),
-        },
-    )
-    .await?;
+    let offer = Offer {
+        transfer_id: id.to_vec(),
+        items,
+    };
+    write_msg(&mut send, &offer).await?;
+    let items = offer.items;
     let reply: OfferReply = read_msg(&mut recv).await.context("read offer reply")?;
     if reply.items.len() != items.len() {
         bail!(
@@ -496,7 +484,7 @@ pub async fn send_named(
                 };
                 let job = (
                     conn.clone(),
-                    paths[i].clone(),
+                    files[i].0.clone(),
                     id,
                     i as u32,
                     offset,
@@ -661,7 +649,7 @@ fn place(part: &Path, dir: &Path, name: &str, mtime_ms: i64) -> Result<PathBuf> 
                 let _ = fs::remove_file(part);
                 return Ok(target);
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
             // No hard links (FAT, some Android storage): reserve the name, then replace only
             // our own empty placeholder.
             Err(_) => match fs::File::create_new(&target) {
@@ -674,7 +662,7 @@ fn place(part: &Path, dir: &Path, name: &str, mtime_ms: i64) -> Result<PathBuf> 
                         }
                     };
                 }
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e).with_context(|| format!("create {}", target.display())),
             },
         }

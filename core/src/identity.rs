@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow};
 use iroh::SecretKey;
 
 pub struct Identity {
@@ -26,15 +26,14 @@ pub fn load_or_create(data_dir: &Path) -> Result<Identity> {
 
 fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
     match std::fs::read(path) {
-        Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
-            Ok(k) => Ok(k),
-            // never silently replace a damaged key: that would change the Device ID
-            Err(_) => bail!(
+        // never silently replace a damaged key: that would change the Device ID
+        Ok(bytes) => <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+            anyhow!(
                 "{} is corrupt ({} bytes, want 32)",
                 path.display(),
                 bytes.len()
-            ),
-        },
+            )
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let key: [u8; 32] = rand::random();
             write_private_atomic(path, &key)?;

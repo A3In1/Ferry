@@ -21,7 +21,7 @@ const ADB_TIMEOUT: Duration = Duration::from_secs(15); // first call may start t
 const TICK: Duration = Duration::from_secs(2);
 /// When every phone is attached: adb track-devices and bridge closes wake us, so this is
 /// only a safety net. Polling `adb devices` every 2 s forever would waste the Mac's battery.
-const TICK_IDLE: Duration = Duration::from_secs(60);
+const TICK_IDLE: Duration = Duration::from_mins(1);
 const TICK_NO_ADB: Duration = Duration::from_secs(10);
 const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(10);
@@ -120,14 +120,15 @@ pub(crate) fn watch(node: &Arc<Node>, explicit: Option<PathBuf>) -> Result<()> {
     let mut usb = node.usb.lock().unwrap();
     ensure!(!usb.watching, "already watching adb");
     (usb.watching, usb.adb) = (true, explicit.clone());
-    let (n, kick) = (node.clone(), usb.kick.clone());
-    let task = tokio::spawn(watch_loop(n, explicit, kick));
-    usb.tasks.push(task.abort_handle());
+    // both are aborted on shutdown; the tracker's adb child dies with it (kill_on_drop)
+    let track = tokio::spawn(track_devices(explicit.clone(), usb.kick.clone()));
+    let watch = tokio::spawn(watch_loop(node.clone(), explicit, usb.kick.clone()));
+    usb.tasks
+        .extend([track.abort_handle(), watch.abort_handle()]);
     Ok(())
 }
 
 async fn watch_loop(node: Arc<Node>, explicit: Option<PathBuf>, kick: Arc<Notify>) {
-    tokio::spawn(track_devices(explicit.clone(), kick.clone()));
     let mut phones: HashMap<String, Phone> = HashMap::new();
     let mut states: HashMap<String, String> = HashMap::new();
     let mut last_err: Option<String> = None; // adb trouble is logged once per change
@@ -206,16 +207,14 @@ async fn tick(
             }
         }
     }
-    *states = now.clone();
+    *states = now;
+    let now = &*states;
 
     // unplugged, offline or unauthorized: drop the link and its forward
-    let gone: Vec<String> = phones
-        .keys()
-        .filter(|s| now.get(*s).map(String::as_str) != Some("device"))
-        .cloned()
+    let gone: Vec<(String, Phone)> = phones
+        .extract_if(|s, _| now.get(s).map(String::as_str) != Some("device"))
         .collect();
-    for s in gone {
-        let p = phones.remove(&s).unwrap();
+    for (s, p) in gone {
         node.usb_detach(&s);
         if let Some(port) = p.fwd {
             remove_forward(&adb, &s, port).await; // adb also drops it when the device goes

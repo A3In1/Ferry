@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::trust::TrustedPeer;
 
 /// How often the nonce (and with it tag and instance name) changes.
-pub const ROTATE_EVERY: Duration = Duration::from_secs(15 * 60);
+pub const ROTATE_EVERY: Duration = Duration::from_mins(15);
 
 pub fn tag(presence_key: &[u8; 32], nonce: &[u8; 8]) -> [u8; 8] {
     let h = blake3::keyed_hash(presence_key, nonce);
@@ -35,7 +35,6 @@ pub fn match_tag(peers: &[TrustedPeer], nonce: &[u8; 8], tag_: &[u8; 8]) -> Opti
         .map(|p| p.id.clone())
 }
 
-/// [`match_tag`] on raw TXT values (from mdns-sd, Bonjour or NsdManager); junk → None.
 /// Fixed first 4 bytes of a Ferry Bluetooth service UUID: phones scan with this as a mask.
 pub const BLE_PREFIX: [u8; 4] = [0xf3, 0x77, 0xe5, 0x01];
 
@@ -46,7 +45,7 @@ pub fn ble_uuid(presence_key: &[u8; 32], nonce: &[u8; 8]) -> String {
     n[..4].copy_from_slice(&nonce[..4]);
     let mut u = [0u8; 16];
     u[..4].copy_from_slice(&BLE_PREFIX);
-    u[4..8].copy_from_slice(&n[..4]);
+    u[4..8].copy_from_slice(&nonce[..4]);
     u[8..].copy_from_slice(&tag(presence_key, &n));
     let h = hex::encode(u);
     format!(
@@ -71,6 +70,7 @@ pub fn match_ble_uuid(peers: &[TrustedPeer], uuid: &str) -> Option<String> {
     match_tag(peers, &n, u[8..].try_into().ok()?)
 }
 
+/// [`match_tag`] on raw TXT values (from mdns-sd, Bonjour or NsdManager); junk → None.
 pub fn match_txt<'a>(
     peers: &[TrustedPeer],
     get: impl Fn(&str) -> Option<&'a str>,
@@ -89,7 +89,7 @@ pub(crate) use mdns::Mdns;
 
 #[cfg(feature = "mdns")]
 mod mdns {
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::SocketAddr;
     use std::sync::Arc;
 
     use anyhow::Result;
@@ -97,7 +97,7 @@ mod mdns {
 
     use super::{ROTATE_EVERY, match_txt};
     use crate::MDNS_SERVICE;
-    use crate::node::Node;
+    use crate::node::{Node, is_link_local_v6};
 
     pub(crate) struct Mdns {
         daemon: ServiceDaemon,
@@ -134,9 +134,8 @@ mod mdns {
                                 let addrs: Vec<SocketAddr> = s
                                     .addresses
                                     .iter()
-                                    .map(|ip| ip.to_ip_addr())
-                                    // link-local v6 needs a scope id iroh can't take from here
-                                    .filter(|ip| !matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80))
+                                    .map(mdns_sd::ScopedIp::to_ip_addr)
+                                    .filter(|&ip| !is_link_local_v6(ip))
                                     .map(|ip| SocketAddr::new(ip, s.port))
                                     .collect();
                                 if addrs.is_empty() {

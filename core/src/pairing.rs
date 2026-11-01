@@ -9,7 +9,7 @@
 //! Wire (one bi stream, prefix CH_CONTROL): scanner→shower PairHello · shower→scanner
 //! PairHello · both PairConfirm. Only if both confirm does either side store the peer.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -23,9 +23,9 @@ use crate::channel::{CH_CONTROL, read_msg, read_prefix, write_msg, write_prefix}
 use crate::node::{ConfirmFn, PairingPrompt};
 use crate::proto::{PairConfirm, PairHello};
 
-pub const TICKET_TTL: Duration = Duration::from_secs(10 * 60);
+pub const TICKET_TTL: Duration = Duration::from_mins(10);
 const NET_TIMEOUT: Duration = Duration::from_secs(10);
-const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+const CONFIRM_TIMEOUT: Duration = Duration::from_mins(2);
 /// Connection close code: the scanner's proof didn't match a live ticket.
 pub const ERR_PAIR_REJECTED: u32 = 0x10;
 
@@ -48,7 +48,7 @@ const TICKET_PREFIX: &str = "ferry://pair?";
 
 impl fmt::Display for Ticket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let addrs: Vec<String> = self.addrs.iter().map(|a| a.to_string()).collect();
+        let addrs: Vec<String> = self.addrs.iter().map(ToString::to_string).collect();
         write!(
             f,
             "{TICKET_PREFIX}v=1&id={}&s={}&n={}&a={}",
@@ -112,7 +112,7 @@ fn pct_encode(s: &str) -> String {
         if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
@@ -195,7 +195,7 @@ fn hello(me: &Me<'_>, proof: blake3::Hash) -> PairHello {
     }
 }
 
-fn peer_from(h: PairHello) -> Result<PairedPeer> {
+fn peer_from(h: &PairHello) -> Result<PairedPeer> {
     let presence_key =
         <[u8; 32]>::try_from(h.presence_key.as_slice()).map_err(|_| anyhow!("bad presence key"))?;
     Ok(PairedPeer {
@@ -235,7 +235,7 @@ pub(crate) async fn scan(
             proof_ok(&reply.proof, &proof(&ticket.secret, conn, LABEL_SHOWER)?),
             "the other device could not prove it holds the ticket"
         );
-        let peer = peer_from(reply)?;
+        let peer = peer_from(&reply)?;
         confirm_both(conn, send, recv, &peer.name, confirm).await?;
         Ok(peer)
     }
@@ -268,7 +268,7 @@ pub(crate) async fn show(
             conn.close(ERR_PAIR_REJECTED.into(), b"invalid ticket");
             bail!("pairing attempt with an invalid, expired or used ticket");
         };
-        let peer = peer_from(h)?;
+        let peer = peer_from(&h)?;
         write_msg(&mut send, &hello(me, proof(&secret, conn, LABEL_SHOWER)?)).await?;
         confirm_both(conn, send, recv, &peer.name, confirm).await?;
         Ok(peer)

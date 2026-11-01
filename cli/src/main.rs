@@ -1,6 +1,7 @@
 //! `ferry`: headless Ferry peer for Mac/Linux — the test bench for pairing and transfers.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -158,19 +159,19 @@ async fn main() -> Result<()> {
         Cmd::Listen { dir, yes } => listen(&data_dir, &name, dir, yes, false, Usb::Off).await?,
         Cmd::PairShow { dir, yes } => listen(&data_dir, &name, dir, yes, true, Usb::Off).await?,
         Cmd::Usb { dir, yes, adb } => {
-            listen(&data_dir, &name, dir, yes, false, Usb::Watch(adb)).await?
+            listen(&data_dir, &name, dir, yes, false, Usb::Watch(adb)).await?;
         }
         Cmd::UsbServe { port, dir, yes } => {
-            listen(&data_dir, &name, dir, yes, false, Usb::Serve(port)).await?
+            listen(&data_dir, &name, dir, yes, false, Usb::Serve(port)).await?;
         }
         Cmd::UsbAttach { tcp_port, dir, yes } => {
-            listen(&data_dir, &name, dir, yes, false, Usb::Attach(tcp_port)).await?
+            listen(&data_dir, &name, dir, yes, false, Usb::Attach(tcp_port)).await?;
         }
         Cmd::UsbPair { serial, yes, adb } => {
             let node = start(&data_dir, &name, PathBuf::from("received"), yes).await?;
             let res = usb_pair(&node, serial, adb).await;
             node.shutdown().await;
-            res?
+            res?;
         }
         Cmd::Pair { ticket, yes } => {
             let node = start(&data_dir, &name, PathBuf::from("received"), yes).await?;
@@ -181,7 +182,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Send { peer, files } => send(&data_dir, &name, &peer, Ok(&files)).await?,
         Cmd::Event { peer, kind, arg } => {
-            send(&data_dir, &name, &peer, Err(event(&kind, arg)?)).await?
+            send(&data_dir, &name, &peer, Err(event(&kind, arg)?)).await?;
         }
         Cmd::BenchFile { path, gib } => bench_file(&path, gib)?,
     }
@@ -339,12 +340,11 @@ async fn send(
             .clone();
 
         // Give mDNS a moment: up to 5 s if we know no address, 1.5 s if we have old ones.
-        let initial = node
-            .peers()
-            .into_iter()
-            .find(|p| p.id == id)
-            .map(|p| p.last_addrs)
-            .unwrap_or_default();
+        let addrs = || {
+            let p = node.peers().into_iter().find(|p| p.id == id);
+            p.map(|p| p.last_addrs).unwrap_or_default()
+        };
+        let initial = addrs();
         // A phone on USB attaches within a second or two; no adb is fine (Wi-Fi only).
         let _ = node.usb_watch(None);
         let t0 = Instant::now();
@@ -352,13 +352,8 @@ async fn send(
             if node.usb_links().iter().any(|l| l.peer_id == id) {
                 break;
             }
-            let now = node
-                .peers()
-                .into_iter()
-                .find(|p| p.id == id)
-                .map(|p| p.last_addrs)
-                .unwrap_or_default();
-            if now != initial || (!initial.is_empty() && t0.elapsed() > Duration::from_millis(1500))
+            if addrs() != initial
+                || (!initial.is_empty() && t0.elapsed() > Duration::from_millis(1500))
             {
                 break;
             }
@@ -441,13 +436,13 @@ fn event_printer() -> ferry_core::file::EventSink {
             done,
             total,
         } => {
-            let Some(t0) = started.lock().unwrap().get(&(transfer_id, index)).copied() else {
+            let t0 = match started.lock().unwrap().entry((transfer_id, index)) {
+                Entry::Occupied(t0) => *t0.get(),
                 // first event only starts the clock; a rate over ~0 s is noise
-                started
-                    .lock()
-                    .unwrap()
-                    .insert((transfer_id, index), Instant::now());
-                return;
+                Entry::Vacant(v) => {
+                    v.insert(Instant::now());
+                    return;
+                }
             };
             let rate = done as f64 / MIB / t0.elapsed().as_secs_f64().max(1e-3);
             print!(
@@ -466,7 +461,7 @@ fn bench_file(path: &Path, gib: f64) -> Result<()> {
     let total = (gib * 1024.0 * MIB) as u64;
     let mut buf = vec![0u8; 8 << 20];
     rand::fill(&mut buf[..]);
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut f = std::fs::File::create(path)?;
     let mut left = total;
     let mut n = 0u64;
     while left > 0 {
@@ -477,7 +472,6 @@ fn bench_file(path: &Path, gib: f64) -> Result<()> {
         left -= k as u64;
         n += 1;
     }
-    f.flush()?;
     println!(
         "wrote {} ({:.2} GiB)",
         path.display(),

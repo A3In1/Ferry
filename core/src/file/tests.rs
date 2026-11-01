@@ -96,7 +96,8 @@ impl Harness {
     }
 
     async fn send(&self, paths: &[PathBuf]) -> Result<SendReport> {
-        send_files(&self.conn, paths, noop()).await
+        let files: Vec<_> = paths.iter().map(|p| (p.clone(), None)).collect();
+        send_named(&self.conn, &files, noop()).await
     }
 
     fn dest_files(&self) -> Vec<String> {

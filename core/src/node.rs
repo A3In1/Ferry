@@ -285,11 +285,9 @@ impl Node {
         Ok(())
     }
 
-    /// Which paired peer (if any) a natively discovered `_ferry._udp` TXT record belongs to.
     /// Our Bluetooth presence UUID (advertised by the Mac app); rotates like [`Node::presence_txt`].
     pub fn presence_ble_uuid(&self) -> String {
-        self.presence_txt(); // rotates the nonce if due
-        discovery::ble_uuid(&self.presence_key, &self.presence_nonce.lock().unwrap().0)
+        discovery::ble_uuid(&self.presence_key, &self.nonce())
     }
 
     /// Which paired peer advertised this Bluetooth service UUID (phone-side scan results).
@@ -297,6 +295,7 @@ impl Node {
         discovery::match_ble_uuid(self.trust.lock().unwrap().list(), uuid)
     }
 
+    /// Which paired peer (if any) a natively discovered `_ferry._udp` TXT record belongs to.
     pub fn match_presence(&self, txt: &[(String, String)]) -> Option<String> {
         let get = |k: &str| {
             txt.iter()
@@ -309,11 +308,16 @@ impl Node {
     /// Our current presence tag for native mDNS/BLE adverts: (txt key, value) pairs.
     /// Rotates every [`discovery::ROTATE_EVERY`]; re-query and re-advertise on that cadence.
     pub fn presence_txt(&self) -> Vec<(String, String)> {
+        discovery::presence_txt(&self.presence_key, &self.nonce())
+    }
+
+    /// The current presence nonce, rotated first if due.
+    fn nonce(&self) -> [u8; 8] {
         let mut p = self.presence_nonce.lock().unwrap();
         if p.1.elapsed() >= discovery::ROTATE_EVERY {
             *p = (rand::random(), Instant::now());
         }
-        discovery::presence_txt(&self.presence_key, &p.0)
+        p.0
     }
 
     #[cfg(feature = "mdns")]
@@ -332,7 +336,7 @@ impl Node {
             .bound_sockets()
             .iter()
             .find(|a| a.is_ipv4())
-            .map_or(0, |a| a.port())
+            .map_or(0, SocketAddr::port)
     }
 
     pub async fn send_files(
@@ -412,10 +416,8 @@ impl Node {
         let conn = timeout(
             NET_TIMEOUT,
             // iroh skips the lookup when it already has a path; name the USB one explicitly
-            self.endpoint.connect(
-                addr_of(id, &Vec::from_iter(self.usb_addr(id))),
-                ALPN_SESSION,
-            ),
+            self.endpoint
+                .connect(addr_of(id, self.usb_addr(id).as_slice()), ALPN_SESSION),
         )
         .await
         .context("connecting timed out (is the other device on this network?)")?
@@ -490,9 +492,9 @@ impl Node {
     /// Our current directly reachable addresses (as in tickets: no loopback/link-local v6).
     fn lan_addrs(&self) -> Vec<SocketAddr> {
         let mut addrs: Vec<SocketAddr> = (self.endpoint.addr().ip_addrs().copied())
-            .filter(|a| !a.ip().is_loopback() && !is_link_local_v6(a))
+            .filter(|a| !a.ip().is_loopback() && !is_link_local_v6(a.ip()))
             .collect();
-        addrs.sort_by_key(|a| a.is_ipv6()); // v4 first: shorter and what phones usually reach
+        addrs.sort_by_key(SocketAddr::is_ipv6); // v4 first: shorter and what phones usually reach
         addrs.truncate(MAX_TICKET_ADDRS);
         addrs
     }
@@ -773,6 +775,7 @@ pub(crate) fn addr_of(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
     EndpointAddr::from_parts(id, addrs.iter().copied().map(TransportAddr::Ip))
 }
 
-fn is_link_local_v6(a: &SocketAddr) -> bool {
-    matches!(a.ip(), std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80)
+/// Link-local v6 needs a scope id, which neither tickets nor iroh's lookup carry.
+pub(crate) fn is_link_local_v6(ip: std::net::IpAddr) -> bool {
+    matches!(ip, std::net::IpAddr::V6(v6) if v6.is_unicast_link_local())
 }

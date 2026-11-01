@@ -1,6 +1,5 @@
 //! UniFFI bindings over `ferry-core` for the Swift (Mac) and Kotlin (Android) shells.
 
-use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +29,14 @@ impl From<anyhow::Error> for FerryError {
     fn from(e: anyhow::Error) -> Self {
         Self::Failed {
             reason: format!("{e:#}"),
+        }
+    }
+}
+
+impl FerryError {
+    fn msg(reason: impl Into<String>) -> Self {
+        Self::Failed {
+            reason: reason.into(),
         }
     }
 }
@@ -72,8 +79,7 @@ impl ScreenStream {
     /// The next chunk of bytes; empty once the other side has finished.
     pub async fn read(&self) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; 64 * 1024];
-        let n = (self.recv.lock().await.read(&mut buf).await)
-            .map_err(|e| FerryError::from(anyhow::Error::from(e)))?;
+        let n = (self.recv.lock().await.read(&mut buf).await).map_err(anyhow::Error::from)?;
         buf.truncate(n.unwrap_or(0));
         Ok(buf)
     }
@@ -82,10 +88,8 @@ impl ScreenStream {
         let mut send = self.send.lock().await;
         let send = send
             .as_mut()
-            .ok_or_else(|| FerryError::from(anyhow::anyhow!("screen stream finished")))?;
-        send.write_all(&data)
-            .await
-            .map_err(|e| FerryError::from(anyhow::Error::from(e)))
+            .ok_or_else(|| FerryError::msg("screen stream finished"))?;
+        Ok(send.write_all(&data).await.map_err(anyhow::Error::from)?)
     }
 
     /// Ends our side; the peer sees EOF and finishes its side, which ends our `read`.
@@ -679,7 +683,7 @@ impl From<FileEvent> for FfiFileEvent {
                 names,
                 total_bytes,
             } => Self::Offered {
-                transfer_id: hex(&transfer_id),
+                transfer_id: hex::encode(transfer_id),
                 names,
                 total_bytes,
             },
@@ -689,7 +693,7 @@ impl From<FileEvent> for FfiFileEvent {
                 done,
                 total,
             } => Self::Progress {
-                transfer_id: hex(&transfer_id),
+                transfer_id: hex::encode(transfer_id),
                 index,
                 done,
                 total,
@@ -699,7 +703,7 @@ impl From<FileEvent> for FfiFileEvent {
                 index,
                 path,
             } => Self::Saved {
-                transfer_id: hex(&transfer_id),
+                transfer_id: hex::encode(transfer_id),
                 index,
                 path: path.to_string_lossy().into_owned(),
             },
@@ -708,21 +712,12 @@ impl From<FileEvent> for FfiFileEvent {
                 index,
                 error,
             } => Self::Failed {
-                transfer_id: hex(&transfer_id),
+                transfer_id: hex::encode(transfer_id),
                 index,
                 error,
             },
         }
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -745,6 +740,8 @@ impl From<TrustedPeer> for FfiPeer {
 }
 
 const STREAM_BUF: usize = 256 * 1024;
+/// Largest write handed to the app's [`ByteSink`].
+const SINK_CHUNK: usize = 16 * 1024;
 
 /// Implemented by the app around its socket (e.g. Bluetooth L2CAP).
 #[uniffi::export(foreign)]
@@ -769,17 +766,18 @@ impl StreamBridge {
     pub async fn push(&self, data: Vec<u8>) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         let mut w = self.to_core.lock().await;
-        let w = w
-            .as_mut()
-            .ok_or_else(|| FerryError::from(anyhow::anyhow!("bridge closed")))?;
-        w.write_all(&data)
-            .await
-            .map_err(|e| FerryError::from(anyhow::Error::from(e)))
+        let w = w.as_mut().ok_or_else(|| FerryError::msg("bridge closed"))?;
+        Ok(w.write_all(&data).await.map_err(anyhow::Error::from)?)
     }
 
     /// The socket closed (or the app is done): ends the bridge.
     pub async fn finish(&self) {
-        self.to_core.lock().await.take();
+        use tokio::io::AsyncWriteExt;
+        // Dropping a split half alone doesn't close the duplex (the read half keeps it
+        // alive), so shut down explicitly: the core then reads EOF and tears the bridge down.
+        if let Some(mut w) = self.to_core.lock().await.take() {
+            let _ = w.shutdown().await;
+        }
     }
 
     /// The paired device on the other end, once the bridge hello completes (first call only).
@@ -789,10 +787,10 @@ impl StreamBridge {
             .lock()
             .await
             .take()
-            .ok_or_else(|| FerryError::from(anyhow::anyhow!("already awaited")))?;
+            .ok_or_else(|| FerryError::msg("already awaited"))?;
         rx.await
-            .map_err(|_| FerryError::from(anyhow::anyhow!("bridge task ended")))?
-            .map_err(|e| FerryError::from(anyhow::anyhow!(e)))
+            .map_err(|_| FerryError::msg("bridge task ended"))?
+            .map_err(FerryError::msg)
     }
 }
 
@@ -862,7 +860,7 @@ impl FerryNode {
                 let d = delegate.clone();
                 Arc::new(move |peer, ev| {
                     if let Some(ev) = FfiEvent::from_proto(ev) {
-                        d.on_event(peer, ev)
+                        d.on_event(peer, ev);
                     }
                 })
             },
@@ -979,15 +977,16 @@ impl FerryNode {
         });
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 16 * 1024];
             // core → socket; the sink may block on the radio, so call it off the async workers
-            while let Ok(n) = from_core.read(&mut buf).await {
+            loop {
+                let mut chunk = Vec::with_capacity(SINK_CHUNK);
+                if !matches!(from_core.read_buf(&mut chunk).await, Ok(n) if n > 0) {
+                    break;
+                }
                 let s = sink.clone();
-                let chunk = buf[..n].to_vec();
-                if n == 0
-                    || !tokio::task::spawn_blocking(move || s.write(chunk))
-                        .await
-                        .unwrap_or(false)
+                if !tokio::task::spawn_blocking(move || s.write(chunk))
+                    .await
+                    .unwrap_or(false)
                 {
                     break;
                 }
@@ -1015,6 +1014,8 @@ impl FerryNode {
         Ok(self.node.send_event(&peer_id, &event.into_proto()).await?)
     }
 
+    // The doc for send_named sits on open_stream_bridge above; UniFFI hashes doc comments
+    // into the API checksums, so moving it means regenerating the app bindings.
     pub async fn send_named(
         &self,
         peer_id: String,
@@ -1044,8 +1045,8 @@ impl FerryNode {
     }
 
     pub fn usb_links(&self) -> Vec<FfiUsbLink> {
-        let links = self.node.usb_links();
-        links
+        self.node
+            .usb_links()
             .into_iter()
             .map(|l| FfiUsbLink {
                 serial: l.serial,
@@ -1060,7 +1061,7 @@ impl FerryNode {
     }
 
     pub async fn shutdown(&self) {
-        self.node.shutdown().await
+        self.node.shutdown().await;
     }
 }
 
@@ -1071,14 +1072,6 @@ pub fn core_version() -> String {
         env!("CARGO_PKG_VERSION"),
         ferry_core::PROTOCOL_VERSION
     )
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn hex_encodes() {
-        assert_eq!(super::hex(&[0x00, 0xab, 0x0f]), "00ab0f");
-    }
 }
 
 #[cfg(test)]
@@ -1174,7 +1167,7 @@ mod event_tests {
             FfiEvent::CallLog {
                 calls: vec![FfiCallEntry {
                     number: "+911".into(),
-                    name: "".into(),
+                    name: String::new(),
                     date_ms: 4,
                     duration_s: 60,
                     kind: FfiCallKind::Missed,
@@ -1191,7 +1184,7 @@ mod event_tests {
                     size: 5,
                     modified_ms: 6,
                 }],
-                error: "".into(),
+                error: String::new(),
             },
             FfiEvent::FsGet {
                 paths: vec!["DCIM/a.jpg".into()],
