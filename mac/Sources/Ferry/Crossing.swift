@@ -1,7 +1,7 @@
 import AppKit
 import FerryLogic
 
-/// "Share cursor with <phone>": pushing the pointer past the chosen screen edge hides and freezes the
+/// "Share Cursor": pushing the pointer past the chosen screen edge hides and freezes the
 /// Mac cursor and drives the phone's overlay cursor (CURSOR/SCROLL/TEXT/KEY) until it comes back or
 /// Escape. A listen-only tap watches mouse moves for the push; a filtering tap, enabled only while
 /// crossed (so Ferry isn't in the path of every key and click otherwise), reads raw deltas and swallows input.
@@ -162,7 +162,8 @@ import FerryLogic
             if reason == 3 {
                 model.cursorPeer = nil
                 model.showAlert("Turn on Ferry control on the phone",
-                                "Cursor sharing needs Ferry's control service: on the phone, Settings → Accessibility → Ferry.")
+                                "To share the cursor, turn on Ferry control on the phone in Settings → Accessibility → Ferry, "
+                                    + "then choose Share Cursor again.")
             }
         }
         own = s
@@ -176,7 +177,7 @@ import FerryLogic
 }
 
 extension AppModel {
-    /// The phone the cursor crosses to (menu "Share cursor with <phone>"), nil = off (default).
+    /// The phone the cursor crosses to (menu "Share Cursor"), nil = off (default).
     var cursorPeer: String? {
         get { UserDefaults.standard.string(forKey: "cursorPeer") }
         set {
@@ -203,7 +204,10 @@ extension AppModel {
         crossing = Crossing(model: self, peerId: want, edge: cursorEdge)
         if crossing == nil {
             UserDefaults.standard.removeObject(forKey: "cursorPeer")
-            showAlert("Ferry can't share the cursor", "Allow Ferry in System Settings → Privacy & Security → Accessibility")
+            if confirm("Allow Ferry to share the cursor", "Turn on Ferry in System Settings → Privacy & Security → Accessibility, "
+                           + "then choose Share Cursor again.", "Open System Settings") {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            }
         }
     }
 }

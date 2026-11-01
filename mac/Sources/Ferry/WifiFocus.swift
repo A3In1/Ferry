@@ -7,7 +7,7 @@ import FerryCore
 /// Only asked for authorization: macOS hides the Wi-Fi name from apps without Location access.
 @MainActor private let locationManager = CLLocationManager()
 
-/// Phase 6: "Share Wi-Fi with <phone>" and Do Not Disturb sync.
+/// Phase 6: "Share Wi-Fi…" and Do Not Disturb sync.
 extension AppModel {
     /// The password comes from the System keychain through `security`, which shows macOS's own prompt. It's never logged.
     func shareWifi(with peer: FfiPeer) {
@@ -24,7 +24,7 @@ extension AppModel {
                                   + "as an open network with no password?", "Send without password") else { return }
                 password = ""
             }
-            broadcast(.wifiNetwork(ssid: ssid, password: password), to: [peer.id], what: "the Wi-Fi network")
+            broadcast(.wifiNetwork(ssid: ssid, password: password), to: [peer.id], failure: "The Wi-Fi network wasn't shared.")
         }
     }
 
@@ -42,36 +42,41 @@ extension AppModel {
                           "Open System Settings") else { return }
             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")!)
         default:
-            showAlert("Not on Wi-Fi", "This Mac isn't connected to a Wi-Fi network.")
+            showAlert("This Mac isn't on Wi-Fi", "Connect to a Wi-Fi network, then choose Share Wi-Fi again.")
         }
     }
 
-    /// Menu toggle "Phone Do Not Disturb". The check mark only moves when the phone reports back.
-    func setPhoneDnd(_ on: Bool) {
-        broadcast(.dnd(on: on), what: on ? "Do Not Disturb on" : "Do Not Disturb off")
+    /// Menu toggle "Do Not Disturb" for one phone. The check mark only moves when the phone reports back.
+    func setPhoneDnd(_ on: Bool, peer: String) {
+        broadcast(.dnd(on: on), to: [peer], failure: "Do Not Disturb wasn't changed.")
     }
 
     /// `ferry://focus?on=1|0` from the user's Shortcuts Focus automation: Mac Focus → phone.
     func openURL(_ url: URL) {
         guard let on = focusState(from: url) else { return logger.info("ignored URL \(url, privacy: .private)") }
-        // Already matching: usually our own "Ferry Focus On/Off" Shortcut echoing the phone's change.
-        guard on != phoneDnd else { return }
-        broadcast(.dnd(on: on))
+        Task {
+            await ready() // the URL can launch us
+            refreshPeers()
+            // Phones already matching are skipped: usually our own "Ferry Focus On/Off" Shortcut echoing their change.
+            let targets = peers.map(\.id).filter { phoneDnd[$0, default: false] != on }
+            guard !targets.isEmpty else { return }
+            broadcast(.dnd(on: on), to: targets)
+        }
     }
 
     func showFocusSetup() {
-        showAlert("Have the phone follow your Mac's Focus",
+        showAlert("Have your phone follow your Mac's Focus",
                   "In the Shortcuts app, open Automation and add two Focus automations for Do Not Disturb "
                       + "(or the Focus you use):\n\n• When turning on: Open URL ferry://focus?on=1\n"
                       + "• When turning off: Open URL ferry://focus?on=0\n\n"
-                      + "Turn off “Ask Before Running” for both. Ferry then sets the phone's Do Not Disturb "
-                      + "(turn on Do Not Disturb sync in Ferry on the phone).")
+                      + "Turn off “Ask Before Running” for both. Ferry then turns the phone's Do Not Disturb on and off "
+                      + "to match. On the phone, turn on Do Not Disturb in Ferry.")
     }
 
     /// The phone's Do Not Disturb changed: run the user's "Ferry Focus On/Off" Shortcut, if there is one.
     // shortcut: two quick changes can run their Shortcuts out of order; queue them if that shows up.
-    func phoneDndChanged(_ on: Bool) {
-        phoneDnd = on
+    func phoneDndChanged(_ on: Bool, peer: String) {
+        phoneDnd[peer] = on
         onChange()
         let name = on ? "Ferry Focus On" : "Ferry Focus Off"
         Task {

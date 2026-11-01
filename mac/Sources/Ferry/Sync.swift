@@ -28,6 +28,7 @@ extension AppModel {
     // MARK: incoming (via Bridge.onEvent)
 
     func handle(_ event: FfiEvent, from peer: String) {
+        lastHeard[peer] = .now
         switch event {
         case let .notification(key, appName, package, title, text, _, buttons):
             postPhoneNotification(peer: peer, key: key, app: appName, package: package, title: title, text: text, buttons: buttons)
@@ -48,13 +49,13 @@ extension AppModel {
         case let .link(url):
             guard let url = webURL(url) else { return logger.notice("ignored non-web link from phone: \(url)") }
             NSWorkspace.shared.open(url)
-            notify("Opened link from \(peerName(peer) ?? "your phone")", url.absoluteString)
+            notify("Opened a link from \(peerName(peer) ?? "your phone")", url.absoluteString) { $0.threadIdentifier = "link" }
         case .smsThreads, .smsMessages, .smsNew, .call, .callLog:
             handleTexts(event, from: peer) // Messages.swift
         case let .fsList(path, entries, error):
             handleFiles(path: path, entries: entries, error: error, from: peer) // Files.swift
         case let .dnd(on):
-            phoneDndChanged(on) // WifiFocus.swift
+            phoneDndChanged(on, peer: peer) // WifiFocus.swift
         case .notificationAction, .mediaCommand, .ring, .smsThreadsRequest, .smsMessagesRequest, .smsSend, .callCommand,
              .callLogRequest, .fsListRequest, .fsGet, .wifiNetwork:
             break // Mac → phone only
@@ -63,19 +64,20 @@ extension AppModel {
 
     // MARK: outgoing
 
-    /// Sends to `peerIds` (default: every paired phone) off the main actor. `what` set = the user asked
-    /// for it, so failures get an alert; nil = background sync, failures are only logged.
-    func broadcast(_ event: FfiEvent, to peerIds: [String]? = nil, what: String? = nil) {
+    /// Sends to `peerIds` (default: every paired phone) off the main actor. `failure` set = the user asked
+    /// for it, so failures get an alert opening with that sentence ("The message wasn't sent."); nil =
+    /// background sync, failures are only logged.
+    func broadcast(_ event: FfiEvent, to peerIds: [String]? = nil, failure: String? = nil) {
         Task {
             await ready() // Services can launch us
             refreshPeers()
             guard let node else {
-                if what != nil { showAlert("Ferry isn't running", status) }
+                if failure != nil { showNotRunning() }
                 return
             }
             let targets = peerIds ?? peers.map(\.id)
-            if targets.isEmpty, what != nil {
-                showAlert("No paired phone", "Choose Pair a device… in the Ferry menu first.")
+            if targets.isEmpty, failure != nil {
+                showAlert("No phone paired", "Choose Pair Your Phone… in the Ferry menu first.")
             }
             let named = targets.map { ($0, peerName($0) ?? "phone") }
             // A send to an unreachable phone takes ~10 s to fail; keep it off the main actor.
@@ -84,33 +86,41 @@ extension AppModel {
                     for (id, name) in named {
                         group.addTask {
                             do { try await node.sendEvent(peerId: id, event: event); return nil } catch {
-                                logger.error("sending \(what ?? "sync event", privacy: .public) to \(name) failed: \(error, privacy: .public)")
-                                return "\(name): \(error)"
+                                logger.error("sending (\(failure ?? "sync", privacy: .public)) to \(name) failed: \(error, privacy: .public)")
+                                return name
                             }
                         }
                     }
                     return await group.reduce(into: [String]()) { if let e = $1 { $0.append(e) } }
                 }
                 // Alert only if nothing got through: another paired phone being offline is normal.
-                if let what, !errors.isEmpty, errors.count == named.count {
-                    await self.showAlert("Couldn't send \(what)", errors.joined(separator: "\n"))
+                if let failure, !errors.isEmpty, errors.count == named.count {
+                    let one = errors.count == 1
+                    let hint = one ? await self.reachHint(errors[0]) : "Make sure your phones are nearby and running Ferry, then try again."
+                    await self.showAlert(one ? "Couldn't reach \(errors[0])" : "Couldn't reach your phones", "\(failure) \(hint)")
                 }
             }
         }
     }
 
-    /// Services "Send link to phone" and the menu's "Send clipboard to phone": a lone web URL goes as a
-    /// link (the phone opens it), anything else as clipboard text.
-    func sendText(_ text: String?) {
-        guard let text, !text.isEmpty else { showAlert("Nothing to send", "There's no text to send."); return }
-        if let url = webURL(text) { return broadcast(.link(url: url.absoluteString), what: "the link") }
-        guard text.utf8.count <= clipboardLimit else { showAlert("Too much text", "Ferry sends up to 1 MB of text."); return }
-        broadcast(.clipboard(text: text), what: "the text")
+    /// Services "Send link to phone" and the menu's "Send Clipboard": a lone web URL goes as a
+    /// link (the phone opens it), anything else as clipboard text. `peers` nil = every paired phone.
+    func sendText(_ text: String?, to peers: [String]? = nil) {
+        guard let text, !text.isEmpty else { showAlert("Nothing to send", "Select or copy some text first."); return }
+        if let url = webURL(text) { return broadcast(.link(url: url.absoluteString), to: peers, failure: "The link wasn't sent.") }
+        guard text.utf8.count <= clipboardLimit else {
+            showAlert("The text is too long", "Ferry can send up to 1 MB of text at a time.")
+            return
+        }
+        broadcast(.clipboard(text: text), to: peers, failure: "The text wasn't sent.")
     }
 
-    func sendClipboard() {
-        sendText(NSPasteboard.general.string(forType: .string))
+    func sendClipboard(to peer: String) {
+        sendText(NSPasteboard.general.string(forType: .string), to: [peer])
     }
+
+    /// The clipboard has text (checks types only, so it never triggers the paste-privacy prompt).
+    var clipboardHasText: Bool { NSPasteboard.general.types?.contains(.string) == true }
 
     /// Every 1 s while syncing. Reading changeCount/types never triggers the macOS 15.4+ pasteboard-privacy alert;
     /// reading the string does (once, then System Settings → Privacy & Security → Paste from Other Apps).
@@ -138,8 +148,8 @@ extension AppModel {
         broadcast(.mediaCommand(cmd: cmd), to: [peer])
     }
 
-    func ring(_ start: Bool) {
-        broadcast(.ring(start: start), what: start ? "Ring" : "Stop ringing")
+    func ring(_ start: Bool, peer: String) {
+        broadcast(.ring(start: start), to: [peer], failure: start ? "The phone didn't ring." : "The phone didn't stop ringing.")
     }
 
     // MARK: phone notifications
@@ -151,8 +161,11 @@ extension AppModel {
     ) {
         guard canNotify else { return }
         let category = category(for: buttons)
-        notify(title.isEmpty ? app : "\(app): \(title)", text, id: phoneID(peer, key), waitForCategories: true) {
-            $0.threadIdentifier = package
+        // Title: who/what; subtitle: the app (and phone, with several). Grouped per phone and app.
+        let phone = peers.count > 1 ? peerName(peer) : nil
+        notify(title.isEmpty ? app : title, text, id: phoneID(peer, key), waitForCategories: true) {
+            $0.subtitle = [title.isEmpty ? nil : app, phone].compactMap(\.self).joined(separator: " · ")
+            $0.threadIdentifier = "n|\(peer)|\(package)"
             $0.categoryIdentifier = category
             $0.userInfo = [Notifications.peerKey: peer, Notifications.keyKey: key]
         }
@@ -193,7 +206,7 @@ extension AppModel {
         } else if action.hasPrefix(Notifications.buttonPrefix) {
             let button = String(action.dropFirst(Notifications.buttonPrefix.count))
             broadcast(.notificationAction(key: key, buttonId: button, replyText: reply, dismiss: false), to: [peer],
-                      what: reply.isEmpty ? "the action" : "the reply")
+                      failure: reply.isEmpty ? "The action wasn't sent to the phone." : "Your reply wasn't sent.")
         } // body click: nothing to do on the phone
     }
 }

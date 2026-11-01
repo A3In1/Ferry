@@ -36,12 +36,21 @@ The xcframework and `FerryCore.swift` are generated and git-ignored.
   **Show in Finder** reveals the files. Permission is requested at first launch.
 - **Transfers in the menu**: incoming shows the current file, overall % and MB/s, live while the menu is
   open. Outgoing shows "Sending …" then the size and MB/s, or an error. The last five lines are kept.
-- **Pair a device…** shows a QR + selectable `ferry://pair?...` ticket (Copy ticket button). When the
-  other side connects, an alert shows the 6-digit code: Match / Doesn't match.
-- **Pair phone over USB** pushes a ticket to the plugged-in phone over adb. The phone shows the code and
-  the same Match alert appears here. **USB links** show as "📱 <name> — USB".
-- **Paired devices** → per device: Send files… (multi-select), Forget. The list refreshes every 2 s and
-  each time the menu opens.
+- **Menu layout**: status first (per phone: a section header with its name, "Connected over USB / Bluetooth /
+  Wi-Fi", battery, a call with **Hang Up**, now playing with **Previous Track / Pause / Next Track**), then
+  **Recent Transfers**. Then the phone's actions (**Mirror Screen** ⌘1, **Messages** ⌘2, **Browse Files** ⌘3,
+  **Send Files…** ⌘O, **Send Clipboard**, **Share Wi-Fi…**, **Share Cursor**, **Ring Phone / Stop Ringing**,
+  **Do Not Disturb**); with several phones, one submenu per phone. Then **Pair Your Phone…** (⌘N; **Pair
+  Another Phone…** once one is paired) and **Pair over USB…**, **Settings** (Sync Clipboard, Use Bluetooth,
+  Cursor Crosses At, Set Up Focus Sync…, Open at Login, Forget <phone>…), **About Ferry** and **Quit Ferry**.
+  "Wi-Fi" is inferred from the phone having sent something in the last 10 minutes; the core has no live
+  connection state. With no phone paired, the top of the menu says so and explains what pairing gives you.
+- **Pair Your Phone…** shows a QR, the steps on the phone, and under "Can't scan the code?" a **Copy Pairing
+  Link** button for the `ferry://pair?...` ticket. When the other side connects, an alert shows the 6-digit
+  code: Match / Doesn't Match. Match closes the Pair window and posts "Paired with <phone>".
+- **Pair over USB…** pushes a ticket to the plugged-in phone over adb. The phone shows the code and
+  the same Match alert appears here. If adb isn't installed, the item is disabled and says why.
+- **Forget <phone>…** (Settings) asks first, then closes that phone's windows and removes its notifications.
 - **Open at Login** (`SMAppService.mainApp`). If macOS needs approval, System Settings → Login Items opens.
 
 ### Everyday sync (Phase 2)
@@ -52,14 +61,14 @@ things you click (ring, send clipboard/link, a notification reply) show an alert
 - **Phone notifications** show as Mac notifications ("App: Title", grouped by app). The same phone key
   replaces the banner, and removing it on the phone removes it here. Phone buttons become notification
   buttons, reply buttons get a text field, and dismissing it here dismisses it on the phone.
-- **Clipboard**: text from the phone goes straight onto the Mac clipboard. **Sync clipboard to phone**
+- **Clipboard**: text from the phone goes straight onto the Mac clipboard. Settings → **Sync Clipboard**
   (off by default) sends what you copy on the Mac (plain text up to 1 MB). Items that password managers mark
   as concealed or transient are never sent, and nothing the phone just sent is sent back.
-  **Send clipboard to phone** sends once, even with sync off.
-- **Now playing**: while the phone plays media, the menu shows "♪ Title — Artist (App)" with
-  Previous / Play/Pause / Next.
-- **Battery**: "🔋 42%" (⚡ while charging).
-- **Ring phone / Stop ringing** (find my phone).
+  **Send Clipboard** sends once, even with sync off.
+- **Now playing**: while the phone plays media, the menu shows "Title — Artist" (the app below it) with
+  Previous Track / Pause (or Play) / Next Track.
+- **Battery**: "Battery 42%" (", charging" while charging).
+- **Ring Phone / Stop Ringing** (find my phone).
 - **Links**: an http(s) link from the phone opens in your browser, with a notification saying so. Other
   schemes (`file:`, `javascript:`, custom app schemes) are ignored. **Services → Send link to phone**
   (selected text or a URL in any app) sends one web URL as a link (the phone opens it). Any other text
@@ -88,7 +97,7 @@ and the phone is the central. `Sources/Ferry/Bluetooth.swift` does this:
   The channel is unencrypted because Android can't open a secure one without bonding; QUIC/TLS secures it.
 - **L2CAP channel → core**: each channel the phone opens becomes `openStreamBridge(label: "ble:<id prefix>")`.
   The core runs the same bridge hello and framing as USB, so the bridge shows up in `usbLinks()` with a
-  `ble:` serial. The menu shows **"📱 <phone> — Bluetooth"**. If the bridge peer isn't a paired device,
+  `ble:` serial. The menu shows **"Connected over Bluetooth"** under the phone's name. If the bridge peer isn't a paired device,
   the channel is closed. The core replaces an older bridge for the same phone, and a USB bridge wins
   over Bluetooth.
 - **Threading**: CoreBluetooth runs on its own serial queue. Each channel's input and output streams are
@@ -97,7 +106,7 @@ and the phone is the central. `Sources/Ferry/Bluetooth.swift` does this:
   the bytes to the pump thread and blocks until they're written, which gives backpressure to the radio.
   Bytes read go through an `AsyncStream` to `bridge.push`. EOF or an error ends the bridge, and the core
   ending the bridge closes the streams.
-- **When it runs**: only while at least one phone is paired and the **Bluetooth** menu toggle is on
+- **When it runs**: only while at least one phone is paired and Settings → **Use Bluetooth** is on
   (default). The first start asks for Bluetooth permission (`NSBluetoothAlwaysUsageDescription`). No
   entitlement is needed outside the sandbox. If Bluetooth can't run, the menu says **Bluetooth off** or
   **Allow Bluetooth for Ferry in System Settings**. The permission is tied to the code signature, so an
@@ -113,7 +122,7 @@ Contract: `docs/screen-protocol.md` (FSP1 over a QUIC stream from `FerryNode.ope
 H.264 NAL splitting and the cursor math are in FerryLogic (`Fsp.swift`, `Cursor.swift`, tested); the
 window is `Sources/Ferry/Screen.swift` and crossing is `Sources/Ferry/Crossing.swift`.
 
-- **Mirror <phone>** (menu) opens a window and sends `START` (video, long side 1280, 8 Mbps). The phone asks
+- **Mirror Screen** (menu) opens a window and sends `START` (video, long side 1280, 8 Mbps). The phone asks
   for screen-sharing consent ("Start now") every time. The window shows that until the first frame. H.264
   Annex-B is split into NAL units, SPS/PPS become the `CMVideoFormatDescription`, and the slices go as
   AVCC sample buffers (display-immediately) into an `AVSampleBufferDisplayLayer`, which decodes them.
@@ -122,10 +131,10 @@ window is `Sources/Ferry/Screen.swift` and crossing is `Sources/Ferry/Crossing.s
 - **Input from the window**: click/drag → `TOUCH` (normalized to the video rect, letterbox ignored),
   scroll → `SCROLL`, typing → `TEXT`, delete → `KEY 67`, return → `KEY 66`. Back / Home / Recents are
   title-bar buttons and **⌘[ / ⌘H / ⌘R**; **⌘W** closes. If `INFO` says control is off, the window
-  subtitle reads "Turn on Ferry control on the phone to click and type".
-- **END** shows as text with a **Reconnect** button: "Phone locked: unlock it and press Reconnect",
-  "Allow screen sharing on the phone", "Stopped on the phone", and so on. Closing the window finishes the stream.
-- **Share cursor with <phone>** (menu toggle, off by default) and **Cursor crosses at screen edge** →
+  subtitle reads "To click and type, turn on Ferry control on the phone".
+- **END** shows as text with a **Reconnect** button: "The phone is locked. Unlock it, then click Reconnect.",
+  "Screen sharing was stopped on the phone.", and so on (the error detail only goes to the log). Closing the window finishes the stream.
+- **Share Cursor** (menu toggle, off by default) and Settings → **Cursor Crosses At** →
   Left / Right (default Right). Push the pointer past that edge of the screen it's on (and no other
   display is beyond it). Ferry then uses the viewer's stream if a window is open, or opens a
   control-only one (`START` flags 0). It hides and freezes the Mac cursor and drives the phone's
@@ -148,7 +157,7 @@ on disk. The phone only answers when **Messages** / **Calls** are turned on in F
 `Sources/Ferry/Messages.swift` (SwiftUI in an `NSWindow`). Code detection and number matching are in
 FerryLogic (`Texts.swift`, tested).
 
-- **Messages <phone>** (menu) opens a window and sends `SmsThreadsRequest` + `CallLogRequest`. **Refresh**
+- **Messages** (menu) opens a window and sends `SmsThreadsRequest` + `CallLogRequest`. **Refresh**
   (toolbar) asks again. The list shows name or number, snippet, date, and a dot for unread. If nothing comes back
   within 5 s, the sidebar says "Turn on Messages in Ferry on your phone" (or Calls, on the Calls tab).
 - **Selecting a thread** sends `SmsMessagesRequest` and shows the chat: phone's messages on the left, yours on the
@@ -178,7 +187,7 @@ Disturb are in `Sources/Ferry/WifiFocus.swift`. Path joining, breadcrumbs and so
 (`PhonePath.swift`, tested). Phone paths are always relative to the phone's shared storage root (`""` = root).
 A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
 
-- **Browse <phone>** (menu) opens a window and sends `FsListRequest("")`. Path bar: the phone, then one
+- **Browse Files** (menu) opens a window and sends `FsListRequest("")`. Path bar: the phone, then one
   breadcrumb per folder (click one to jump there). The list shows name, size and date, folders first. Double-click
   a folder to open it (a new `FsListRequest`). Double-click a file to download it. **Back** / **Up** / **Refresh**
   are in the toolbar. An answer for a folder you've already left is ignored.
@@ -189,7 +198,7 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
   send-files path. The bottom line says they land in Download/Ferry on the phone.
 - **Errors**: a non-empty `FsList.error` is shown in the list (e.g. "Allow file access in Ferry on the phone").
   If nothing comes back within 5 s: "Turn on Files in Ferry on your phone".
-- **Share Wi-Fi with <phone>** (menu): reads the current network name with CoreWLAN. macOS only gives that to
+- **Share Wi-Fi…** (menu): reads the current network name with CoreWLAN. macOS only gives that to
   apps with **Location** access. If it's missing, an alert explains why and then asks
   (`NSLocationWhenInUseUsageDescription`), or opens System Settings → Location Services if it was denied. Then
   "Send Wi-Fi “SSID” and its password to <phone>?". On Send, `security find-generic-password -D "AirPort network
@@ -198,14 +207,14 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
   `WifiNetwork` goes to the phone, which asks before adding it. The password is never logged.
 - **Do Not Disturb**: when the phone reports `Dnd(on)`, Ferry runs your Shortcut **Ferry Focus On** or
   **Ferry Focus Off** (`/usr/bin/shortcuts run`), if `shortcuts list` has it. If not, a one-time alert explains how to make
-  them (Shortcuts app → new shortcut → **Set Focus** action → Do Not Disturb On / Off). **Phone Do Not Disturb**
+  them (Shortcuts app → new shortcut → **Set Focus** action → Do Not Disturb On / Off). **Do Not Disturb**
   (menu toggle) sends `Dnd(on)` to the phone. Its check mark only follows what the phone last reported, so it moves
   once the phone confirms.
 
 ## Test it
 
 **With the CLI** (`cargo build --release -p ferry-cli`, then `F=target/release/ferry`):
-1. `open mac/build/Ferry.app` → menu → **Pair a device…** → **Copy ticket**.
+1. `open mac/build/Ferry.app` → menu → **Pair Your Phone…** → Can't scan the code? → **Copy Pairing Link**.
 2. `$F --data-dir /tmp/ferryB --name PhoneB pair '<ticket>'`, and confirm the code in both places.
 3. Receive: `$F --data-dir /tmp/ferryB send "<Mac name>" some-file`. Open the menu to watch % and MB/s.
    A notification appears when it's done (Allow Downloads access on the first run). Then check
@@ -220,10 +229,10 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
 - Links in: `$E link https://example.com` opens the browser and posts a notification.
   `$E link file:///etc/passwd` does nothing.
 - Clipboard out: run `$F --data-dir /tmp/ferryB --name PhoneB listen --dir /tmp/recvB`, turn on
-  **Sync clipboard to phone**, then copy some text. The listener prints `event from …: Clipboard`. A clip just
+  Settings → **Sync Clipboard**, then copy some text. The listener prints `event from …: Clipboard`. A clip just
   received from the phone isn't echoed back.
 - Services: select a URL or some text in any app → Services → **Send link to phone**. The listener prints
-  `Link` or `Clipboard`. **Send clipboard to phone** and **Ring phone / Stop ringing** print `Clipboard` / `Ring`.
+  `Link` or `Clipboard`. **Send Clipboard** and **Ring Phone / Stop Ringing** print `Clipboard` / `Ring`.
 - The CLI can't yet *send* Notification, NowPlaying or Battery (its `event` command only does
   clip/link/ring/stop-ring/play-pause/next/prev). Test those with the real phone, or add them to the CLI.
   The ⏮/⏯/⏭ items only show while the phone reports something playing.
@@ -232,25 +241,25 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
 **With the phone over USB**:
 1. Turn on USB debugging on the phone, plug it in and accept the "Allow USB debugging" prompt
    (`adb devices` shows it). Open Ferry on the phone.
-2. Menu → **Pair phone over USB**. The phone shows a code and the Mac shows Match / Doesn't match.
-3. The menu shows "📱 <phone> — USB". Drop a file on the icon to send it over the cable.
+2. Menu → **Pair over USB…**. The phone shows a code and the Mac shows Match / Doesn't match.
+3. The menu shows "Connected over USB" under the phone's name. Drop a file on the icon to send it over the cable.
 
 **Phase 4 with the phone** (Wi-Fi or USB; over Bluetooth the phone answers "Bluetooth is too slow for video"):
-1. Menu → **Mirror <phone>**. Tap **Start now** on the phone. The phone's screen appears and the window takes its shape.
+1. Menu → **Mirror Screen**. Tap **Start now** on the phone. The phone's screen appears and the window takes its shape.
 2. Turn on Ferry's Accessibility service on the phone, then **Reconnect** (the subtitle hint goes away).
    Click an app icon, drag to scroll a list, use the trackpad/wheel, and type into a text field (delete and return too).
    Try ⌘[ / ⌘H / ⌘R and the title-bar buttons. Rotate the phone: the window reshapes.
 3. Lock the phone: the window says "Phone locked: unlock it and press Reconnect". Unlock it and press Reconnect.
    Decline the consent dialog: "Allow screen sharing on the phone".
 4. Close the window: the phone's capture indicator and "Controlled by" notification go away.
-5. Menu → **Share cursor with <phone>** (grant Accessibility the first time, then toggle it again). Push the
+5. Menu → **Share Cursor** (grant Accessibility the first time, then toggle it again). Push the
    pointer against the right edge twice: the Mac cursor disappears and the phone's cursor appears at the
    same height. Move, click and drag on the phone, scroll, and type into a field. Move back left past the phone's edge
-   (or press Escape): the Mac cursor reappears at the right edge. Switch **Cursor crosses at screen edge** to
+   (or press Escape): the Mac cursor reappears at the right edge. Switch **Cursor Crosses At** to
    Left and repeat on that side. With control off on the phone, the toggle turns off with "Turn on Ferry control on the phone".
 
 **Phase 5 with the phone** (any link; turn on **Messages** and **Calls** in Ferry on the phone first):
-1. Menu → **Messages <phone>**. The thread list fills within a second or two (unread threads have a dot), and the
+1. Menu → **Messages**. The thread list fills within a second or two (unread threads have a dot), and the
    **Calls** tab shows recent calls with missed ones in red. Turn the Messages grant off on the phone, then
    **Refresh**: after 5 s, "Turn on Messages in Ferry on your phone". Turn it back on and Refresh.
 2. Click a thread: the chat loads, oldest at the top, yours on the right. Type a reply and press Return:
@@ -269,20 +278,20 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
   The CLI can't send Phase 5 events yet, so it can only test the Mac → phone direction.
 
 **Phase 6 with the phone** (turn on **Files** in Ferry on the phone first):
-1. Menu → **Browse <phone>**. The root of the phone's storage appears, folders first. Double-click `DCIM`, then
+1. Menu → **Browse Files**. The root of the phone's storage appears, folders first. Double-click `DCIM`, then
    `Camera`: the path bar reads <phone> › DCIM › Camera. Click **Up** and **Back**, and click a breadcrumb.
 2. Select a photo or two and press **⌘D**: "Requested …, arriving in Downloads…", then the usual incoming
    transfer in the menu and a "Received" notification. Check `~/Downloads`.
 3. Drop a Mac file on the window (or **Upload…**). The menu shows "Sending…". Check Download/Ferry on the phone.
 4. Turn file access off on the phone and **Refresh**: its error shows in the list. Turn **Files** off in Ferry
    on the phone and Refresh: after 5 s, "Turn on Files in Ferry on your phone".
-5. Menu → **Share Wi-Fi with <phone>**. The first time: the Location alert, then the macOS prompt; Allow, then choose it
+5. Menu → **Share Wi-Fi…**. The first time: the Location alert, then the macOS prompt; Allow, then choose it
    again. Confirm "Send Wi-Fi “…” …?". macOS asks for your admin password or keychain access (Allow). The phone offers to
    add the network. Repeat and cancel the macOS prompt: Ferry offers "Send without password". Check Console
    (`log stream --predicate 'process == "Ferry"'`): the password never shows.
 6. Turn Do Not Disturb on on the phone. With no Ferry Focus Shortcuts: the one-time hint. In Shortcuts, create
    **Ferry Focus On** (Set Focus → Do Not Disturb → On) and **Ferry Focus Off** (Set Focus → turn off). Toggle DND on the
-   phone: the Mac's Focus follows, and **Phone Do Not Disturb** in the menu shows its state. Toggle it from the
+   phone: the Mac's Focus follows, and **Do Not Disturb** in the menu shows its state. Toggle it from the
    menu: the phone's DND changes and the check mark follows.
 - Without a phone, the CLI's `listen` prints what the Mac sends (`FsListRequest`, `FsGet`, `Dnd`, `WifiNetwork`).
   It prints `WifiNetwork` with the password, so only use a test network. The CLI can't send Phase 6 events yet, so
@@ -310,6 +319,6 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
 ### Mac Focus → phone
 Ferry handles `ferry://focus?on=1` / `ferry://focus?on=0`. In Shortcuts → Automation, add a Focus
 automation for Do Not Disturb: when turning on, Open URL `ferry://focus?on=1`; when turning off,
-`ferry://focus?on=0` (turn off "Ask Before Running"). The phone needs Do Not Disturb sync on.
-Menu → **Mac Focus → phone…** shows these steps. A change that already matches the phone is not
-sent, so the phone → Mac "Ferry Focus On/Off" Shortcuts can't loop.
+`ferry://focus?on=0` (turn off "Ask Before Running"). The phone needs Do Not Disturb turned on in Ferry.
+Menu → Settings → **Set Up Focus Sync…** shows these steps. A change that already matches a phone is not
+sent to it, so the phone → Mac "Ferry Focus On/Off" Shortcuts can't loop.

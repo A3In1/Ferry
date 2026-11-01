@@ -53,15 +53,15 @@ extension AppModel {
         let picked = f.entries.filter { names.contains($0.name) && !$0.dir }
             .compactMap { e in phonePath(f.path, e.name).map { (name: e.name, path: $0) } }
         guard !picked.isEmpty else { return }
-        broadcast(.fsGet(paths: picked.map(\.path)), to: [peer], what: "the download request")
-        f.note = "Requested \(describe(picked.map(\.name))), arriving in Downloads…"
+        broadcast(.fsGet(paths: picked.map(\.path)), to: [peer], failure: "The download didn't start.")
+        f.note = "Downloading \(describe(picked.map(\.name))) to your Downloads folder…"
     }
 
     func uploadFiles(_ urls: [URL], to peer: FfiPeer) {
         let urls = urls.filter(\.isFileURL)
         guard !urls.isEmpty else { return }
         send(urls, to: peer)
-        files(peer.id).note = "Sending \(describe(urls.map(\.lastPathComponent))): they land in Download/Ferry on the phone"
+        files(peer.id).note = "Sending \(describe(urls.map(\.lastPathComponent))) to Download/Ferry on the phone…"
     }
 
     /// From the phone (Sync.swift). Answers for a folder we've since left are dropped.
@@ -76,10 +76,18 @@ extension AppModel {
     }
 }
 
-/// "Browse <phone>": path bar, folder listing, Download / Upload (or drop Mac files on the window).
+/// The phone's own wording for a refused listing ("Not allowed: DCIM"), as a sentence for the window.
+func folderError(_ error: String) -> String {
+    if error.hasPrefix("Not allowed") { return "Ferry can't open this folder." }
+    if error.hasPrefix("Not a folder") { return "This isn't a folder." }
+    if error.hasPrefix("Can't read") { return "Ferry on the phone can't read this folder." }
+    return error.prefix(1).uppercased() + error.dropFirst() + (error.hasSuffix(".") ? "" : ".") // already a sentence ("Turn on Files…")
+}
+
+/// "<Phone> — Files": path bar, folder listing, Download / Upload (or drop Mac files on the window).
 final class FilesWindow: PeerWindow {
     init(model: AppModel, peer: FfiPeer) {
-        super.init(model: model, peer: peer, title: "Browse \(peer.name)", size: NSSize(width: 720, height: 520))
+        super.init(model: model, peer: peer, kind: "Files", size: NSSize(width: 720, height: 520), minSize: NSSize(width: 520, height: 360))
         host(FilesView(model: model, peer: peer, files: model.files(peer.id)))
         model.listFiles(model.files(peer.id).path, peer: peer.id, remember: false)
         present()
@@ -120,7 +128,9 @@ struct FilesView: View {
                 Text(files.note ?? "Drop Mac files here to send them to the phone").font(.callout).foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
-                Button("Upload…") { model.chooseFiles("Send to \(peer.name)").map { model.uploadFiles($0, to: peer) } }
+                Button("Upload…") {
+                    model.chooseFiles("Choose files to send to \(peer.name)", button: "Upload").map { model.uploadFiles($0, to: peer) }
+                }
                 Button("Download") { model.downloadFiles(selection, peer: peer.id) }
                     .keyboardShortcut("d", modifiers: .command)
                     .disabled(!files.entries.contains { selection.contains($0.name) && !$0.dir })
@@ -137,16 +147,22 @@ struct FilesView: View {
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button { model.goBack(peer: peer.id) } label: { Label("Back", systemImage: "chevron.left") }
+                    .help("Back (⌘[)")
+                    .keyboardShortcut("[")
                     .disabled(files.back.isEmpty)
                 Button { model.listFiles(parentPhonePath(files.path), peer: peer.id) } label: {
-                    Label("Up", systemImage: "arrow.up")
+                    Label("Enclosing Folder", systemImage: "arrow.up")
                 }
+                .help("Enclosing Folder (⌘↑)")
+                .keyboardShortcut(.upArrow)
                 .disabled(files.path.isEmpty)
             }
             ToolbarItem {
                 Button { model.listFiles(files.path, peer: peer.id, remember: false) } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .help("Refresh (⌘R)")
+                .keyboardShortcut("r")
             }
         }
         .onChange(of: files.path) { selection = [] }
@@ -156,7 +172,7 @@ struct FilesView: View {
     private var pathBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
-                crumb(peer.name, path: "", icon: "iphone")
+                crumb(peer.name, path: "", icon: "iphone").accessibilityLabel("\(peer.name), top level")
                 ForEach(breadcrumbs(files.path), id: \.path) { c in
                     Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
                     crumb(c.name, path: c.path, icon: nil)
@@ -175,13 +191,13 @@ struct FilesView: View {
 
     @ViewBuilder private var placeholder: some View {
         if files.silent {
-            hint("Turn on Files in Ferry on your phone")
+            hint("Turn on Files in Ferry on your phone to browse it here.")
         } else if !files.error.isEmpty {
-            hint(files.error.prefix(1).uppercased() + files.error.dropFirst())
+            hint(folderError(files.error))
         } else if files.loading {
-            ProgressView()
+            ProgressView("Loading…").controlSize(.small)
         } else if files.entries.isEmpty {
-            hint("Empty folder")
+            hint("This folder is empty")
         }
     }
 

@@ -95,9 +95,9 @@ final class Bluetooth: NSObject, CBPeripheralManagerDelegate, @unchecked Sendabl
             // Unencrypted: Android can't open a secure channel without bonding; QUIC/TLS secures it.
             peripheral.publishL2CAPChannel(withEncryption: false)
             advertise()
-        case .poweredOff: onNote("Bluetooth off")
+        case .poweredOff: onNote("Bluetooth is off")
         case .unauthorized: onNote("Allow Bluetooth for Ferry in System Settings")
-        case .unsupported: onNote("Bluetooth unavailable")
+        case .unsupported: onNote("Bluetooth isn't available on this Mac")
         default: onNote(nil)
         }
     }

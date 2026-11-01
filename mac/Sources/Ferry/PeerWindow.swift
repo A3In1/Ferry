@@ -2,22 +2,26 @@ import AppKit
 import FerryCore
 import SwiftUI
 
-/// Mirror, Messages and Browse: one window per phone, held in an AppModel table until it closes.
+/// Screen, Messages and Files: one window per phone, held in an AppModel table until it closes.
+/// Titled "<Phone> — <kind>"; the frame is saved per phone and kind.
 @MainActor class PeerWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     let model: AppModel
     let peerId: String
+    private let autosaveName: String
     fileprivate var onClose: () -> Void = {}
 
     /// `editing`: an EditingWindow, for windows with text fields.
-    init(model: AppModel, peer: FfiPeer, title: String, size: NSSize, editing: Bool = true) {
+    init(model: AppModel, peer: FfiPeer, kind: String, size: NSSize, minSize: NSSize, editing: Bool = true) {
         self.model = model
         peerId = peer.id
+        autosaveName = "\(kind) \(peer.id)"
         let rect = NSRect(origin: .zero, size: size), style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
         window = editing ? EditingWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
             : NSWindow(contentRect: rect, styleMask: style, backing: .buffered, defer: false)
         super.init()
-        window.title = title
+        window.title = "\(peer.name) — \(kind)"
+        window.contentMinSize = minSize
         window.isReleasedWhenClosed = false
         window.delegate = self
     }
@@ -29,8 +33,10 @@ import SwiftUI
         window.setContentSize(size)
     }
 
+    /// Restores the saved frame (else centers), then shows the window.
     func present() {
-        window.center()
+        if !window.setFrameUsingName(autosaveName) { window.center() }
+        window.setFrameAutosaveName(autosaveName)
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
     }

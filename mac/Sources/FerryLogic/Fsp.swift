@@ -54,15 +54,15 @@ public enum Fsp {
     static func be<T: FixedWidthInteger>(_ v: T) -> Data { withUnsafeBytes(of: v.bigEndian) { Data($0) } }
     static func be(_ v: Float) -> Data { be(v.bitPattern) }
 
-    /// END reason as a line for the viewer window.
+    /// END reason as a line for the viewer window. `detail` is for logs, never shown.
     public static func endText(reason: UInt8, detail: String) -> String {
-        let suffix = detail.isEmpty ? "" : " (\(detail))"
         switch reason {
-        case 0: return "Mirroring ended"
-        case 1: return "Stopped on the phone"
-        case 2: return "Phone locked: unlock it and press Reconnect"
-        case 3: return detail.contains("control") ? "Turn on Ferry control on the phone" : "Allow screen sharing on the phone"
-        default: return "Something went wrong\(suffix)"
+        case 0: return "Screen sharing ended."
+        case 1: return "Screen sharing was stopped on the phone."
+        case 2: return "The phone is locked. Unlock it, then click Reconnect."
+        case 3: return detail.contains("control") ? "Turn on Ferry control on the phone, then click Reconnect."
+            : "Screen sharing wasn't allowed. Click Reconnect, then tap Start now on the phone."
+        default: return "Couldn't connect to the phone. Make sure it's nearby with Ferry running, then click Reconnect."
         }
     }
 }

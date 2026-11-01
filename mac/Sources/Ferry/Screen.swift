@@ -66,47 +66,68 @@ import FerryLogic
     }
 }
 
-/// "Mirror <phone>": the phone's screen in a window, with touch, scroll and typing back to it.
+/// "<Phone> — Screen": the phone's screen in a window, with touch, scroll and typing back to it.
 final class ScreenWindow: PeerWindow {
     private(set) var session: ScreenSession?
     private let screen = ScreenView()
     private let status = NSTextField(wrappingLabelWithString: "")
+    private let spinner = NSProgressIndicator()
     private let reconnect = NSButton(title: "Reconnect", target: nil, action: nil)
+    private let overlay = NSBox()
+    private let peerName: String
     private var sps: Data?, pps: Data?
     private var format: CMVideoFormatDescription?
     private var needKeyframe = true
     private var lastKeyframeAsk = Date.distantPast
 
     init(model: AppModel, peer: FfiPeer) {
-        super.init(model: model, peer: peer, title: peer.name, size: NSSize(width: 360, height: 760), editing: false)
+        peerName = peer.name
+        super.init(model: model, peer: peer, kind: "Screen", size: NSSize(width: 360, height: 760),
+                   minSize: NSSize(width: 160, height: 160), editing: false)
         let content = NSView()
         screen.autoresizingMask = [.width, .height]
         content.addSubview(screen)
+        // Status card over the video: spinner while waiting, Reconnect once it ended.
         status.alignment = .center
         status.textColor = .white
+        status.font = .systemFont(ofSize: NSFont.systemFontSize)
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.appearance = NSAppearance(named: .darkAqua)
         reconnect.target = self
         reconnect.action = #selector(connect)
-        let overlay = NSStackView(views: [status, reconnect])
-        overlay.orientation = .vertical
+        let stack = NSStackView(views: [spinner, status, reconnect])
+        stack.orientation = .vertical
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        overlay.boxType = .custom
+        overlay.fillColor = NSColor.black.withAlphaComponent(0.7)
+        overlay.borderWidth = 0
+        overlay.cornerRadius = 12
+        overlay.contentViewMargins = .zero
+        overlay.contentView = stack
+        overlay.appearance = NSAppearance(named: .darkAqua)
         overlay.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(overlay)
         NSLayoutConstraint.activate([
             overlay.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             overlay.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             overlay.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
+            overlay.widthAnchor.constraint(lessThanOrEqualToConstant: 300),
         ])
         window.contentView = content
         screen.frame = content.bounds
 
         // Nav buttons in the title bar; ScreenView maps ⌘[ ⌘H ⌘R to the same actions.
-        let nav = NSStackView(views: [("chevron.backward", "Back (⌘[)", Fsp.Nav.back),
-                                      ("circle", "Home (⌘H)", .home), ("square.on.square", "Recents (⌘R)", .recents)]
-            .map { symbol, tip, n in
-                let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: tip)!,
+        let nav = NSStackView(views: [("chevron.backward", "Back", "⌘[", Fsp.Nav.back),
+                                      ("circle", "Home", "⌘H", .home), ("square.on.square", "Recent Apps", "⌘R", .recents)]
+            .map { symbol, name, key, n in
+                let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: name)!,
                                  target: self, action: #selector(navButton))
                 b.bezelStyle = .accessoryBarAction
                 b.tag = Int(n.rawValue)
-                b.toolTip = tip
+                b.toolTip = "\(name) (\(key))"
+                b.setAccessibilityLabel(name)
                 return b
             })
         let bar = NSTitlebarAccessoryViewController()
@@ -127,38 +148,51 @@ final class ScreenWindow: PeerWindow {
 
     @objc private func connect() {
         session?.finish()
-        guard let node = model.node else { return show("Ferry isn't running") }
+        guard let node = model.node else {
+            return show(model.startFailed ? "Ferry couldn't start. Quit Ferry and open it again." : "Ferry is still starting. Try again in a moment.")
+        }
         sps = nil
         pps = nil
         format = nil
         needKeyframe = true
         screen.display.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
-        show("Tap “Start now” on the phone to share its screen", reconnect: false)
+        show("Waiting for \(peerName)…\nOn the phone, tap Start now to share its screen.", reconnect: false)
         let s = ScreenSession(node: node, peerId: peerId, video: true)
         s.onMessage = { [weak self] in self?.handle($0) }
         session = s
     }
 
+    /// `text` nil hides the status card (video is showing). Without Reconnect it's a wait, so it spins.
     private func show(_ text: String?, reconnect: Bool = true) {
         status.stringValue = text ?? ""
-        status.superview?.isHidden = text == nil
+        overlay.isHidden = text == nil
         self.reconnect.isHidden = !reconnect
+        self.reconnect.keyEquivalent = text != nil && reconnect ? "\r" : "" // else Return goes to the phone
+        spinner.isHidden = reconnect
+        if text != nil, !reconnect { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        if let text { NSAccessibility.post(element: status, notification: .announcementRequested,
+                                           userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue]) }
     }
 
     private func handle(_ m: Fsp.Message) {
         switch m {
         case let .info(w, h, caps):
-            window.subtitle = caps & 2 != 0 ? "" : "Turn on Ferry control on the phone to click and type"
+            window.subtitle = caps & 2 != 0 ? "" : "To click and type, turn on Ferry control on the phone"
             let size = NSSize(width: w, height: h)
             guard w > 0, h > 0, screen.video != size else { return }
             screen.video = size
             window.contentAspectRatio = size
+            let long = max(size.width, size.height)
+            window.contentMinSize = NSSize(width: size.width * 240 / long, height: size.height * 240 / long)
+            // Keep the window's long side (saved frame, or across a rotation), within 90% of the screen.
+            let current = window.contentRect(forFrameRect: window.frame).size
             let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? size
-            let s = min(visible.width * 0.8 / size.width, visible.height * 0.8 / size.height, 1)
-            window.setContentSize(NSSize(width: size.width * s, height: size.height * s))
+            let s = min(max(current.width, current.height) / long, visible.width * 0.9 / size.width, visible.height * 0.9 / size.height)
+            window.setContentSize(NSSize(width: (size.width * s).rounded(), height: (size.height * s).rounded()))
         case let .frame(pts, flags, data):
             decode(pts: pts, flags: flags, data)
         case let .end(reason, detail):
+            if !detail.isEmpty { logger.notice("screen sharing ended (\(reason)): \(detail, privacy: .public)") }
             show(Fsp.endText(reason: reason, detail: detail))
         }
     }
@@ -189,7 +223,7 @@ final class ScreenWindow: PeerWindow {
         else { return askKeyframe() }
         needKeyframe = false
         renderer.enqueue(sample)
-        if !status.superview!.isHidden { show(nil) }
+        if !overlay.isHidden { show(nil) }
     }
 
     private func askKeyframe() {

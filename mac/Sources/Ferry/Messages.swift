@@ -20,6 +20,7 @@ import UserNotifications
     var composeTo: String? // "New message": "" while typing, the number once sent (until its thread shows up)
     var showCalls = false
     var silent: Set<Feed> = [] // asked, nothing came back within 5 s
+    var loaded: Set<Feed> = [] // the phone has answered at least once (empty lists are "none yet", not "loading")
     @ObservationIgnored var heard: [Feed: Int] = [:]
 
     func thread(_ id: Int64?) -> FfiSmsThread? { threads.first { $0.threadId == id } }
@@ -54,6 +55,8 @@ extension AppModel {
         let t = texts(peer)
         // shortcut: read state stays on the Mac, the phone still counts it unread; send it once the protocol has a mark-read event.
         if let i = t.threads.firstIndex(where: { $0.threadId == id }) { t.threads[i].unread = 0 }
+        let thread = textThread(peer, id)
+        removeNotifications { $0.request.content.threadIdentifier == thread } // read here: banners are stale
         ask(.smsMessagesRequest(threadId: id, limit: 0), .messages, peer: peer)
     }
 
@@ -63,11 +66,11 @@ extension AppModel {
         let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty, !address.isEmpty else { return }
         texts(peer).pending.append(.init(address: address, body: body))
-        broadcast(.smsSend(address: address, body: body), to: [peer], what: "the message")
+        broadcast(.smsSend(address: address, body: body), to: [peer], failure: "The message wasn't sent.")
     }
 
     func callCommand(_ cmd: FfiCallCmd, peer: String) {
-        broadcast(.callCommand(cmd: cmd), to: [peer], what: cmd == .answer ? "Answer" : "Hang up")
+        broadcast(.callCommand(cmd: cmd), to: [peer], failure: cmd == .answer ? "The call wasn't answered." : "The call wasn't ended.")
     }
 
     // MARK: from the phone (Sync.swift routes these here)
@@ -97,7 +100,11 @@ extension AppModel {
     private func heard(_ t: PhoneTexts, _ feed: PhoneTexts.Feed) {
         t.heard[feed, default: 0] += 1
         t.silent.remove(feed)
+        t.loaded.insert(feed)
     }
+
+    /// Notification thread for one conversation on one phone.
+    private func textThread(_ peer: String, _ thread: Int64) -> String { "sms|\(peer)|\(thread)" }
 
     private func received(_ m: FfiSmsMessage, peer: String) {
         let t = texts(peer)
@@ -126,8 +133,10 @@ extension AppModel {
     private func notifyText(_ m: FfiSmsMessage, peer: String) {
         let sender = displayName(m.name, m.address)
         let code = oneTimeCode(in: m.body)
-        notify(code.map { "\($0) · code from \(sender)" } ?? sender, m.body, id: "\(Notifications.smsPrefix)\(peer)|\(m.id)") {
-            $0.threadIdentifier = "sms|\(peer)|\(m.threadId)"
+        let phone = peers.count > 1 ? peerName(peer) : nil
+        notify(sender, m.body, id: "\(Notifications.smsPrefix)\(peer)|\(m.id)") {
+            $0.subtitle = [code.map { "Code \($0)" }, phone].compactMap(\.self).joined(separator: " · ")
+            $0.threadIdentifier = self.textThread(peer, m.threadId)
             $0.categoryIdentifier = code == nil ? Notifications.sms : Notifications.smsCode
             $0.userInfo = [Notifications.peerKey: peer, Notifications.addressKey: m.address,
                            Notifications.threadKey: m.threadId, Notifications.codeKey: code ?? ""]
@@ -141,7 +150,7 @@ extension AppModel {
         onChange()
         switch state {
         case .ringing:
-            notify("\(who) is calling", "On \(peerName(peer) ?? "your phone"). The call's audio stays on the phone.", id: id) {
+            notify("\(who) is calling", "Call audio stays on \(peerName(peer) ?? "your phone").", id: id) {
                 $0.sound = .default
                 // Time-sensitive only breaks through Focus with the entitlement; without it macOS shows it as active.
                 $0.interruptionLevel = .timeSensitive
@@ -159,8 +168,8 @@ extension AppModel {
 
     var textCategories: [UNNotificationCategory] {
         let reply = UNTextInputNotificationAction(identifier: Notifications.replyAction, title: "Reply", options: [],
-                                                  textInputButtonTitle: "Send", textInputPlaceholder: "Text message")
-        let copy = UNNotificationAction(identifier: Notifications.copyAction, title: "Copy code")
+                                                  textInputButtonTitle: "Send", textInputPlaceholder: "Message")
+        let copy = UNNotificationAction(identifier: Notifications.copyAction, title: "Copy Code")
         let answer = UNNotificationAction(identifier: Notifications.answerAction, title: "Answer")
         let decline = UNNotificationAction(identifier: Notifications.declineAction, title: "Decline", options: [.destructive])
         return [
@@ -192,10 +201,10 @@ extension AppModel {
     }
 }
 
-/// "Messages <phone>": threads (or recent calls) on the left, the selected conversation on the right.
+/// "<Phone> — Messages": threads (or recent calls) on the left, the selected conversation on the right.
 final class MessagesWindow: PeerWindow {
     init(model: AppModel, peer: FfiPeer) {
-        super.init(model: model, peer: peer, title: "Messages — \(peer.name)", size: NSSize(width: 780, height: 560))
+        super.init(model: model, peer: peer, kind: "Messages", size: NSSize(width: 780, height: 560), minSize: NSSize(width: 640, height: 420))
         host(MessagesView(model: model, peer: peer.id, texts: model.texts(peer.id)))
         model.refreshTexts(peer.id)
         present()
@@ -208,6 +217,8 @@ struct MessagesView: View {
     @Bindable var texts: PhoneTexts
     @State private var draft = ""
     @State private var number = ""
+    @FocusState private var focus: Field?
+    private enum Field { case number, draft }
 
     var body: some View {
         NavigationSplitView {
@@ -217,10 +228,11 @@ struct MessagesView: View {
                     Text("Calls").tag(true)
                 }
                 .pickerStyle(.segmented).labelsHidden().padding(8)
-                if let hint {
+                if let hint, !(texts.showCalls ? texts.calls.isEmpty : texts.threads.isEmpty) {
                     Text(hint).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).padding()
                 }
-                if texts.showCalls { callList } else { threadList }
+                Group { if texts.showCalls { callList } else { threadList } }
+                    .overlay { listPlaceholder }
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 270)
         } detail: {
@@ -229,11 +241,15 @@ struct MessagesView: View {
                     HStack {
                         Text("To:")
                         TextField("Phone number", text: $number).textFieldStyle(.roundedBorder)
+                            .focused($focus, equals: .number)
+                            .onSubmit { focus = .draft }
                     }
                     .padding(10)
                     Divider()
                     conversation(nil, address: number)
                 }
+                .onAppear { focus = .number }
+                .onExitCommand { texts.composeTo = nil } // Escape cancels a new message
             } else if let t = texts.thread(texts.selected) {
                 VStack(spacing: 0) {
                     Text(displayName(t.name, t.address)).font(.headline).padding(10)
@@ -241,16 +257,21 @@ struct MessagesView: View {
                     conversation(texts.messages[t.threadId], address: t.address)
                 }
             } else {
-                Text("Select a conversation").foregroundStyle(.secondary)
+                ContentUnavailableView("No Conversation Selected", systemImage: "message",
+                                       description: Text("Choose a conversation, or start a new message."))
             }
         }
         .toolbar {
             Button { model.refreshTexts(peer) } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                .help("Refresh (⌘R)")
+                .keyboardShortcut("r")
             Button {
                 texts.selected = nil
                 texts.composeTo = ""
                 number = ""
-            } label: { Label("New message", systemImage: "square.and.pencil") }
+            } label: { Label("New Message", systemImage: "square.and.pencil") }
+                .help("New Message (⌘N)")
+                .keyboardShortcut("n")
         }
         .onChange(of: texts.selected) { _, id in
             guard let id else { return }
@@ -261,14 +282,29 @@ struct MessagesView: View {
     }
 
     private var hint: String? {
-        if texts.showCalls { return texts.silent.contains(.calls) ? "Turn on Calls in Ferry on your phone" : nil }
-        return texts.silent.contains(.messages) ? "Turn on Messages in Ferry on your phone" : nil
+        if texts.showCalls { return texts.silent.contains(.calls) ? "Turn on Calls in Ferry on your phone to see them here." : nil }
+        return texts.silent.contains(.messages) ? "Turn on Messages in Ferry on your phone to see your texts here." : nil
+    }
+
+    /// Shown over an empty list: why it's empty, or that it's still loading.
+    @ViewBuilder private var listPlaceholder: some View {
+        let feed: PhoneTexts.Feed = texts.showCalls ? .calls : .messages
+        if texts.showCalls ? texts.calls.isEmpty : texts.threads.isEmpty {
+            if let hint {
+                Text(hint).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).padding()
+            } else if !texts.loaded.contains(feed) {
+                ProgressView(texts.showCalls ? "Loading calls…" : "Loading conversations…").controlSize(.small)
+            } else {
+                Text(texts.showCalls ? "No recent calls" : "No conversations yet").font(.callout).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var threadList: some View {
         List(texts.threads, id: \.threadId, selection: $texts.selected) { t in
             HStack(alignment: .top, spacing: 6) {
                 Circle().fill(t.unread > 0 ? Color.accentColor : .clear).frame(width: 8, height: 8).padding(.top, 5)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text(displayName(t.name, t.address)).fontWeight(t.unread > 0 ? .semibold : .regular).lineLimit(1)
@@ -278,6 +314,8 @@ struct MessagesView: View {
                     Text(t.snippet).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityValue(t.unread > 0 ? "Unread" : "")
         }
     }
 
@@ -288,6 +326,7 @@ struct MessagesView: View {
                 Image(systemName: missed ? "phone.down.fill" : c.kind == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left")
                     .foregroundStyle(missed ? Color.red : Color.secondary)
                     .frame(width: 18)
+                    .accessibilityLabel(missed ? "Missed call" : c.kind == .outgoing ? "Outgoing call" : "Incoming call")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(displayName(c.name, c.number)).foregroundStyle(missed ? Color.red : Color.primary).lineLimit(1)
                     Text(missed ? "Missed" : Duration.seconds(c.durationS).formatted(.time(pattern: .minuteSecond)))
@@ -296,6 +335,7 @@ struct MessagesView: View {
                 Spacer()
                 Text(shortDate(c.dateMs)).font(.caption).foregroundStyle(.secondary)
             }
+            .accessibilityElement(children: .combine)
         }
     }
 
@@ -306,9 +346,9 @@ struct MessagesView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 6) {
-                        if messages == nil, texts.composeTo == nil { ProgressView().padding() }
+                        if messages == nil, texts.composeTo == nil { ProgressView("Loading messages…").controlSize(.small).padding() }
                         ForEach(messages ?? [], id: \.id) { bubble($0.body, outgoing: $0.outgoing) }
-                        ForEach(pending) { bubble($0.body, outgoing: true, note: "sending…") }
+                        ForEach(pending) { bubble($0.body, outgoing: true, note: "Sending…") }
                         Color.clear.frame(height: 1).id("end")
                     }
                     .padding(12)
@@ -317,7 +357,9 @@ struct MessagesView: View {
             }
             Divider()
             HStack {
-                TextField("Text message", text: $draft).textFieldStyle(.roundedBorder).onSubmit { send(to: address) }
+                TextField("Text message", text: $draft).textFieldStyle(.roundedBorder)
+                    .focused($focus, equals: .draft)
+                    .onSubmit { send(to: address) }
                 Button("Send") { send(to: address) }
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || address.isEmpty)
             }
@@ -336,6 +378,9 @@ struct MessagesView: View {
                     .background(outgoing ? Color.accentColor : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 14))
                 if let note { Text(note).font(.caption2).foregroundStyle(.secondary) }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(outgoing ? "You: \(text)" : text)
+            .accessibilityValue(note ?? "")
             if !outgoing { Spacer(minLength: 60) }
         }
     }

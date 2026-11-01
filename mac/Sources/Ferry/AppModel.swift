@@ -11,10 +11,15 @@ final class AppModel {
     struct Line {
         let id: String // transfer id, or "send-<uuid>"
         var text: String
+        var symbol: String // SF Symbol shown beside it in the menu
     }
 
     private(set) var node: FerryNode?
-    private(set) var status = "Starting…"
+    /// Shown in the menu (and alerts) until the node is up; "" once it is.
+    private(set) var status = "Starting Ferry…"
+    private(set) var startFailed = false
+    /// adb isn't available, so USB pairing and USB links can't work.
+    private(set) var usbUnavailable = false
     private(set) var peers: [FfiPeer] = []
     private(set) var usbLinks: [FfiUsbLink] = []
     /// Newest first: active transfers update in place, finished ones stay until pushed out.
@@ -58,7 +63,11 @@ final class AppModel {
     // Phase 6: phone file browsing (Files.swift) by peer id, and the phone's last reported Do Not Disturb (WifiFocus.swift).
     var phoneFiles: [String: PhoneFiles] = [:]
     var fileWindows: [String: FilesWindow] = [:]
-    var phoneDnd = false
+    var phoneDnd: [String: Bool] = [:]
+    /// When each phone last sent us anything (a hint that it's reachable over the network).
+    var lastHeard: [String: Date] = [:]
+    /// After the user confirms a pairing code (closes the Pair window).
+    var onPaired: (String) -> Void = { _ in }
 
     init() {
         startTask = Task { await start() }
@@ -83,8 +92,11 @@ final class AppModel {
                 delegate: Bridge(model: self)
             )
             self.node = node
-            status = "\(node.deviceName()) · \(node.deviceId().prefix(8))"
-            do { try await node.usbWatch(adbPath: nil) } catch { put("usb", "USB unavailable: \(error)") }
+            status = ""
+            do { try await node.usbWatch(adbPath: nil) } catch {
+                logger.notice("USB unavailable: \(error, privacy: .public)")
+                usbUnavailable = true
+            }
             bluetooth = Bluetooth(node: node) { [weak self] note in
                 Task { @MainActor in
                     self?.bluetoothNote = note
@@ -92,7 +104,9 @@ final class AppModel {
                 }
             }
         } catch {
-            status = "Failed to start: \(error)"
+            logger.error("node failed to start: \(error, privacy: .public)")
+            status = "Ferry couldn't start"
+            startFailed = true
         }
         tick()
     }
@@ -124,6 +138,18 @@ final class AppModel {
 
     func peerName(_ id: String) -> String? { peer(id)?.name }
 
+    /// How the phone is reached, for the menu: (line, SF Symbol). USB and Bluetooth links are known; Wi-Fi is
+    /// inferred from the phone having sent something lately (the core doesn't expose live connection state).
+    func connection(_ id: String) -> (String, String) {
+        if let link = usbLinks.first(where: { $0.peerId == id }) {
+            return link.serial.hasPrefix("ble:") ? ("Connected over Bluetooth", "dot.radiowaves.left.and.right")
+                : ("Connected over USB", "cable.connector")
+        }
+        guard let heard = lastHeard[id] else { return ("Paired", "iphone") }
+        if Date.now.timeIntervalSince(heard) < 600 { return ("Connected over Wi-Fi", "wifi") }
+        return ("Last seen \(heard.formatted(.relative(presentation: .named)))", "iphone")
+    }
+
     /// Drop / Services target: the only peer, else the last one we sent to.
     var preferredPeer: FfiPeer? {
         if peers.count == 1 { return peers[0] }
@@ -132,27 +158,35 @@ final class AppModel {
     }
 
     func forget(_ peer: FfiPeer) {
+        guard confirm("Forget \(peer.name)?", "This Mac and \(peer.name) stop connecting to each other. To use them together "
+                          + "again, pair them again.", "Forget") else { return }
         do {
             try node?.forgetPeer(peerId: peer.id)
             // Else its battery, now-playing and call lines stay in the menu.
             battery[peer.id] = nil
             nowPlaying[peer.id] = nil
             activeCalls[peer.id] = nil
+            lastHeard[peer.id] = nil
+            phoneDnd[peer.id] = nil
+            for w in [viewers[peer.id], messageWindows[peer.id], fileWindows[peer.id]] as [PeerWindow?] { w?.window.close() }
+            removeNotifications { $0.request.content.userInfo[Notifications.peerKey] as? String == peer.id }
         } catch {
-            showAlert("Couldn't forget \(peer.name)", "\(error)")
+            logger.error("forget failed: \(error, privacy: .public)")
+            showAlert("Couldn't forget \(peer.name)", "Try again. If it keeps happening, quit Ferry and open it again.")
         }
         refreshPeers()
     }
 
     func chooseAndSend(to peer: FfiPeer) {
-        chooseFiles("Send to \(peer.name)").map { send($0, to: peer) }
+        chooseFiles("Choose files to send to \(peer.name)", button: "Send").map { send($0, to: peer) }
     }
 
-    func chooseFiles(_ message: String) -> [URL]? {
+    func chooseFiles(_ message: String, button: String) -> [URL]? {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.message = message
+        panel.prompt = button
         NSApp.activate()
         return panel.runModal() == .OK ? panel.urls : nil
     }
@@ -162,15 +196,16 @@ final class AppModel {
         UserDefaults.standard.set(peer.id, forKey: "lastPeerId")
         let id = "send-\(UUID().uuidString)"
         let what = describe(urls.map(\.lastPathComponent))
-        put(id, "↑ Sending \(what) to \(peer.name)…")
+        put(id, "Sending \(what) to \(peer.name)…", "arrow.up.circle")
         Task {
             do {
                 let r = try await node.sendFiles(peerId: peer.id, paths: urls.map(\.path))
                 put(id, "Sent \(what) to \(peer.name) · \(byteCount(r.bytesSent)), "
-                    + rate(Double(r.bytesSent), seconds: max(Double(r.elapsedMs) / 1000, 0.001)))
+                    + rate(Double(r.bytesSent), seconds: max(Double(r.elapsedMs) / 1000, 0.001)), "checkmark.circle")
             } catch {
-                put(id, "Sending \(what) to \(peer.name) failed")
-                showAlert("Send to \(peer.name) failed", "\(error)")
+                logger.error("send to \(peer.name) failed: \(error, privacy: .public)")
+                put(id, "Couldn't send \(what) to \(peer.name)", "exclamationmark.triangle")
+                showAlert("Couldn't send \(what) to \(peer.name)", reachHint(peer.name))
             }
         }
     }
@@ -185,9 +220,10 @@ final class AppModel {
         Task {
             do {
                 try await node.usbPushTicket(serial: nil)
-                put("usb-pair", "Check your phone for the pairing code")
+                put("usb-pair", "Pairing over USB: check your phone", "cable.connector")
             } catch {
-                showAlert("Couldn't pair over USB", "\(error)")
+                logger.error("USB pairing failed: \(error, privacy: .public)")
+                showAlert("Couldn't pair over USB", usbHelp("\(error)"))
             }
         }
     }
@@ -195,26 +231,29 @@ final class AppModel {
     // MARK: called via Bridge
 
     func confirmPairing(peerName: String, code: String) -> Bool {
-        showAlert("Pair with \(peerName)?", "Check that \(peerName) shows the same code:\n\n\(code)", buttons: ["Match", "Doesn't match"])
+        let ok = showAlert("Pair with \(peerName)?", "Check that \(peerName) shows the same code:\n\n\(code)",
+                           buttons: ["Match", "Doesn't Match"])
+        if ok { onPaired(peerName) }
+        return ok
     }
 
     func handle(_ event: FfiFileEvent) {
         switch event {
         case let .offered(tid, names, totalBytes):
             incoming[tid] = Incoming(names: names, totalBytes: totalBytes)
-            put(tid, "↓ Incoming \(describe(names)) (\(byteCount(totalBytes)))")
+            put(tid, "Receiving \(describe(names)) (\(byteCount(totalBytes)))", "arrow.down.circle")
         case let .progress(tid, index, done, _):
             guard var t = incoming[tid] else { return }
             let bytes = t.finishedBytes + done
             if t.rateStart == nil { t.rateStart = (.now, bytes) }
             incoming[tid] = t
             let pct = t.totalBytes > 0 ? min(100, bytes * 100 / t.totalBytes) : 100
-            var text = "↓ \(t.names.count > 1 ? "\(index + 1)/\(t.names.count) " : "")\(name(t, index)) — \(pct)%"
+            var text = "\(t.names.count > 1 ? "\(index + 1) of \(t.names.count): " : "")\(name(t, index)) — \(pct)%"
             if case let (start, startBytes)? = t.rateStart {
                 let secs = Date.now.timeIntervalSince(start)
                 if secs > 0.5 { text += " · " + rate(Double(bytes) - Double(startBytes), seconds: secs) }
             }
-            put(tid, text)
+            put(tid, text, "arrow.down.circle")
         case let .saved(tid, _, path):
             let url = URL(filePath: path)
             quarantine(url)
@@ -227,7 +266,8 @@ final class AppModel {
             var t = incoming[tid] ?? Incoming(names: [], totalBytes: 0)
             t.failed += 1
             incoming[tid] = t
-            put(tid, "\(name(t, index)) failed: \(error)")
+            logger.error("receiving \(self.name(t, index), privacy: .private) failed: \(error, privacy: .public)")
+            put(tid, "Couldn't receive \(name(t, index))", "exclamationmark.triangle")
             finishIfDone(tid)
         }
     }
@@ -237,8 +277,8 @@ final class AppModel {
         incoming[tid] = nil
         if !t.saved.isEmpty {
             let what = describe(t.saved.map(\.lastPathComponent))
-            put(tid, t.failed == 0 ? "Received \(what)" : "Received \(what), \(t.failed) failed")
-            notifyReceived(t.saved, what: what)
+            put(tid, t.failed == 0 ? "Received \(what)" : "Received \(what); \(t.failed) couldn't be received", "checkmark.circle")
+            notifyReceived(t.saved, what: what, failed: t.failed, id: tid)
         }
     }
 
@@ -253,8 +293,10 @@ final class AppModel {
         do { try url.setResourceValues(values) } catch { logger.error("couldn't quarantine \(url.path): \(error, privacy: .public)") }
     }
 
-    private func notifyReceived(_ urls: [URL], what: String) {
-        notify("Received \(what)", "Saved to \(urls[0].deletingLastPathComponent().lastPathComponent)") {
+    private func notifyReceived(_ urls: [URL], what: String, failed: Int, id: String) {
+        let folder = urls[0].deletingLastPathComponent().lastPathComponent
+        notify("Received \(what)", "In your \(folder) folder" + (failed > 0 ? ". \(failed) couldn't be received." : ""), id: "f|\(id)") {
+            $0.threadIdentifier = Notifications.received
             $0.categoryIdentifier = Notifications.received
             $0.userInfo = [Notifications.pathsKey: urls.map(\.path)]
         }
@@ -264,11 +306,12 @@ final class AppModel {
         Int(index) < t.names.count ? t.names[Int(index)] : "File \(index + 1)"
     }
 
-    private func put(_ id: String, _ text: String) {
+    private func put(_ id: String, _ text: String, _ symbol: String) {
         if let i = lines.firstIndex(where: { $0.id == id }) {
             lines[i].text = text
+            lines[i].symbol = symbol
         } else {
-            lines.insert(Line(id: id, text: text), at: 0)
+            lines.insert(Line(id: id, text: text, symbol: symbol), at: 0)
             lines = Array(lines.prefix(5))
         }
         onChange()
@@ -280,12 +323,47 @@ final class AppModel {
         alert.messageText = title
         alert.informativeText = text
         buttons.forEach { alert.addButton(withTitle: $0) }
+        if alert.buttons.count == 2 { alert.buttons[1].keyEquivalent = "\u{1b}" } // Escape = the second choice ("Doesn't Match", "Cancel")
         NSApp.activate()
         return alert.runModal() == .alertFirstButtonReturn
     }
 
     func confirm(_ title: String, _ text: String, _ ok: String) -> Bool {
         showAlert(title, text, buttons: [ok, "Cancel"])
+    }
+
+    /// Alert body for a phone that didn't answer.
+    func reachHint(_ name: String) -> String {
+        "Make sure \(name) is nearby and Ferry is running on it, then try again."
+    }
+
+    /// Alert for an action that needs the node: still starting, or failed.
+    func showNotRunning() {
+        if startFailed { showAlert("Ferry couldn't start", "Quit Ferry and open it again.") } else {
+            showAlert("Ferry is still starting", "Try again in a moment.")
+        }
+    }
+
+    /// The core's adb errors, as something to do.
+    private func usbHelp(_ error: String) -> String {
+        if error.contains("adb not found") {
+            return "Pairing over USB needs Android platform-tools (adb). Install them, for example with Homebrew "
+                + "(brew install android-platform-tools), then open Ferry again. Or pair with the QR code instead."
+        }
+        if error.contains("no phone ready") { return "Plug in your phone with a USB cable and allow USB debugging when the phone asks." }
+        if error.contains("several phones") { return "More than one phone is plugged in. Unplug all but the one you want to pair." }
+        if error.contains("is it installed") { return "Install Ferry on your phone and open it once, then try again." }
+        return "Make sure your phone is plugged in and unlocked, then try again. Or pair with the QR code instead."
+    }
+
+    /// Removes delivered notifications that `match` (stale texts, a forgotten phone's).
+    func removeNotifications(_ match: @escaping (UNNotification) -> Bool) {
+        guard canNotify else { return }
+        let center = UNUserNotificationCenter.current()
+        Task {
+            let ids = await center.deliveredNotifications().filter(match).map(\.request.identifier)
+            if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+        }
     }
 
     /// Posts a notification now (a later one with the same `id` replaces it); a no-op outside an app bundle.
@@ -333,7 +411,7 @@ extension Dictionary {
 }
 
 enum Notifications {
-    static let received = "received"
+    static let received = "received" // category and thread
     static let showAction = "show"
     static let pathsKey = "paths"
     /// Phone notifications use request ids "n|<peerId>|<key>" and carry these in userInfo.
