@@ -73,6 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         bluetooth.state = model.bluetoothEnabled ? .on : .off
         bluetooth.toolTip = "Reach your paired phone over Bluetooth when you're not on the same Wi-Fi"
         menu.addItem(bluetooth)
+        let relay = ClosureItem("Internet relay…") { [weak self] in self?.model.editRelay() }
+        relay.subtitle = model.relayHost ?? "Off" // second line under the title
+        relay.toolTip = "Reach your paired phone from a different network through your own relay server"
+        menu.addItem(relay.enabled(model.node != nil))
 
         menu.addItem(.separator())
         let hasPhone = model.node != nil && !model.peers.isEmpty

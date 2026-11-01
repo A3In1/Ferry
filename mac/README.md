@@ -1,4 +1,4 @@
-# Ferry for Mac (Phases 1–6)
+# Ferry for Mac (Phases 1–7)
 
 Menu-bar app (no Dock icon) over the shared Rust core, via UniFFI bindings from `ffi/`.
 AppKit `NSStatusItem` + `NSMenu` (so the icon can take drops); the pairing window is SwiftUI.
@@ -202,6 +202,27 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
   (menu toggle) sends `Dnd(on)` to the phone. Its check mark only follows what the phone last reported, so it moves
   once the phone confirms.
 
+### Internet relay (Phase 7)
+
+Off by default. With it on, a paired phone and Mac on different networks reach each other through **your own**
+relay server (core: `core/src/relay.rs`). The relay only forwards the devices' end-to-end encrypted QUIC packets,
+so it never sees content or keys. Its own TLS certificate is always verified. The menu code is `Sources/Ferry/Relay.swift`.
+
+- **Internet relay…** (menu, under Bluetooth) shows the relay's host, or "Off", under its title. It opens an alert
+  with the https URL (prefilled), **Save**, **Turn off** and **Cancel**. Save with an empty field also turns it off.
+  The URL is saved in the data dir (`relay`) through `FerryNode.setRelayUrl`. A bad URL (not https, unparsable) shows an
+  alert and nothing changes. Saving the same URL again does nothing.
+- **Applying it**: the core only reads the relay at start, so Ferry restarts the node in-process (`AppModel.restartNode`).
+  It shuts the node down (endpoint, mDNS, USB watcher), stops Bluetooth and cursor crossing, then runs the normal start
+  path again. Bluetooth, USB and crossing come back with the new node on the next tick. The menu says "Restarting…" for
+  a moment. Transfers in flight at that moment fail, and open Mirror windows show the end with **Reconnect**.
+- **Certificates**: a relay with a normal certificate (e.g. Let's Encrypt) needs nothing extra. A self-hosted relay with a
+  self-signed certificate needs that certificate (or its CA) as `relay-ca.pem` (PEM or DER) in
+  `~/Library/Application Support/Ferry`, before you save the URL (it's read at start too).
+- The phone needs a relay turned on too (usually the same one): each side only dials a peer's relay while its own is on.
+  The devices tell each other their relay when they connect, so connect once directly (same Wi-Fi, USB or Bluetooth)
+  after turning it on. After that they can find each other through the relay from anywhere.
+
 ## Test it
 
 **With the CLI** (`cargo build --release -p ferry-cli`, then `F=target/release/ferry`):
@@ -287,6 +308,12 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
 - Without a phone, the CLI's `listen` prints what the Mac sends (`FsListRequest`, `FsGet`, `Dnd`, `WifiNetwork`).
   It prints `WifiNetwork` with the password, so only use a test network. The CLI can't send Phase 6 events yet, so
   the list stays empty and turns into "Turn on Files…" after 5 s.
+
+**Phase 7**: run your own relay (e.g. `iroh-relay`) on a public host with https. Menu → **Internet relay…** →
+`https://relay.example.com` → **Save**. The menu shows "Restarting…", then the Mac's name again, and the item's second
+line shows the host. Set the same relay on the phone and let the two connect once on the same Wi-Fi. Then put the phone on mobile
+data and send a file. Try `http://…`
+or `nonsense`: an error alert, and the setting stays. **Turn off**: the second line reads "Off".
 
 ## Later
 
