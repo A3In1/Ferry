@@ -453,7 +453,7 @@ struct PairView: View {
             }
             DisclosureGroup("Can't scan the code?") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Copy the pairing link and paste it into Ferry on your phone (Paste a pairing ticket). "
+                    Text("Copy the pairing link and paste it into Ferry on your phone (Paste pairing link instead). "
                         + "Or plug the phone into this Mac with a USB cable and choose Pair over USB.")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     HStack {
