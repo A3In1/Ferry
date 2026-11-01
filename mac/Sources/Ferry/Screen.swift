@@ -358,9 +358,9 @@ final class ScreenView: NSView {
     }
 
     override func scrollWheel(with e: NSEvent) {
-        guard let p = point(e) else { return }
-        let (dx, dy) = wheelUnits(e)
-        send(Fsp.scroll(Float(p.x), Float(p.y), dx: dx, dy: dy))
+        // Only a new scroll must start over the video; the rest of one (and its end) still goes if the pointer drifts off.
+        guard let w = Wheel(e), let p = point(e, clamp: !w.starts) else { return }
+        send(Fsp.scroll(Float(p.x), Float(p.y), dx: w.dx, dy: w.dy, flags: w.flags))
     }
 
     override func keyDown(with e: NSEvent) {
@@ -381,10 +381,27 @@ final class ScreenView: NSView {
     }
 }
 
-/// Scroll deltas in wheel lines (+dy = scroll up). Trackpads report points, about 10 per line.
-func wheelUnits(_ e: NSEvent) -> (Float, Float) {
-    let k: CGFloat = e.hasPreciseScrollingDeltas ? 0.1 : 1
-    return (Float(e.scrollingDeltaX * k), Float(e.scrollingDeltaY * k))
+/// A scroll event as SCROLL: deltas in wheel lines (+dy = scroll up; trackpads report points, about 10
+/// per line) as macOS delivers them, so the user's natural-scrolling setting carries over. Trackpad
+/// deltas and momentum are continuous; the phone plays them as one finger drag and lifts it on end.
+struct Wheel {
+    let dx, dy: Float
+    let flags: UInt8
+    /// The first event of a scroll (or any wheel step).
+    let starts: Bool
+
+    /// nil for events with nothing to send (a trackpad touch that hasn't moved yet).
+    init?(_ e: NSEvent) {
+        let precise = e.hasPreciseScrollingDeltas, k: CGFloat = precise ? 0.1 : 1
+        dx = Float(e.scrollingDeltaX * k)
+        dy = Float(e.scrollingDeltaY * k)
+        let over: NSEvent.Phase = [.ended, .cancelled]
+        // A finger lift may be followed by momentum; the phone waits a moment before lifting on a phase end.
+        let end = !e.momentumPhase.isDisjoint(with: over) || (e.momentumPhase.isEmpty && !e.phase.isDisjoint(with: over))
+        flags = (precise ? Fsp.scrollContinuous : 0) | (end ? Fsp.scrollEnd : 0)
+        starts = !precise || e.phase.contains(.began) || e.phase.contains(.mayBegin)
+        if dx == 0, dy == 0, !end { return nil }
+    }
 }
 
 extension AppModel {

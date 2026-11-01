@@ -23,8 +23,12 @@ public enum Fsp {
         message(0x20, be(maxSize) + be(bitrate) + [video ? 1 : 0])
     }
     public static func touch(_ a: Pointer, _ x: Float, _ y: Float) -> Data { message(0x10, [a.rawValue] + be(x) + be(y)) }
-    public static func scroll(_ x: Float, _ y: Float, dx: Float, dy: Float) -> Data {
-        message(0x11, be(x) + be(y) + be(dx) + be(dy))
+    /// SCROLL flags: bit0 continuous (trackpad/Magic Mouse deltas incl. momentum), bit1 end (the
+    /// gesture and its momentum are over: lift the finger). 0 = a wheel step.
+    public static let scrollContinuous: UInt8 = 1, scrollEnd: UInt8 = 2
+
+    public static func scroll(_ x: Float, _ y: Float, dx: Float, dy: Float, flags: UInt8 = 0) -> Data {
+        message(0x11, be(x) + be(y) + be(dx) + be(dy) + [flags])
     }
     public static func key(_ code: UInt32) -> Data { message(0x12, be(code)) }
     public static func text(_ s: String) -> Data { message(0x13, Data(s.utf8)) }

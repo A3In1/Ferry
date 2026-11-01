@@ -11,6 +11,7 @@ class FspTest {
         Msg.Start(0, 0xffffffffL, 0),
         Msg.Touch(2, 0.25f, 1f),
         Msg.Scroll(0.5f, 0.5f, -1.5f, 3f),
+        Msg.Scroll(0.1f, 0.9f, 0f, -0.25f, Fsp.SCROLL_CONTINUOUS or Fsp.SCROLL_END),
         Msg.Text("héllo 👋"),
         Msg.Key(67),
         Msg.Nav(4),
@@ -41,6 +42,12 @@ class FspTest {
     fun wireLayout() {
         assertArrayEquals(byteArrayOf(0x14, 0, 0, 0, 1, 2), Fsp.encode(Msg.Nav(2)))
         assertArrayEquals(byteArrayOf(0x01, 0, 0, 0, 5, 0x04, 0x38, 0x09, 0x60, 2), Fsp.encode(Msg.Info(1080, 2400, 2)))
+    }
+
+    @Test
+    fun scrollWithoutFlagsFromAnOlderMac() {
+        val old = byteArrayOf(0x11, 0, 0, 0, 16) + ByteArray(16)
+        assertEquals(listOf(Msg.Scroll(0f, 0f, 0f, 0f, 0)), FspParser().feed(Fsp.MAGIC + old))
     }
 
     @Test

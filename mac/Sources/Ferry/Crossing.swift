@@ -96,9 +96,8 @@ import FerryLogic
             pressed = type == .leftMouseDown
             s.send(Fsp.cursor(pressed ? .down : .up, c.normalized.x, c.normalized.y))
         case .scrollWheel:
-            guard let e = NSEvent(cgEvent: event) else { break }
-            let (wx, wy) = wheelUnits(e)
-            s.send(Fsp.scroll(c.normalized.x, c.normalized.y, dx: wx, dy: wy))
+            guard let e = NSEvent(cgEvent: event), let w = Wheel(e) else { break }
+            s.send(Fsp.scroll(c.normalized.x, c.normalized.y, dx: w.dx, dy: w.dy, flags: w.flags))
         case .keyDown:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
             if code == 53 { leave(); break } // Escape

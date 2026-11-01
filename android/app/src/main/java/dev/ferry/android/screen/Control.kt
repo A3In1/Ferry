@@ -38,6 +38,9 @@ class ControlService : AccessibilityService() {
     private var last = PointF()
     private var lastAt = 0L
     private var stroke: StrokeDescription? = null
+    private var scrollDrag: ScrollDrag? = null
+    private var scrollStroke: StrokeDescription? = null
+    private var scrolling = false
 
     override fun onServiceConnected() {
         instance.value = this
@@ -70,6 +73,7 @@ class ControlService : AccessibilityService() {
 
     /** Session over: hide the cursor and lift a finger that's still down. */
     fun reset() = main.post {
+        stopScroll(lift = true)
         if (stroke != null) segment(last, SystemClock.uptimeMillis(), false)
         down = null
         stroke = null
@@ -88,6 +92,7 @@ class ControlService : AccessibilityService() {
         val p = px(x, y)
         when (action) {
             0 -> {
+                stopScroll(lift = false) // the touch's own gesture replaces the scroll's
                 if (stroke != null) segment(last, now, false)
                 stroke = null
                 down = p
@@ -131,17 +136,49 @@ class ControlService : AccessibilityService() {
         dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, null)
     }
 
-    // shortcut: each SCROLL is its own 120 ms swipe (fast wheels cancel/fling); coalesce deltas if scrolling feels jumpy.
+    /** SCROLL → [ScrollDrag], played one segment per frame by [scrollTick]. */
     private fun scroll(m: Msg.Scroll) {
         if (down != null) return // don't break a drag in progress
         val p = px(m.x, m.y)
-        val s = screenSize(this)
-        val unit = 20 * resources.displayMetrics.density
-        // +dy = scroll up = finger moves down.
-        val ex = (p.x + m.dx * unit).coerceIn(0f, s.w - 1f)
-        val ey = (p.y + m.dy * unit).coerceIn(0f, s.h - 1f)
-        if (ex == p.x && ey == p.y) return
-        gesture(StrokeDescription(Path().apply { moveTo(p.x, p.y); lineTo(ex, ey) }, 0, 120))
+        val d = scrollDrag?.takeIf { it.busy } ?: screenSize(this).let { s ->
+            ScrollDrag(s.w - 1f, s.h - 1f, 8 * resources.displayMetrics.density).also { scrollDrag = it }
+        }
+        // Trackpad points arrive as tenths of a line: 2 dp of finger per point; a wheel step is a list row's worth.
+        val unit = (if (m.continuous) 20 else 40) * resources.displayMetrics.density
+        d.add(p.x, p.y, m.dx * unit, m.dy * unit, m.continuous, m.end, SystemClock.uptimeMillis())
+        if (!scrolling) {
+            scrolling = true
+            main.post(scrollTick)
+        }
+    }
+
+    private val scrollTick: Runnable = object : Runnable {
+        override fun run() {
+            val d = scrollDrag
+            if (d == null || !d.busy) {
+                scrolling = false
+                return
+            }
+            d.step(SystemClock.uptimeMillis())?.let { s ->
+                val path = Path().apply {
+                    moveTo(s.fromX, s.fromY)
+                    lineTo(s.toX, s.toY)
+                }
+                val prev = scrollStroke
+                val stroke = if (s.first || prev == null) StrokeDescription(path, 0, s.ms, s.more) else prev.continueStroke(path, 0, s.ms, s.more)
+                scrollStroke = stroke.takeIf { s.more }
+                gesture(stroke)
+            }
+            main.postDelayed(this, ScrollDrag.FRAME_MS)
+        }
+    }
+
+    /** Ends a scroll; [lift] its finger, unless a touch is taking over (its new gesture replaces the stroke). */
+    private fun stopScroll(lift: Boolean) {
+        val at = scrollDrag?.cancel()
+        val s = scrollStroke
+        if (lift && s != null && at != null) gesture(s.continueStroke(Path().apply { moveTo(at.first, at.second) }, 0, 1, false))
+        scrollStroke = null
     }
 
     private fun cursor(action: Int, x: Float, y: Float) {

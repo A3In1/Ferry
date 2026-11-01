@@ -23,7 +23,7 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
 |---|---|---|
 | `0x20` | START | `u16 max_size` (long side px, 0 = native), `u32 bitrate` (bps), `u8 flags` (bit0 video; 0 = control only, used by cursor crossing) |
 | `0x10` | TOUCH | `u8 action` (0 down, 1 up, 2 move), `f32 x`, `f32 y` |
-| `0x11` | SCROLL | `f32 x`, `f32 y`, `f32 dx`, `f32 dy` (wheel units; +dy = scroll up) |
+| `0x11` | SCROLL | `f32 x`, `f32 y`, `f32 dx`, `f32 dy` (wheel lines; +dy = scroll up), optional `u8 flags` (bit0 continuous: trackpad deltas incl. momentum, bit1 end: the scroll and its momentum are over; absent = 0, a wheel step) |
 | `0x13` | TEXT | UTF-8 text to insert into the focused field |
 | `0x12` | KEY | `u32 code`: 67 = delete one char, 66 = enter (other Android keycodes ignored for now) |
 | `0x14` | NAV | `u8` 1 back, 2 home, 3 recents, 4 notifications |
@@ -42,6 +42,13 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   (notification the user taps if the activity can't be shown directly); refused → `END 3`.
   START control-only needs only the Accessibility service; if it is off → `END 3 "turn on Ferry control"`.
 - Input messages are ignored unless the Accessibility service is on (caps bit1 tells the Mac).
+- Scrolling: deltas are sent as macOS reports them (so the natural-scrolling setting carries over).
+  The phone plays them as one continued finger drag starting at (x, y), one segment per frame, and
+  lifts after holding still (no fling on top of the Mac's momentum): on `end` (after 40 ms, in case
+  momentum follows the finger lift), after 120 ms without a wheel step or 500 ms without trackpad
+  deltas, and to re-grip when the finger would leave the screen. Trackpad: 2 dp per point; wheel: 40 dp per line.
+- Messages may grow trailing fields; a receiver ignores bytes past what it knows and treats missing
+  optional fields as 0.
 - Video: H.264, no B-frames, realtime priority/low latency where supported, repeat previous frame
   after 100 ms, keyframe every 10 s and on KEYFRAME. Defaults: max_size 1280, 8 Mbps.
 - Rotation: new INFO, encoder restarted at the new size, config + keyframe.

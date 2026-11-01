@@ -29,7 +29,9 @@ private let expected: [Fsp.Message] = [
     #expect(Fsp.keyframe == bytes([0x15, 0, 0, 0, 0]))
     #expect(Fsp.cursor(.hide, 0, 0).prefix(6) == bytes([0x16, 0, 0, 0, 9, 3]))
     #expect(Fsp.text("hé") == bytes([0x13, 0, 0, 0, 3, 0x68, 0xC3, 0xA9]))
-    #expect(Fsp.scroll(0, 0, dx: 0, dy: -1).suffix(4) == bytes([0xBF, 0x80, 0, 0]))
+    #expect(Fsp.scroll(0, 0, dx: 0, dy: -1).suffix(5) == bytes([0xBF, 0x80, 0, 0, 0]))
+    #expect(Fsp.scroll(0, 0, dx: 0, dy: 0, flags: Fsp.scrollContinuous | Fsp.scrollEnd).prefix(5) == bytes([0x11, 0, 0, 0, 17]))
+    #expect(Fsp.scroll(0, 0, dx: 0, dy: 0, flags: 3).last == 3)
 }
 
 @Test func keyPresses() {

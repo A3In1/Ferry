@@ -20,6 +20,9 @@ object Fsp {
     const val CURSOR = 0x16
     const val START = 0x20
 
+    const val SCROLL_CONTINUOUS = 1
+    const val SCROLL_END = 2
+
     const val CAP_VIDEO = 1
     const val CAP_CONTROL = 2
 
@@ -33,7 +36,7 @@ object Fsp {
         val p = when (m) {
             is Msg.Start -> buf(7).putShort(m.maxSize.toShort()).putInt(m.bitrate.toInt()).put(m.flags.toByte())
             is Msg.Touch -> buf(9).put(m.action.toByte()).putFloat(m.x).putFloat(m.y)
-            is Msg.Scroll -> buf(16).putFloat(m.x).putFloat(m.y).putFloat(m.dx).putFloat(m.dy)
+            is Msg.Scroll -> buf(17).putFloat(m.x).putFloat(m.y).putFloat(m.dx).putFloat(m.dy).put(m.flags.toByte())
             is Msg.Text -> m.text.toByteArray().let { buf(it.size).put(it) }
             is Msg.Key -> buf(4).putInt(m.code.toInt())
             is Msg.Nav -> buf(1).put(m.action.toByte())
@@ -56,7 +59,7 @@ object Fsp {
             return when (type) {
                 START -> Msg.Start(b.short.u16(), b.int.u32(), b.get().u8())
                 TOUCH -> Msg.Touch(b.get().u8(), b.float, b.float)
-                SCROLL -> Msg.Scroll(b.float, b.float, b.float, b.float)
+                SCROLL -> Msg.Scroll(b.float, b.float, b.float, b.float, b.opt())
                 TEXT -> Msg.Text(String(p))
                 KEY -> Msg.Key(b.int.u32())
                 NAV -> Msg.Nav(b.get().u8())
@@ -72,6 +75,8 @@ object Fsp {
         }
     }
 
+    /** A trailing byte added later to a message: 0 from older peers that don't send it. */
+    private fun ByteBuffer.opt() = if (hasRemaining()) get().u8() else 0
     private fun Byte.u8() = toInt() and 0xff
     private fun Short.u16() = toInt() and 0xffff
     private fun Int.u32() = toLong() and 0xffffffffL
@@ -84,7 +89,11 @@ sealed class Msg(val type: Int) {
         val video get() = flags and 1 != 0
     }
     data class Touch(val action: Int, val x: Float, val y: Float) : Msg(Fsp.TOUCH)
-    data class Scroll(val x: Float, val y: Float, val dx: Float, val dy: Float) : Msg(Fsp.SCROLL)
+    /** [flags]: [Fsp.SCROLL_CONTINUOUS] trackpad deltas (incl. momentum), [Fsp.SCROLL_END] lift the finger; 0 = a wheel step. */
+    data class Scroll(val x: Float, val y: Float, val dx: Float, val dy: Float, val flags: Int = 0) : Msg(Fsp.SCROLL) {
+        val continuous get() = flags and Fsp.SCROLL_CONTINUOUS != 0
+        val end get() = flags and Fsp.SCROLL_END != 0
+    }
     data class Text(val text: String) : Msg(Fsp.TEXT)
     data class Key(val code: Long) : Msg(Fsp.KEY)
     data class Nav(val action: Int) : Msg(Fsp.NAV)
