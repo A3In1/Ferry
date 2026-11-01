@@ -105,3 +105,79 @@ class ScrollDrag(private val w: Float, private val h: Float, private val margin:
         const val TRACKPAD_IDLE_MS = 500L
     }
 }
+
+/** KEY codes (Android keycodes) and meta bits (docs/screen-protocol.md). */
+object Keys {
+    const val ENTER = 66L
+    const val DEL = 67L
+    const val FORWARD_DEL = 112L
+    const val LEFT = 21L
+    const val RIGHT = 22L
+    const val UP = 19L
+    const val DOWN = 20L
+    const val HOME = 122L
+    const val END = 123L
+
+    const val SHIFT = 1
+    const val ALT = 2
+}
+
+/**
+ * A text field as Accessibility shows it: the text and its selection. [anchor] stays put while
+ * [caret] moves (Shift+arrow); equal = a plain caret. Edits are pure, so a burst of keystrokes is
+ * applied to one snapshot and written back once.
+ */
+data class Field(val text: String, val anchor: Int, val caret: Int) {
+    val start get() = minOf(anchor, caret)
+    val end get() = maxOf(anchor, caret)
+
+    /** Replaces the selection (or inserts at the caret); the caret ends up after [s]. */
+    fun type(s: String): Field = (start + s.length).let { Field(text.substring(0, start) + s + text.substring(end), it, it) }
+
+    /** A KEY as a text edit or caret move; null = not a pure edit (up/down/enter: the caller asks the field). */
+    fun key(code: Long, meta: Int): Field? {
+        val shift = meta and Keys.SHIFT != 0
+        val word = meta and Keys.ALT != 0
+        return when (code) {
+            Keys.DEL -> if (start != end) type("") else remove(if (word) wordBefore(caret) else charBefore(caret), caret)
+            Keys.FORWARD_DEL -> if (start != end) type("") else remove(caret, if (word) wordAfter(caret) else charAfter(caret))
+            Keys.LEFT -> moveTo(if (word) wordBefore(caret) else if (!shift && start != end) start else charBefore(caret), shift)
+            Keys.RIGHT -> moveTo(if (word) wordAfter(caret) else if (!shift && start != end) end else charAfter(caret), shift)
+            Keys.HOME -> moveTo(text.lastIndexOf('\n', caret - 1) + 1, shift)
+            Keys.END -> moveTo(text.indexOf('\n', caret).takeIf { it >= 0 } ?: text.length, shift)
+            else -> null
+        }
+    }
+
+    private fun remove(from: Int, to: Int) = Field(text.substring(0, from) + text.substring(to), from, from)
+
+    private fun moveTo(i: Int, extend: Boolean) = Field(text, if (extend) anchor else i, i)
+
+    // Whole characters (an emoji with modifiers is one), and Mac-style words: skip spaces/punctuation, then the word.
+    private fun charBefore(i: Int) = if (i <= 0) 0 else chars().preceding(i).coerceAtLeast(0)
+    private fun charAfter(i: Int) = if (i >= text.length) text.length else chars().following(i).takeIf { it >= 0 } ?: text.length
+    private fun chars() = java.text.BreakIterator.getCharacterInstance().also { it.setText(text) }
+
+    private fun wordBefore(i: Int): Int {
+        var j = i
+        while (j > 0 && !text[j - 1].isLetterOrDigit()) j--
+        while (j > 0 && text[j - 1].isLetterOrDigit()) j--
+        return j
+    }
+
+    private fun wordAfter(i: Int): Int {
+        var j = i
+        while (j < text.length && !text[j].isLetterOrDigit()) j++
+        while (j < text.length && text[j].isLetterOrDigit()) j++
+        return j
+    }
+
+    companion object {
+        /** From a node's text and selection; no selection (-1) = a caret at the end, the old append behaviour. */
+        fun of(text: String, selStart: Int, selEnd: Int): Field {
+            val n = text.length
+            if (selStart < 0 || selEnd < 0) return Field(text, n, n)
+            return Field(text, selStart.coerceIn(0, n), selEnd.coerceIn(0, n))
+        }
+    }
+}

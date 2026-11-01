@@ -78,3 +78,52 @@ class ScrollDragTest {
         assertFalse(d.busy)
     }
 }
+
+class FieldTest {
+    private fun f(s: String): Field { // "|" marks the caret; "[...]" a selection with the caret at "]"
+        val a = s.indexOf('[')
+        if (a < 0) return s.indexOf('|').let { Field(s.replace("|", ""), it, it) }
+        val e = s.indexOf(']') - 1
+        return Field(s.replace("[", "").replace("]", ""), a, e)
+    }
+
+    @Test
+    fun typesAtTheCaretOrOverTheSelection() {
+        assertEquals(f("heXY|llo"), f("he|llo").type("XY"))
+        assertEquals(f("hX|o"), f("h[ell]o").type("X"))
+        assertEquals(f("hX|o"), Field("hello", 4, 1).type("X")) // backwards selection
+        assertEquals(f("😀a|"), f("😀|").type("a"))
+    }
+
+    @Test
+    fun deleteKeys() {
+        assertEquals(f("hllo").let { Field(it.text, 1, 1) }, f("he|llo").key(Keys.DEL, 0))
+        assertEquals(f("h|o"), f("h[ell]o").key(Keys.DEL, 0))
+        assertEquals(f("|hello"), f("|hello").key(Keys.DEL, 0))
+        assertEquals(f("a|"), f("a👍🏽|").key(Keys.DEL, 0)) // the whole emoji, skin tone included
+        assertEquals(f("he|lo"), f("he|llo").key(Keys.FORWARD_DEL, 0))
+        assertEquals(f("hello |"), f("hello world|").key(Keys.DEL, Keys.ALT))
+        assertEquals(f("hello |"), f("hello |world").key(Keys.FORWARD_DEL, Keys.ALT))
+    }
+
+    @Test
+    fun caretMoves() {
+        assertEquals(f("h|ello"), f("he|llo").key(Keys.LEFT, 0))
+        assertEquals(f("h|ello"), f("h[ell]o").key(Keys.LEFT, 0)) // collapses to the start
+        assertEquals(f("hell|o"), f("h[ell]o").key(Keys.RIGHT, 0))
+        assertEquals(Field("hello", 2, 3), f("he|llo").key(Keys.RIGHT, Keys.SHIFT))
+        assertEquals(f("hello |world"), f("hello wor|ld").key(Keys.LEFT, Keys.ALT))
+        assertEquals(f("ab\n|cd\nef"), f("ab\ncd|\nef").key(Keys.HOME, 0))
+        assertEquals(f("ab\ncd|\nef"), f("ab\n|cd\nef").key(Keys.END, 0))
+        assertEquals(f("|ab"), f("|ab").key(Keys.LEFT, 0))
+        assertEquals(null, f("a|b").key(Keys.UP, 0))
+        assertEquals(null, f("a|b").key(Keys.ENTER, 0))
+    }
+
+    @Test
+    fun noSelectionMeansTheEnd() {
+        assertEquals(f("abc|"), Field.of("abc", -1, -1))
+        assertEquals(f("abX|"), Field.of("abc", -1, -1).key(Keys.DEL, 0)!!.type("X"))
+        assertEquals(Field("abc", 3, 3), Field.of("abc", 9, 9))
+    }
+}

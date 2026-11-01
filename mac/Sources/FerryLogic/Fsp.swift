@@ -30,24 +30,37 @@ public enum Fsp {
     public static func scroll(_ x: Float, _ y: Float, dx: Float, dy: Float, flags: UInt8 = 0) -> Data {
         message(0x11, be(x) + be(y) + be(dx) + be(dy) + [flags])
     }
-    public static func key(_ code: UInt32) -> Data { message(0x12, be(code)) }
+    /// KEY meta bits: shift extends the selection, option works by word.
+    public static let keyShift: UInt8 = 1, keyOption: UInt8 = 2
+
+    public static func key(_ code: UInt32, meta: UInt8 = 0) -> Data { message(0x12, be(code) + [meta]) }
     public static func text(_ s: String) -> Data { message(0x13, Data(s.utf8)) }
     public static func nav(_ n: Nav) -> Data { message(0x14, [n.rawValue]) }
     public static let keyframe = message(0x15, Data())
     public static func cursor(_ a: Pointer, _ x: Float, _ y: Float) -> Data { message(0x16, [a.rawValue] + be(x) + be(y)) }
 
-    /// A Mac key press as KEY (delete, return) or TEXT; nil for keys with nothing to type (arrows, tab, F-keys).
-    /// Callers drop ⌘/⌃ combinations first.
-    public static func keyPress(keyCode: UInt16, characters: String?) -> Data? {
-        switch keyCode {
-        case 51: return key(67)
-        case 36, 76: return key(66)
-        default:
-            guard let c = characters, !c.isEmpty,
-                  !c.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F || (0xF700...0xF8FF).contains($0.value) })
-            else { return nil }
-            return text(c)
+    /// A Mac key press as KEY (editing and caret keys, as Android keycodes) or TEXT; nil for keys with
+    /// nothing to send (tab, F-keys). `command` turns ←/→ into Home/End; callers drop other ⌘/⌃ combinations.
+    public static func keyPress(keyCode: UInt16, characters: String?, shift: Bool = false, option: Bool = false,
+                                command: Bool = false) -> Data? {
+        let meta = (shift ? keyShift : 0) | (option && !command ? keyOption : 0)
+        let android: UInt32? = switch keyCode {
+        case 51: 67 // delete → DEL
+        case 117: 112 // forward delete
+        case 36, 76: 66 // return, enter
+        case 123: command ? 122 : 21 // ← (⌘← = start of line)
+        case 124: command ? 123 : 22 // →
+        case 125: command ? 123 : 20 // ↓
+        case 126: command ? 122 : 19 // ↑
+        case 115: 122 // home
+        case 119: 123 // end
+        default: nil
         }
+        if let android { return key(android, meta: meta) }
+        guard !command, let c = characters, !c.isEmpty,
+              !c.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F || (0xF700...0xF8FF).contains($0.value) })
+        else { return nil }
+        return text(c)
     }
 
     public static func message(_ type: UInt8, _ payload: some Sequence<UInt8>) -> Data {

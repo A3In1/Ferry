@@ -101,8 +101,7 @@ import FerryLogic
         case .keyDown:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
             if code == 53 { leave(); break } // Escape
-            guard event.flags.isDisjoint(with: [.maskCommand, .maskControl]),
-                  let m = Fsp.keyPress(keyCode: code, characters: NSEvent(cgEvent: event)?.characters) else { break }
+            guard let e = NSEvent(cgEvent: event), let m = keyMessage(e) else { break }
             s.send(m)
         default: break // right/other buttons, key up: swallowed
         }

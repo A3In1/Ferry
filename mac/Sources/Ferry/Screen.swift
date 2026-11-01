@@ -364,7 +364,7 @@ final class ScreenView: NSView {
     }
 
     override func keyDown(with e: NSEvent) {
-        if let m = Fsp.keyPress(keyCode: e.keyCode, characters: e.characters) { send(m) } else { super.keyDown(with: e) }
+        if let m = keyMessage(e) { send(m) } else { super.keyDown(with: e) }
     }
 
     /// No main menu in a menu-bar app, so the window's shortcuts live here.
@@ -402,6 +402,14 @@ struct Wheel {
         starts = !precise || e.phase.contains(.began) || e.phase.contains(.mayBegin)
         if dx == 0, dy == 0, !end { return nil }
     }
+}
+
+/// KEY/TEXT for a key press; ⌃ combinations and ⌘ ones other than ⌘-arrows send nothing.
+func keyMessage(_ e: NSEvent) -> Data? {
+    let m = e.modifierFlags
+    guard !m.contains(.control) else { return nil }
+    return Fsp.keyPress(keyCode: e.keyCode, characters: e.characters, shift: m.contains(.shift), option: m.contains(.option),
+                        command: m.contains(.command))
 }
 
 extension AppModel {

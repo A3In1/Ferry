@@ -24,7 +24,6 @@ private let expected: [Fsp.Message] = [
     // Writer layout matches the spec byte for byte.
     #expect(Fsp.start(video: true) == bytes([0x20, 0, 0, 0, 7, 0x05, 0x00, 0x00, 0x7A, 0x12, 0x00, 1]))
     #expect(Fsp.touch(.move, 0.5, 1) == bytes([0x10, 0, 0, 0, 9, 2, 0x3F, 0, 0, 0, 0x3F, 0x80, 0, 0]))
-    #expect(Fsp.key(67) == bytes([0x12, 0, 0, 0, 4, 0, 0, 0, 67]))
     #expect(Fsp.nav(.home) == bytes([0x14, 0, 0, 0, 1, 2]))
     #expect(Fsp.keyframe == bytes([0x15, 0, 0, 0, 0]))
     #expect(Fsp.cursor(.hide, 0, 0).prefix(6) == bytes([0x16, 0, 0, 0, 9, 3]))
@@ -36,10 +35,16 @@ private let expected: [Fsp.Message] = [
 
 @Test func keyPresses() {
     #expect(Fsp.keyPress(keyCode: 51, characters: "\u{7F}") == Fsp.key(67))
+    #expect(Fsp.keyPress(keyCode: 51, characters: "\u{7F}", option: true) == Fsp.key(67, meta: Fsp.keyOption)) // delete word
     #expect(Fsp.keyPress(keyCode: 36, characters: "\r") == Fsp.key(66))
     #expect(Fsp.keyPress(keyCode: 0, characters: "a") == Fsp.text("a"))
-    #expect(Fsp.keyPress(keyCode: 123, characters: "\u{F702}") == nil) // left arrow
+    #expect(Fsp.keyPress(keyCode: 0, characters: "a", command: true) == nil)
+    #expect(Fsp.keyPress(keyCode: 123, characters: "\u{F702}") == Fsp.key(21)) // left arrow
+    #expect(Fsp.keyPress(keyCode: 124, characters: "\u{F703}", shift: true) == Fsp.key(22, meta: Fsp.keyShift))
+    #expect(Fsp.keyPress(keyCode: 123, characters: "\u{F702}", shift: true, option: true, command: true) == Fsp.key(122, meta: Fsp.keyShift))
+    #expect(Fsp.keyPress(keyCode: 117, characters: "\u{F728}") == Fsp.key(112))
     #expect(Fsp.keyPress(keyCode: 48, characters: "\t") == nil)
+    #expect(Fsp.key(67) == bytes([0x12, 0, 0, 0, 5, 0, 0, 0, 67, 0]))
 }
 
 @Test func fspSplitChunks() throws {

@@ -38,7 +38,7 @@ object Fsp {
             is Msg.Touch -> buf(9).put(m.action.toByte()).putFloat(m.x).putFloat(m.y)
             is Msg.Scroll -> buf(17).putFloat(m.x).putFloat(m.y).putFloat(m.dx).putFloat(m.dy).put(m.flags.toByte())
             is Msg.Text -> m.text.toByteArray().let { buf(it.size).put(it) }
-            is Msg.Key -> buf(4).putInt(m.code.toInt())
+            is Msg.Key -> buf(5).putInt(m.code.toInt()).put(m.meta.toByte())
             is Msg.Nav -> buf(1).put(m.action.toByte())
             Msg.Keyframe -> buf(0)
             is Msg.Cursor -> buf(9).put(m.action.toByte()).putFloat(m.x).putFloat(m.y)
@@ -61,7 +61,7 @@ object Fsp {
                 TOUCH -> Msg.Touch(b.get().u8(), b.float, b.float)
                 SCROLL -> Msg.Scroll(b.float, b.float, b.float, b.float, b.opt())
                 TEXT -> Msg.Text(String(p))
-                KEY -> Msg.Key(b.int.u32())
+                KEY -> Msg.Key(b.int.u32(), b.opt())
                 NAV -> Msg.Nav(b.get().u8())
                 KEYFRAME -> Msg.Keyframe
                 CURSOR -> Msg.Cursor(b.get().u8(), b.float, b.float)
@@ -95,7 +95,8 @@ sealed class Msg(val type: Int) {
         val end get() = flags and Fsp.SCROLL_END != 0
     }
     data class Text(val text: String) : Msg(Fsp.TEXT)
-    data class Key(val code: Long) : Msg(Fsp.KEY)
+    /** [code]: an Android keycode ([Keys]); [meta]: [Keys.SHIFT], [Keys.ALT]. */
+    data class Key(val code: Long, val meta: Int = 0) : Msg(Fsp.KEY)
     data class Nav(val action: Int) : Msg(Fsp.NAV)
     data object Keyframe : Msg(Fsp.KEYFRAME)
     data class Cursor(val action: Int, val x: Float, val y: Float) : Msg(Fsp.CURSOR)

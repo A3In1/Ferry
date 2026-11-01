@@ -41,6 +41,7 @@ class ControlService : AccessibilityService() {
     private var scrollDrag: ScrollDrag? = null
     private var scrollStroke: StrokeDescription? = null
     private var scrolling = false
+    private val edits = mutableListOf<Msg>()
 
     override fun onServiceConnected() {
         instance.value = this
@@ -59,13 +60,17 @@ class ControlService : AccessibilityService() {
     /** From the session's reader thread; applied in order on the main thread. */
     fun input(m: Msg) {
         main.post {
+            if (m is Msg.Text || m is Msg.Key) {
+                edits += m
+                if (edits.size == 1) main.postDelayed(applyEdits, EDIT_BATCH_MS)
+                return@post
+            }
+            applyEdits.run() // typing lands before the tap or nav that follows it
             when (m) {
                 is Msg.Touch -> touch(m.action, m.x, m.y)
                 is Msg.Cursor -> cursor(m.action, m.x, m.y)
                 is Msg.Scroll -> scroll(m)
                 is Msg.Nav -> NAV[m.action]?.let(::performGlobalAction)
-                is Msg.Text -> edit { it + m.text }
-                is Msg.Key -> key(m.code)
                 else -> {}
             }
         }
@@ -73,6 +78,7 @@ class ControlService : AccessibilityService() {
 
     /** Session over: hide the cursor and lift a finger that's still down. */
     fun reset() = main.post {
+        edits.clear()
         stopScroll(lift = true)
         if (stroke != null) segment(last, SystemClock.uptimeMillis(), false)
         down = null
@@ -211,27 +217,68 @@ class ControlService : AccessibilityService() {
         touch(action, x, y)
     }
 
-    // shortcut: TEXT appends at the end (not at the caret) and can't edit password fields, whose text is hidden from us;
-    // use ACTION_SET_SELECTION + caret-aware edits if users type mid-text.
-    private fun edit(change: (String) -> String?) {
-        val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable } ?: return
-        val now = if (n.isShowingHintText) "" else n.text?.toString().orEmpty()
-        val next = change(now) ?: return
-        val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next) }
-        n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    /**
+     * TEXT/KEY typed within [EDIT_BATCH_MS] of each other: applied to one snapshot of the focused field at
+     * its caret/selection, then written back with one SET_TEXT (only if the text changed) and SET_SELECTION.
+     */
+    private val applyEdits: Runnable = object : Runnable {
+        override fun run() {
+            main.removeCallbacks(this) // run early (a tap followed the typing): drop the timer
+            if (edits.isEmpty()) return
+            // shortcut: password fields hide their text from us, so typing there replaces it; there's no safe way to read it.
+            val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable } ?: return edits.clear()
+            val hint = n.isShowingHintText
+            val was = if (hint) Field("", 0, 0) else Field.of(n.text?.toString().orEmpty(), n.textSelectionStart, n.textSelectionEnd)
+            var f = was
+            while (edits.isNotEmpty()) {
+                val m = edits.removeAt(0)
+                val next = when (m) {
+                    is Msg.Text -> f.type(m.text)
+                    is Msg.Key -> f.key(m.code, m.meta) ?: if (m.code == Keys.ENTER && n.isMultiLine) f.type("\n") else null
+                    else -> f
+                }
+                if (next != null) {
+                    f = next
+                    continue
+                }
+                // Not a text edit (up/down, Enter in a one-line field): write what we have, then let the field act;
+                // the rest goes on a fresh snapshot.
+                write(n, was, f)
+                if (m is Msg.Key) fieldKey(n, m)
+                if (edits.isNotEmpty()) main.post(this)
+                return
+            }
+            write(n, was, f)
+        }
     }
 
-    private fun key(code: Long) {
-        when (code) {
-            67L -> edit { if (it.isEmpty()) null else it.substring(0, it.offsetByCodePoints(it.length, -1)) }
-            66L -> {
-                val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable } ?: return
-                if (Build.VERSION.SDK_INT >= 30) {
-                    n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
-                } else if (n.isMultiLine) {
-                    edit { it + "\n" }
-                }
-            }
+    private fun write(n: AccessibilityNodeInfo, was: Field, f: Field) {
+        if (f == was) return
+        val old = was.text
+        if (f.text != old) {
+            val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, f.text) }
+            if (!n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) return
+        }
+        // SET_TEXT leaves the caret at the end; skip the second call when that's where it belongs.
+        if (f.text != old && f.anchor == f.text.length && f.caret == f.text.length) return
+        val sel = Bundle().apply {
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, f.anchor)
+            putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, f.caret)
+        }
+        n.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel)
+    }
+
+    /** Keys only the field can do: Enter (its IME action), up/down a line. */
+    private fun fieldKey(n: AccessibilityNodeInfo, m: Msg.Key) {
+        when (m.code) {
+            Keys.ENTER -> if (Build.VERSION.SDK_INT >= 30) n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            Keys.UP, Keys.DOWN -> n.performAction(
+                if (m.code == Keys.UP) AccessibilityNodeInfo.ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY else AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY,
+                Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_MOVEMENT_GRANULARITY_INT, AccessibilityNodeInfo.MOVEMENT_GRANULARITY_LINE)
+                    putBoolean(AccessibilityNodeInfo.ACTION_ARGUMENT_EXTEND_SELECTION_BOOLEAN, m.meta and Keys.SHIFT != 0)
+                },
+            )
         }
     }
 
@@ -263,6 +310,9 @@ class ControlService : AccessibilityService() {
     companion object {
         /** Bound by the system = the user turned "Ferry control" on. */
         val instance = MutableStateFlow<ControlService?>(null)
+
+        /** Keystrokes closer together than this are applied as one edit. */
+        const val EDIT_BATCH_MS = 8L
 
         private val NAV = mapOf(
             1 to GLOBAL_ACTION_BACK,
