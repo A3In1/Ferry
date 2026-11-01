@@ -1,4 +1,4 @@
-# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth · Phase 4: screen · Phase 5: messages + calls · Phase 6: files, Wi-Fi, Do Not Disturb)
+# Ferry for Android (Phase 1: pairing + file sharing · Phase 2: everyday sync · Phase 3: Bluetooth · Phase 4: screen · Phase 5: messages + calls · Phase 6: files, Wi-Fi, Do Not Disturb · Phase 7: internet relay)
 
 Compose app over the shared Rust core (`ffi/`, UniFFI → Kotlin package `dev.ferry.core`, via JNA).
 Application id `dev.ferry.android` in both flavors (`play`, `full`). They differ only in Phase 6 file browsing:
@@ -269,3 +269,15 @@ open only (no WPA3/enterprise/hidden networks).
    From the Mac turn DND on before granting access → "Allow Ferry to change Do Not Disturb" notification → tap → turn Ferry on →
    ask again from the Mac → DND turns on (Priority only, log `dnd on=true from Mac`) and the Mac gets no echo; off → back to All.
    Switch off → DND changes aren't sent and Mac requests are ignored.
+
+## Phase 7: internet relay (off by default)
+
+Ferry → **Internet relay** → **Edit**: an https URL of your own relay server lets the phone reach a paired Mac on a
+different network. The relay only forwards packets that stay end-to-end encrypted between the two devices, and its own
+TLS certificate is always verified. **Save** / **Turn off** stores the setting in the node data dir (`files/ferry/relay`)
+and restarts the node to apply it (status goes Stopped → Starting… → Running; an open mirroring session ends). A bad URL
+is refused with a toast. Set the same relay on the Mac.
+
+Self-signed relay certificate: put its root as `relay-ca.pem` (PEM or DER) in the data dir, then save the relay again
+(or reopen Ferry after Stop) so the node reloads it. There is no UI for this yet; on a debug build:
+`adb push relay-ca.pem /data/local/tmp/ && adb shell run-as dev.ferry.android cp /data/local/tmp/relay-ca.pem files/ferry/`.

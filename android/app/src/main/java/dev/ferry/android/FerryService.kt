@@ -126,18 +126,30 @@ class FerryService : Service() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
-        Screen.stop(Fsp.END_STOPPED, "Ferry stopped on the phone")
-        job?.cancel()
+        stopNode("Ferry stopped on the phone")
         unregisterReceiver(batteryChanged)
         unregisterReceiver(bluetoothChanged)
         unregisterReceiver(Dnd.changed)
         Calls.stop(this)
         // Only Stop ends the service, and Stop means stop: no Bluetooth wake-ups until the app is opened again.
         Ble.stopScan(this)
-        Ble.stopBridge()
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(networkChanged) }
         checkIn?.cancel()
         Ringer.stop(this)
+        super.onDestroy()
+    }
+
+    /** Applies a saved node setting (the internet relay): same node, shut down and started again. Main thread. */
+    fun restart() {
+        stopNode("Ferry restarted on the phone")
+        job = Ferry.scope.launch(Dispatchers.Main) { run() } // run() waits for the old node's shutdown
+    }
+
+    /** Everything tied to the running node; the service's receivers and Bluetooth scan stay. */
+    private fun stopNode(why: String) {
+        Screen.stop(Fsp.END_STOPPED, why)
+        job?.cancel()
+        Ble.stopBridge()
         presence?.stop()
         presence = null
         Ferry.usbListening.value = false
@@ -146,7 +158,6 @@ class FerryService : Service() {
         Ferry.node.getAndUpdate { null }?.let { node ->
             Ferry.shutdownJob = Ferry.scope.launch { node.use { it.shutdown() } }
         }
-        super.onDestroy()
     }
 
     private suspend fun run() {
