@@ -187,6 +187,7 @@ mod tests {
             presence_key: hex::encode(k),
             paired_at_unix: 0,
             last_addrs: vec![],
+            last_relay: None,
         };
         let peers = vec![peer("one", &k1), peer("two", &k2)];
         let nonce = [9u8; 8];

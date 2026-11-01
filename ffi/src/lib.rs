@@ -1004,6 +1004,17 @@ impl FerryNode {
         Ok(self.node.check_in(&peer_id).await?)
     }
 
+    /// The internet relay URL in use (None = relay off).
+    pub fn relay_url(&self) -> Option<String> {
+        self.node.relay_url()
+    }
+
+    /// Save the relay URL (https only; None or "" turns the relay off). Applies after the
+    /// node restarts. The relay only ever forwards end-to-end encrypted packets.
+    pub fn set_relay_url(&self, url: Option<String>) -> Result<()> {
+        Ok(self.node.set_relay_url(url.as_deref())?)
+    }
+
     /// Mac: open a screen stream (mirroring / control) to a paired phone.
     pub async fn open_screen(&self, peer_id: String) -> Result<Arc<ScreenStream>> {
         Ok(Arc::new(self.node.open_screen(&peer_id).await?.into()))

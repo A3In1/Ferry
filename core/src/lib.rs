@@ -8,6 +8,7 @@ pub mod file;
 pub mod identity;
 pub mod node;
 pub mod pairing;
+pub mod relay;
 pub mod sanitize;
 pub mod trust;
 pub mod usb;

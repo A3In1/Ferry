@@ -10,6 +10,9 @@ message Hello {
   // Sender's current LAN addresses ("ip:port"). Learned over any path (e.g. USB) so the
   // other side can reach us over Wi-Fi later without mDNS. Dial hints only; TLS authenticates.
   repeated string addrs = 4;
+  // Sender's internet relay URL ("" = relay off). Lets paired devices find each other on
+  // different networks; the relay only ever carries end-to-end encrypted packets.
+  string relay = 5;
 }
 
 // --- Pairing (ALPN "ferry/pair/1") ---

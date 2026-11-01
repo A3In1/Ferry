@@ -75,6 +75,7 @@ mod tests {
             device_name: "Mac".into(),
             channels: vec![0, 1],
             addrs: vec!["192.168.1.2:4000".into()],
+            relay: "https://relay.example.com/".into(),
         };
         write_msg(&mut a, &hello).await.unwrap();
         assert_eq!(read_prefix(&mut b).await.unwrap(), CH_FILE);

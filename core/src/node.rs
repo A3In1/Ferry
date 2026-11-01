@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail, ensure};
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::endpoint::{Connection, Incoming, IncomingAddr, PortmapperConfig, presets};
 pub use iroh::endpoint::{RecvStream, SendStream};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, TransportAddr};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -28,6 +28,7 @@ use crate::channel::{
 use crate::file::{self, AcceptFn, EventSink, Receiver, SendReport};
 use crate::pairing::{self, Me, PairedPeer, TICKET_TTL, Ticket};
 use crate::proto::{Event, Hello};
+use crate::relay;
 use crate::trust::{TrustStore, TrustedPeer};
 use crate::{ALPN_PAIR, ALPN_SESSION, PROTOCOL_VERSION, discovery, identity};
 
@@ -97,6 +98,9 @@ const MAX_TICKET_ADDRS: usize = 6;
 
 pub struct Node {
     pub(crate) endpoint: Endpoint,
+    /// Our internet relay, if the user configured one (see [`relay`]).
+    relay: Option<RelayUrl>,
+    data_dir: PathBuf,
     lookup: MemoryLookup,
     /// Only live USB shim addresses; iroh merges it with `lookup`.
     pub(crate) usb_lookup: MemoryLookup,
@@ -131,18 +135,27 @@ impl Node {
         let trust = TrustStore::load(&cfg.data_dir)?;
         let lookup = MemoryLookup::new();
         let usb_lookup = MemoryLookup::with_provenance("usb");
+        let relay = relay::load(&cfg.data_dir).unwrap_or_else(|e| {
+            warn!("relay setting ignored: {e:#}");
+            None
+        });
         for p in trust.list() {
             if let Ok(id) = identity::parse_device_id(&p.id) {
-                lookup.add_endpoint_info(addr_of(id, &p.last_addrs));
+                lookup.add_endpoint_info(known_addr(id, p, relay.is_some()));
             }
         }
-        // Minimal = crypto provider only: no n0 DNS/pkarr lookup; relays and UPnP off.
+        // Minimal = crypto provider only: no n0 DNS/pkarr lookup; UPnP off; relays only our own.
         // Default IP transports bind 0.0.0.0 and [::] (v6 may fail harmlessly).
         let builder = |port: u16| -> Result<iroh::endpoint::Builder> {
-            Ok(Endpoint::builder(presets::Minimal)
-                .secret_key(ident.secret_key.clone())
+            let b = Endpoint::builder(presets::Minimal);
+            let b = match &relay {
+                Some((url, ca)) => b
+                    .relay_mode(RelayMode::Custom(RelayMap::from(url.clone())))
+                    .ca_tls_config(ca.clone()),
+                None => b.relay_mode(RelayMode::Disabled),
+            };
+            Ok(b.secret_key(ident.secret_key.clone())
                 .alpns(vec![ALPN_SESSION.to_vec(), ALPN_PAIR.to_vec()])
-                .relay_mode(RelayMode::Disabled)
                 .portmapper_config(PortmapperConfig::Disabled)
                 .address_lookup(lookup.clone())
                 .address_lookup(usb_lookup.clone())
@@ -167,6 +180,8 @@ impl Node {
         };
         let node = Arc::new(Node {
             endpoint,
+            relay: relay.map(|(url, _)| url),
+            data_dir: cfg.data_dir.clone(),
             lookup,
             usb_lookup,
             usb: Mutex::default(),
@@ -486,6 +501,11 @@ impl Node {
                 CH_SCREEN.into(),
             ],
             addrs: self.lan_addrs().iter().map(ToString::to_string).collect(),
+            relay: self
+                .relay
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
         }
     }
 
@@ -509,6 +529,33 @@ impl Node {
             self.lookup.add_endpoint_info(addr_of(id, &addrs));
             self.remember_addrs(id, &addrs);
         }
+        // Only with a relay of our own: dialing someone else's relay would leave our network
+        // without the user having turned the relay on.
+        if self.relay.is_some()
+            && let Ok(url) = relay::parse(&h.relay)
+        {
+            let addr = EndpointAddr::from_parts(id, [TransportAddr::Relay(url.clone())]);
+            self.lookup.add_endpoint_info(addr);
+            let mut trust = self.trust.lock().unwrap();
+            if let Some(mut p) = trust.get(&id.to_z32()).cloned()
+                && p.last_relay.as_deref() != Some(url.as_str())
+            {
+                p.last_relay = Some(url.to_string());
+                if let Err(e) = trust.upsert(p) {
+                    warn!("save peer relay: {e:#}");
+                }
+            }
+        }
+    }
+
+    /// The configured internet relay URL, if any.
+    pub fn relay_url(&self) -> Option<String> {
+        self.relay.as_ref().map(ToString::to_string)
+    }
+
+    /// Saves (None/empty: clears) the relay URL; it takes effect when the node next starts.
+    pub fn set_relay_url(&self, url: Option<&str>) -> Result<()> {
+        relay::save(&self.data_dir, url)
     }
 
     /// Parses `peer_id` and checks it is paired.
@@ -535,6 +582,7 @@ impl Node {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64),
             last_addrs: addrs,
+            last_relay: None,
         };
         self.trust.lock().unwrap().upsert(peer.clone())?;
         self.lookup.add_endpoint_info(addr_of(id, &peer.last_addrs));
@@ -769,6 +817,18 @@ fn check_hello(h: Hello) -> Result<Hello> {
         h.protocol_version
     );
     Ok(h)
+}
+
+/// Everything we remember about reaching a paired peer; its relay only if ours is on.
+fn known_addr(id: EndpointId, p: &TrustedPeer, relay_on: bool) -> EndpointAddr {
+    let relay = (p.last_relay.as_deref())
+        .filter(|_| relay_on)
+        .and_then(|u| relay::parse(u).ok());
+    EndpointAddr::from_parts(
+        id,
+        (p.last_addrs.iter().copied().map(TransportAddr::Ip))
+            .chain(relay.map(TransportAddr::Relay)),
+    )
 }
 
 pub(crate) fn addr_of(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
