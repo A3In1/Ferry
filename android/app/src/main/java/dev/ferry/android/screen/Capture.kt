@@ -8,12 +8,12 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
-import androidx.core.os.bundleOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
@@ -51,7 +51,7 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
     @Volatile private var codec: MediaCodec? = null
 
     fun keyframe() {
-        runCatching { codec?.setParameters(bundleOf(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME to 0)) }
+        runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
     }
 
     suspend fun run(send: suspend (Msg) -> Unit) {

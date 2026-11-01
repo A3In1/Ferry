@@ -30,7 +30,8 @@ object Ringer {
         Notifs.ringing(app, from)
         if (player != null) return
         val audio = app.getSystemService(AudioManager::class.java)
-        savedVolume = audio.getStreamVolume(AudioManager.STREAM_ALARM)
+        // Already raised by an earlier ring whose sound failed (player stayed null): keep the user's level.
+        if (savedVolume < 0) savedVolume = audio.getStreamVolume(AudioManager.STREAM_ALARM)
         runCatching { audio.setStreamVolume(AudioManager.STREAM_ALARM, audio.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0) }
         val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)

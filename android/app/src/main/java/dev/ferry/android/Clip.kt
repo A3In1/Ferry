@@ -30,7 +30,7 @@ object Clip {
             text == fromMac -> "That came from your Mac"
             else -> null
         }
-        Log.i(CLIP_TAG, "send clipboard: ${why ?: "ok"}")
+        Log.w(CLIP_TAG, "send clipboard: ${why ?: "ok"}")
         if (why != null) return Ferry.toast(ctx, why)
         Ferry.sendEvent(ctx, FfiEvent.Clipboard(text ?: return), "Clipboard sent to Mac")
     }
@@ -45,11 +45,10 @@ object Clip {
 
     /** For the notification button: the main screen (some OEMs, e.g. vivo, block invisible activities
      * started from notifications), which reads the clipboard on focus and steps back. */
-    fun pendingIntent(ctx: Context): PendingIntent = PendingIntent.getActivity(
+    fun pendingIntent(ctx: Context): PendingIntent = Notifs.activity(
         ctx, 1,
         Intent(ctx, MainActivity::class.java).putExtra(EXTRA_SEND, true)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 }
 
@@ -62,18 +61,16 @@ class ClipActivity : Activity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        Log.i(CLIP_TAG, "clip activity focus=$hasFocus")
+        Log.w(CLIP_TAG, "clip activity focus=$hasFocus")
         if (!hasFocus || isFinishing || done) return
         done = true
         // Some OEM builds grant clipboard access a moment after focus: retry once if empty.
-        val text = read() ?: return window.decorView.postDelayed({ finishWith(read()) }, 300).let {}
-        finishWith(text)
+        val text = Clip.read(this)
+        if (text != null) finishWith(text) else window.decorView.postDelayed({ finishWith(Clip.read(this)) }, 300)
     }
 
-    private fun read(): String? = Clip.read(this)
-
     private fun finishWith(text: String?) {
-        Log.i(CLIP_TAG, "clip activity read ${text?.length ?: -1} chars")
+        Log.w(CLIP_TAG, "clip activity read ${text?.length ?: -1} chars")
         Clip.send(this, text)
         finish()
     }

@@ -33,6 +33,7 @@ class FerryListener : NotificationListenerService() {
     private var top: MediaController? = null
     private var lastPlaying: FfiEvent? = null
     private var mediaPending = false
+    private val labels = HashMap<String, String>() // package -> app label
 
     private val component get() = ComponentName(this, FerryListener::class.java)
 
@@ -169,10 +170,12 @@ class FerryListener : NotificationListenerService() {
         }
     }
 
-    private fun label(pkg: String): String = try {
-        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
-    } catch (e: Exception) {
-        pkg // not visible to us (see <queries> in the manifest)
+    private fun label(pkg: String): String = labels.getOrPut(pkg) {
+        try {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (e: Exception) {
+            pkg // not visible to us (see <queries> in the manifest)
+        }
     }
 
     companion object {

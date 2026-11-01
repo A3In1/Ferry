@@ -115,18 +115,18 @@ object Calls {
 
     /** Newest first. */
     fun log(ctx: Context, limit: Int): FfiEvent.CallLog {
-        val n = if (limit <= 0) 50 else limit.coerceAtMost(500)
+        val n = rowLimit(limit, 50, 500)
+        val names = Names.lookup(ctx)
         val out = ArrayList<FfiCallEntry>()
-        ctx.contentResolver.query(
+        ctx.eachRow(
             CallLog.Calls.CONTENT_URI,
             arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME, CallLog.Calls.DATE, CallLog.Calls.DURATION, CallLog.Calls.TYPE),
-            null, null, "${CallLog.Calls.DATE} DESC",
-        )?.use { cur ->
-            while (out.size < n && cur.moveToNext()) {
-                val number = cur.getString(0).orEmpty()
-                val name = cur.getString(1)?.takeIf { it.isNotBlank() } ?: Names.of(ctx, number)
-                out += FfiCallEntry(number, name, cur.getLong(2), cur.getLong(3).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), kindOf(cur.getInt(4)))
-            }
+            sort = "${CallLog.Calls.DATE} DESC",
+        ) { c ->
+            val number = c.getString(0).orEmpty()
+            val name = c.getString(1)?.takeIf { it.isNotBlank() } ?: names(number)
+            out += FfiCallEntry(number, name, c.getLong(2), c.getLong(3).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), kindOf(c.getInt(4)))
+            out.size < n
         }
         return FfiEvent.CallLog(out)
     }

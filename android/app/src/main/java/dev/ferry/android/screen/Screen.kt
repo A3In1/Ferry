@@ -28,6 +28,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelChildren
@@ -68,7 +69,7 @@ class Ask {
 }
 
 class Session(private val ctx: Context, private val peerId: String, private val stream: ScreenStream) {
-    private val mac = Ferry.peers.value.firstOrNull { it.id == peerId }?.name ?: "your Mac"
+    private val mac = Ferry.peerName(peerId)
     private val lock = Mutex()
     private var opened = false
     @Volatile private var ended = false
@@ -77,6 +78,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
     @Volatile private var projection: MediaProjection? = null
 
     // ATOMIC: runs (and finishes the stream) even if ended before it was dispatched.
+    @OptIn(DelicateCoroutinesApi::class)
     private val job = Ferry.scope.launch(start = CoroutineStart.ATOMIC) {
         try {
             Screen.turn.withLock { serve() }

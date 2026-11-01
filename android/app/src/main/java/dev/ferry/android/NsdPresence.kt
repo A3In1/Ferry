@@ -10,7 +10,9 @@ import androidx.annotation.RequiresApi
 import dev.ferry.core.FerryNode
 import dev.ferry.core.FfiTxt
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
@@ -78,7 +80,7 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
             node.presenceTxt().forEach { setAttribute(it.key, it.value) }
         }
         val l = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(info: NsdServiceInfo) { Log.i(TAG, "advertising ${info.serviceName}") }
+            override fun onServiceRegistered(info: NsdServiceInfo) { Log.w(TAG, "advertising ${info.serviceName}") }
             override fun onRegistrationFailed(info: NsdServiceInfo, err: Int) { Log.w(TAG, "NSD register failed: $err") }
             override fun onServiceUnregistered(info: NsdServiceInfo) {}
             override fun onUnregistrationFailed(info: NsdServiceInfo, err: Int) {}
@@ -126,7 +128,8 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
             override fun onServiceInfoCallbackUnregistered() {}
         }
         if (infoCallbacks.putIfAbsent(info.serviceName, cb) != null) return
-        nsd.registerServiceInfoCallback(info, ctx.mainExecutor, cb)
+        // Not the main thread: addPeerAddrs can write the trust store to disk.
+        nsd.registerServiceInfoCallback(info, Dispatchers.IO.asExecutor(), cb)
     }
 
     @RequiresApi(34)

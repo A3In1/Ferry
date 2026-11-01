@@ -40,6 +40,8 @@ object Transfers {
         }
     }
 
+    private fun key(tid: String, index: UInt) = "$tid/$index"
+
     private fun name(tid: String, index: UInt): String =
         incoming[tid]?.getOrNull(index.toInt()) ?: "file ${index + 1u}"
 
@@ -52,7 +54,7 @@ object Transfers {
             }
 
             is FfiFileEvent.Progress -> {
-                val key = "${e.transferId}/${e.index}"
+                val key = key(e.transferId, e.index)
                 val now = SystemClock.elapsedRealtime()
                 // Throttle: at most two updates a second per file, plus the final one.
                 if (e.done < e.total && now - (lastShown[key] ?: 0) < 500) return
@@ -64,7 +66,7 @@ object Transfers {
             }
 
             is FfiFileEvent.Saved -> {
-                val key = "${e.transferId}/${e.index}"
+                val key = key(e.transferId, e.index)
                 lastShown.remove(key)
                 if (e.transferId !in incoming) {
                     // Sender side: `path` is the name the receiver saved it under.
@@ -93,7 +95,7 @@ object Transfers {
             }
 
             is FfiFileEvent.Failed -> {
-                val key = "${e.transferId}/${e.index}"
+                val key = key(e.transferId, e.index)
                 lastShown.remove(key)
                 val n = name(e.transferId, e.index)
                 Ferry.put(key, "$n failed: ${e.error}")

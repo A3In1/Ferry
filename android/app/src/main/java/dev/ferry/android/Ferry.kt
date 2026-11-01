@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
@@ -66,6 +67,8 @@ object Ferry {
 
     fun incomingDir(ctx: Context) = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "incoming")
 
+    fun peerName(peerId: String) = peers.value.firstOrNull { it.id == peerId }?.name ?: "your Mac"
+
     fun refreshPeers() {
         peers.value = node.value?.peers() ?: emptyList()
     }
@@ -83,15 +86,9 @@ object Ferry {
         toast(app, "Pairing…")
         scope.launch {
             val node = awaitNode() ?: return@launch toast(app, "Ferry isn't running")
-            try {
-                val peer = node.pairWithTicket(ticket)
-                refreshPeers()
-                toast(app, "Paired with ${peer.name}")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                toast(app, "Pairing failed: ${e.text()}")
-            }
+            catching { node.pairWithTicket(ticket) }
+                .onSuccess { refreshPeers(); toast(app, "Paired with ${it.name}") }
+                .onFailure { toast(app, "Pairing failed: ${it.text()}") }
         }
     }
 
@@ -107,18 +104,24 @@ object Ferry {
 
     /**
      * Opens the documents now, while the calling activity still holds the URI grant; an open
-     * fd stays readable after the grant ends. Call off the main thread (providers may block).
+     * fd stays readable after the grant ends. Runs on IO (providers may block).
      */
-    fun open(ctx: Context, uris: List<Uri>): List<Source> = uris.mapNotNull { uri ->
-        try {
-            val pfd = ctx.contentResolver.openFileDescriptor(uri, "r") ?: return@mapNotNull null
-            val name = ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
-            Source(pfd, name ?: uri.lastPathSegment)
-        } catch (e: Exception) {
-            Log.w(TAG, "can't open $uri", e)
-            null
+    suspend fun open(ctx: Context, uris: List<Uri>): List<Source> = withContext(Dispatchers.IO) {
+        uris.mapNotNull { uri -> openOne(ctx, uri) }
+    }
+
+    private fun openOne(ctx: Context, uri: Uri): Source? = try {
+        ctx.contentResolver.openFileDescriptor(uri, "r")?.let { pfd ->
+            try {
+                Source(pfd, ctx.firstString(uri, OpenableColumns.DISPLAY_NAME) ?: uri.lastPathSegment)
+            } catch (e: Exception) {
+                pfd.close()
+                throw e
+            }
         }
+    } catch (e: Exception) {
+        Log.w(TAG, "can't open $uri", e)
+        null
     }
 
     /** Sends in [scope] so it survives leaving the UI; closes the fds when done. */
@@ -151,22 +154,16 @@ object Ferry {
         val app = ctx.applicationContext
         FerryService.start(app)
         scope.launch {
-            awaitNode() ?: return@launch toast(app, "Ferry isn't running")
+            val node = awaitNode() ?: return@launch toast(app, "Ferry isn't running")
             refreshPeers()
-            if (peers.value.isEmpty()) return@launch toast(app, "No paired Mac yet")
+            val macs = peers.value
+            if (macs.isEmpty()) return@launch toast(app, "No paired Mac yet")
             // The user is waiting: send directly (not via Outbox, which drops while a Mac is parked)
             // and report what really happened.
-            val node = node.value ?: return@launch toast(app, "Ferry isn't running")
-            val errors = peers.value.mapNotNull { p ->
-                try {
-                    node.sendEvent(p.id, event); null
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w("Ferry", "send to ${p.name} failed: ${e.text()}"); e.text()
-                }
+            val errors = macs.mapNotNull { p ->
+                catching { node.sendEvent(p.id, event) }.exceptionOrNull()?.text()?.also { Log.w(TAG, "send to ${p.name} failed: $it") }
             }
-            toast(app, if (errors.size < peers.value.size) done else "Couldn't reach your Mac: ${errors.first()}")
+            toast(app, if (errors.size < macs.size) done else "Couldn't reach your Mac: ${errors.first()}")
         }
     }
 
@@ -194,7 +191,7 @@ class Bridge(private val ctx: Context) : FerryDelegate {
     }
 
     private fun handle(peerId: String, e: FfiEvent) {
-        val from = Ferry.peers.value.firstOrNull { it.id == peerId }?.name ?: "your Mac"
+        val from = Ferry.peerName(peerId)
         when (e) {
             is FfiEvent.NotificationAction -> if (Grant.NOTIFICATIONS in Grants) FerryListener.instance?.act(e)
             is FfiEvent.MediaCommand -> if (Grant.MEDIA in Grants) FerryListener.instance?.media(e.cmd)
@@ -203,11 +200,9 @@ class Bridge(private val ctx: Context) : FerryDelegate {
             is FfiEvent.Link -> if (Grant.LINKS in Grants && Links.isWebUrl(e.url)) Notifs.link(ctx, from, e.url)
             is FfiEvent.SmsThreadsRequest -> reply(peerId, Grant.MESSAGES) { Sms.threads(ctx, e.limit) }
             is FfiEvent.SmsMessagesRequest -> reply(peerId, Grant.MESSAGES) { Sms.messages(ctx, e.threadId, e.limit) }
-            is FfiEvent.SmsSend -> if (Grants.allowed(ctx, Grant.MESSAGES)) Ferry.scope.launch(Dispatchers.IO) {
-                // Every Mac (the sender too) shows the sent text.
-                runCatching { Sms.send(ctx, e.address, e.body) }
-                    .onSuccess { m -> m?.let { Outbox.broadcast(FfiEvent.SmsNew(it)) } }
-                    .onFailure { Log.w(PHONE_TAG, "sms send failed", it) }
+            // Every Mac (the sender too) shows the sent text.
+            is FfiEvent.SmsSend -> io(Grant.MESSAGES, "sms send failed") {
+                Sms.send(ctx, e.address, e.body)?.let { Outbox.broadcast(FfiEvent.SmsNew(it)) }
             }
             is FfiEvent.CallCommand -> if (Grants.allowed(ctx, Grant.CALLS)) Calls.command(ctx, e.cmd)
             is FfiEvent.CallLogRequest -> reply(peerId, Grant.CALLS) { Calls.log(ctx, e.limit) }
@@ -222,14 +217,18 @@ class Bridge(private val ctx: Context) : FerryDelegate {
         }
     }
 
-    /** Answers a Mac's request off the main thread (provider queries), only while [g] is allowed; else no reply. */
-    private fun reply(peerId: String, g: Grant, make: () -> FfiEvent) {
+    /** Answers a Mac's request, only while [g] is allowed; else no reply. */
+    private fun reply(peerId: String, g: Grant, make: () -> FfiEvent) =
+        io(g, "can't answer for ${g.short}") { Outbox.send(peerId, make()) }
+
+    /** Runs [work] off the main thread (provider queries, SmsManager), only while [g] is allowed. */
+    private fun io(g: Grant, failure: String, work: () -> Unit) {
         if (!Grants.allowed(ctx, g)) return
         Ferry.scope.launch(Dispatchers.IO) {
             try {
-                Outbox.send(peerId, make())
+                work()
             } catch (e: Exception) {
-                Log.w(PHONE_TAG, "can't answer for ${g.short}", e)
+                Log.w(PHONE_TAG, failure, e)
             }
         }
     }

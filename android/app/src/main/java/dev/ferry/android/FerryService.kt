@@ -26,7 +26,6 @@ import dev.ferry.android.screen.Screen
 import dev.ferry.core.FerryNode
 import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiPeer
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -87,7 +86,7 @@ class FerryService : Service() {
             delay(3_000) // let addresses settle; collapses bursts of callbacks
             val node = Ferry.node.value ?: return@launch
             Ferry.peers.value.forEach { p ->
-                runCatching { node.checkIn(p.id) }.onFailure { Log.w("Ferry", "check-in with ${p.name}: ${it.message}") }
+                catching { node.checkIn(p.id) }.onFailure { Log.w(TAG, "check-in with ${p.name}: ${it.message}") }
             }
         }
     }
@@ -145,10 +144,7 @@ class FerryService : Service() {
         Ferry.nearby.value = emptySet()
         Ferry.status.value = "Stopped"
         Ferry.node.getAndUpdate { null }?.let { node ->
-            Ferry.shutdownJob = Ferry.scope.launch {
-                node.shutdown()
-                node.close()
-            }
+            Ferry.shutdownJob = Ferry.scope.launch { node.use { it.shutdown() } }
         }
         super.onDestroy()
     }
@@ -158,11 +154,7 @@ class FerryService : Service() {
         Ferry.status.value = "Starting…"
         val data = File(filesDir, "ferry").apply { mkdirs() }
         val incoming = Ferry.incomingDir(this).apply { mkdirs() }
-        val node = try {
-            FerryNode.start(data.path, deviceName(), incoming.path, Bridge(applicationContext))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
+        val node = catching { FerryNode.start(data.path, deviceName(), incoming.path, Bridge(applicationContext)) }.getOrElse { e ->
             Log.e(TAG, "node start failed", e)
             Ferry.status.value = "Failed to start: ${e.text()}"
             return
@@ -171,15 +163,9 @@ class FerryService : Service() {
         Ferry.status.value = "Running"
         Ferry.refreshPeers()
         presence = NsdPresence(this, node).also { it.start(Ferry.scope) }
-        try {
-            node.usbServe()
-            Ferry.usbListening.value = true
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // Wi-Fi still works without it.
-            Log.w(TAG, "USB bridge unavailable", e)
-        }
+        catching { node.usbServe() }
+            .onSuccess { Ferry.usbListening.value = true }
+            .onFailure { Log.w(TAG, "USB bridge unavailable", it) } // Wi-Fi still works without it.
         // Re-send now and then so a Mac that just connected learns the level.
         coroutineScope {
             launch {
@@ -223,16 +209,9 @@ class FerryService : Service() {
 
     /** The visible indicator of what's shared: the active grants are always listed here. */
     private fun ongoing(title: String, text: String, grants: Set<Grant> = Grants.on.value): Notification {
-        val stop = PendingIntent.getService(
-            this,
-            0,
-            Intent(this, FerryService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
+        val stop = PendingIntent.getService(this, 0, Intent(this, FerryService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         val sharing = if (grants.isEmpty()) "Sharing nothing" else "Sharing: " + grants.sorted().joinToString { it.short }
-        return NotificationCompat.Builder(this, Notifs.CH_SERVICE)
-            .setSmallIcon(R.drawable.ic_ferry)
-            .setContentTitle(title)
+        return Notifs.builder(this, Notifs.CH_SERVICE, title)
             .setContentText(if (text.isEmpty()) sharing else "$text · $sharing")
             .setStyle(NotificationCompat.BigTextStyle().bigText(listOf(text, sharing).filter { it.isNotEmpty() }.joinToString("\n")))
             .setOngoing(true)

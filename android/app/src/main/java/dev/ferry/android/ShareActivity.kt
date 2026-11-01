@@ -9,9 +9,7 @@ import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiPeer
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /** Share-sheet target ("Send to Mac"): pick a paired Mac, hand the files to the core, close. */
 class ShareActivity : ComponentActivity() {
@@ -38,7 +36,7 @@ class ShareActivity : ComponentActivity() {
         sending = true
         lifecycleScope.launch {
             // Open while we still hold the share's URI grant.
-            val files = withContext(Dispatchers.IO) { Ferry.open(this@ShareActivity, uris) }
+            val files = Ferry.open(this@ShareActivity, uris)
             Ferry.send(this@ShareActivity, peer, files)
             if (files.isNotEmpty()) Ferry.toast(this@ShareActivity, "Sending to ${peer.name}…")
             finish()

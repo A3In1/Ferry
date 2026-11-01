@@ -1,5 +1,7 @@
 package dev.ferry.android
 
+import kotlin.coroutines.cancellation.CancellationException
+
 /** Pure helpers (unit-tested on the JVM). */
 object Tickets {
     private const val PREFIX = "ferry://pair?"
@@ -19,3 +21,12 @@ object Tickets {
 }
 
 fun Throwable.text(): String = message ?: toString()
+
+/** [runCatching] for suspend code: lets coroutine cancellation through instead of swallowing it. */
+inline fun <T> catching(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (e: CancellationException) {
+    throw e
+} catch (e: Exception) {
+    Result.failure(e)
+}

@@ -34,7 +34,7 @@ object Fsp {
             is Msg.Start -> buf(7).putShort(m.maxSize.toShort()).putInt(m.bitrate.toInt()).put(m.flags.toByte())
             is Msg.Touch -> buf(9).put(m.action.toByte()).putFloat(m.x).putFloat(m.y)
             is Msg.Scroll -> buf(16).putFloat(m.x).putFloat(m.y).putFloat(m.dx).putFloat(m.dy)
-            is Msg.Text -> ByteBuffer.wrap(m.text.toByteArray())
+            is Msg.Text -> m.text.toByteArray().let { buf(it.size).put(it) }
             is Msg.Key -> buf(4).putInt(m.code.toInt())
             is Msg.Nav -> buf(1).put(m.action.toByte())
             Msg.Keyframe -> buf(0)
@@ -42,11 +42,12 @@ object Fsp {
             is Msg.Info -> buf(5).putShort(m.width.toShort()).putShort(m.height.toShort()).put(m.caps.toByte())
             is Msg.Frame -> buf(9 + m.data.size).putLong(m.ptsUs).put(m.flags.toByte()).put(m.data)
             is Msg.End -> m.detail.toByteArray().let { buf(1 + it.size).put(m.reason.toByte()).put(it) }
-        }.array()
-        return buf(5 + p.size).put(m.type.toByte()).putInt(p.size).put(p).array()
+        }
+        return p.put(0, m.type.toByte()).putInt(1, p.capacity() - 5).array()
     }
 
-    private fun buf(n: Int) = ByteBuffer.allocate(n)
+    /** A whole message with room for [n] payload bytes, written past the 5-byte header (filled in last), so a FRAME is copied once. */
+    private fun buf(n: Int): ByteBuffer = ByteBuffer.allocate(5 + n).put(0.toByte()).putInt(0)
 
     /** null = unknown type (skipped). Extra trailing bytes are ignored; a short payload is an error. */
     fun decode(type: Int, p: ByteArray): Msg? {

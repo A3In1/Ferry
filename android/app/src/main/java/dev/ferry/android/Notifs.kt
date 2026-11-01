@@ -69,14 +69,17 @@ object Notifs {
         )
     }
 
-    fun openApp(ctx: Context): PendingIntent = PendingIntent.getActivity(
-        ctx,
-        0,
-        Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-    )
+    fun openApp(ctx: Context): PendingIntent =
+        activity(ctx, 0, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+
+    fun activity(ctx: Context, request: Int, intent: Intent): PendingIntent =
+        PendingIntent.getActivity(ctx, request, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
+    private fun broadcast(ctx: Context, receiver: Class<out BroadcastReceiver>): PendingIntent =
+        PendingIntent.getBroadcast(ctx, 0, Intent(ctx, receiver), PendingIntent.FLAG_IMMUTABLE)
 
     fun post(ctx: Context, id: Int, n: Notification) {
+        // Not ctx.granted(): lint's MissingPermission check only recognises a direct checkSelfPermission.
         val allowed = Build.VERSION.SDK_INT < 33 ||
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         if (allowed) NotificationManagerCompat.from(ctx).notify(id, n)
@@ -84,7 +87,7 @@ object Notifs {
 
     fun cancel(ctx: Context, id: Int) = NotificationManagerCompat.from(ctx).cancel(id)
 
-    private fun builder(ctx: Context, channel: String, title: String) =
+    fun builder(ctx: Context, channel: String, title: String): NotificationCompat.Builder =
         NotificationCompat.Builder(ctx, channel).setSmallIcon(R.drawable.ic_ferry).setContentTitle(title)
 
     fun pairPrompt(ctx: Context, peerName: String) = post(
@@ -114,7 +117,7 @@ object Notifs {
         val view = Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, mime)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        val pi = PendingIntent.getActivity(ctx, id, view, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val pi = activity(ctx, id, view)
         post(
             ctx,
             id,
@@ -127,7 +130,7 @@ object Notifs {
     }
 
     fun ringing(ctx: Context, from: String) {
-        val stop = PendingIntent.getBroadcast(ctx, 0, Intent(ctx, RingStop::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val stop = broadcast(ctx, RingStop::class.java)
         post(
             ctx,
             ID_RING,
@@ -146,7 +149,7 @@ object Notifs {
     fun link(ctx: Context, from: String, url: String) {
         val id = url.hashCode()
         val view = Intent(Intent.ACTION_VIEW, url.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val pi = PendingIntent.getActivity(ctx, id, view, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val pi = activity(ctx, id, view)
         post(
             ctx,
             id,
@@ -172,7 +175,7 @@ object Notifs {
 
     /** Shown while a Mac has a screen stream open (mirroring, control or the shared cursor). */
     fun screen(ctx: Context, mac: String, text: String) {
-        val stop = PendingIntent.getBroadcast(ctx, 0, Intent(ctx, ScreenStop::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val stop = broadcast(ctx, ScreenStop::class.java)
         post(
             ctx,
             ID_SCREEN,
@@ -195,7 +198,7 @@ object Notifs {
             builder(ctx, CH_SCREEN, "Tap to share your screen with $mac")
                 .setContentText("$mac asked to mirror this phone")
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setContentIntent(PendingIntent.getActivity(ctx, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+                .setContentIntent(activity(ctx, 0, open))
                 .setAutoCancel(true)
                 .setTimeoutAfter(120_000)
                 .build(),
@@ -209,7 +212,7 @@ object Notifs {
         builder(ctx, CH_ASK, "$from shared Wi-Fi “$ssid”: tap to add")
             .setContentText("Android asks before saving it")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(PendingIntent.getActivity(ctx, ID_WIFI, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+            .setContentIntent(activity(ctx, ID_WIFI, open))
             .setAutoCancel(true)
             .build(),
     )
@@ -222,7 +225,7 @@ object Notifs {
             ID_DND,
             builder(ctx, CH_ASK, "Allow Ferry to change Do Not Disturb")
                 .setContentText("$from asked to turn it ${if (on) "on" else "off"}. Tap, then turn on Ferry.")
-                .setContentIntent(PendingIntent.getActivity(ctx, ID_DND, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+                .setContentIntent(activity(ctx, ID_DND, open))
                 .setAutoCancel(true)
                 .build(),
         )

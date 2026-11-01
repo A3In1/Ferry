@@ -12,6 +12,7 @@ import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.PointF
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -22,7 +23,6 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.core.os.bundleOf
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlin.math.hypot
 
@@ -180,7 +180,8 @@ class ControlService : AccessibilityService() {
         val n = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable } ?: return
         val now = if (n.isShowingHintText) "" else n.text?.toString().orEmpty()
         val next = change(now) ?: return
-        n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleOf(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE to next))
+        val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, next) }
+        n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
     private fun key(code: Long) {

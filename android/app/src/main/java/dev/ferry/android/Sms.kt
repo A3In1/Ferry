@@ -32,46 +32,47 @@ object Sms {
 
     /** Newest thread first: one pass over all texts by date, first hit per thread_id wins. */
     fun threads(ctx: Context, limit: Int): FfiEvent.SmsThreads {
-        val n = if (limit <= 0) 50 else limit.coerceAtMost(500)
+        val n = rowLimit(limit, 50, 500)
         val latest = LinkedHashMap<Long, FfiSmsThread>()
-        ctx.contentResolver.query(
-            Telephony.Sms.CONTENT_URI, arrayOf(Col.THREAD_ID, Col.ADDRESS, Col.BODY, Col.DATE), NOT_DRAFT, null, "${Col.DATE} DESC",
-        )?.use { c ->
-            while (latest.size < n && c.moveToNext()) {
-                val id = c.getLong(0)
-                if (id !in latest) latest[id] = FfiSmsThread(id, c.getString(1).orEmpty(), "", c.getString(2).orEmpty(), c.getLong(3), 0)
-            }
+        ctx.eachRow(Telephony.Sms.CONTENT_URI, arrayOf(Col.THREAD_ID, Col.ADDRESS, Col.BODY, Col.DATE), NOT_DRAFT, sort = "${Col.DATE} DESC") { c ->
+            val id = c.getLong(0)
+            if (id !in latest) latest[id] = FfiSmsThread(id, c.getString(1).orEmpty(), "", c.getString(2).orEmpty(), c.getLong(3), 0)
+            latest.size < n
         }
         val unread = HashMap<Long, Int>()
-        ctx.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI, arrayOf(Col.THREAD_ID), "${Col.READ} = 0", null, null)?.use { c ->
-            while (c.moveToNext()) unread.merge(c.getLong(0), 1, Int::plus)
+        ctx.eachRow(Telephony.Sms.Inbox.CONTENT_URI, arrayOf(Col.THREAD_ID), "${Col.READ} = 0") { c ->
+            unread.merge(c.getLong(0), 1, Int::plus)
+            true
         }
-        val list = latest.values.map { it.copy(name = Names.of(ctx, it.address), unread = unread[it.threadId] ?: 0) }
+        val name = Names.lookup(ctx)
+        val list = latest.values.map { it.copy(name = name(it.address), unread = unread[it.threadId] ?: 0) }
         return FfiEvent.SmsThreads(fitThreads(list))
     }
 
     /** The last [limit] texts of a thread, oldest first. */
     fun messages(ctx: Context, threadId: Long, limit: Int): FfiEvent.SmsMessages {
-        val n = if (limit <= 0) 100 else limit.coerceAtMost(1000)
+        val n = rowLimit(limit, 100, 1000)
+        val name = Names.lookup(ctx)
         val out = ArrayList<FfiSmsMessage>()
-        ctx.contentResolver.query(
+        ctx.eachRow(
             Telephony.Sms.CONTENT_URI,
             arrayOf(BaseColumns._ID, Col.ADDRESS, Col.BODY, Col.DATE, Col.TYPE),
             "${Col.THREAD_ID} = ? AND $NOT_DRAFT", arrayOf(threadId.toString()), "${Col.DATE} DESC",
-        )?.use { c ->
-            while (out.size < n && c.moveToNext()) {
-                val address = c.getString(1).orEmpty()
-                out += FfiSmsMessage(c.getLong(0), threadId, address, Names.of(ctx, address), c.getString(2).orEmpty(), c.getLong(3), outgoing(c.getInt(4)))
-            }
+        ) { c ->
+            val address = c.getString(1).orEmpty()
+            out += FfiSmsMessage(c.getLong(0), threadId, address, name(address), c.getString(2).orEmpty(), c.getLong(3), outgoing(c.getInt(4)))
+            out.size < n
         }
         return FfiEvent.SmsMessages(threadId, fitMessages(out.asReversed()))
     }
 
     /** One message per sender; a long text arrives as several parts. id 0: not in the provider yet. */
-    fun received(ctx: Context, parts: Array<SmsMessage?>): List<FfiSmsMessage> =
-        parts.filterNotNull().groupBy { it.displayOriginatingAddress.orEmpty() }.map { (address, ps) ->
-            FfiSmsMessage(0, threadOf(ctx, address), address, Names.of(ctx, address), ps.joinToString("") { it.displayMessageBody.orEmpty() }, ps.first().timestampMillis, false)
+    fun received(ctx: Context, parts: Array<SmsMessage?>): List<FfiSmsMessage> {
+        val name = Names.lookup(ctx)
+        return parts.filterNotNull().groupBy { it.displayOriginatingAddress.orEmpty() }.map { (address, ps) ->
+            FfiSmsMessage(0, threadOf(ctx, address), address, name(address), ps.joinToString("") { it.displayMessageBody.orEmpty() }, ps.first().timestampMillis, false)
         }
+    }
 
     /**
      * Sends [body] to [address] only. As a non-default SMS app, Android writes it to the sent box

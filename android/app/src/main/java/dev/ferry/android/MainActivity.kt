@@ -2,7 +2,6 @@ package dev.ferry.android
 
 import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -51,15 +50,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import dev.ferry.android.screen.ControlService
 import dev.ferry.core.FfiPeer
 import dev.ferry.core.coreVersion
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private var scanning by mutableStateOf(false)
@@ -214,12 +210,10 @@ class MainActivity : ComponentActivity() {
 
     private fun send(peer: FfiPeer, uris: List<Uri>) {
         lifecycleScope.launch {
-            val files = withContext(Dispatchers.IO) { Ferry.open(this@MainActivity, uris) }
+            val files = Ferry.open(this@MainActivity, uris)
             Ferry.send(this@MainActivity, peer, files)
         }
     }
-
-    private fun granted(permission: String) = ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 }
 
 @Composable

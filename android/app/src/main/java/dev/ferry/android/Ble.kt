@@ -28,7 +28,6 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.ChecksSdkIntAtLeast
 import androidx.annotation.RequiresApi
-import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import dev.ferry.core.ByteSink
 import dev.ferry.core.FerryNode
@@ -97,9 +96,7 @@ object Ble {
     val supported get() = Build.VERSION.SDK_INT >= 31
 
     @ChecksSdkIntAtLeast(api = 31)
-    fun allowed(ctx: Context) = supported && PERMISSIONS.all {
-        ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED
-    }
+    fun allowed(ctx: Context) = supported && PERMISSIONS.all(ctx::granted)
 
     private val cooldown = Cooldown()
     @Volatile private var scanning = false
@@ -186,15 +183,9 @@ object Ble {
     private suspend fun handle(ctx: Context, node: FerryNode, device: BluetoothDevice, peer: String) {
         if (Ferry.ble.value == peer || link?.isActive == true) return
         if (!cooldown.take(peer, SystemClock.elapsedRealtime(), RETRY_MS)) return
-        try {
-            node.checkIn(peer)
-            cooldown.hold(peer, SystemClock.elapsedRealtime(), CHECKED_IN_MS)
-            return
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(BLE_TAG, "check-in with ${peer.take(8)} failed (${e.text()}); trying Bluetooth")
-        }
+        catching { node.checkIn(peer) }
+            .onSuccess { return cooldown.hold(peer, SystemClock.elapsedRealtime(), CHECKED_IN_MS) }
+            .onFailure { Log.w(BLE_TAG, "check-in with ${peer.take(8)} failed (${it.text()}); trying Bluetooth") }
         startLink(ctx, node, device, peer)
     }
 
@@ -240,6 +231,8 @@ object Ble {
         // GATT stays connected for the bridge's lifetime: it's idle (no cost), holds the LE link
         // and connection priority on stacks that tie them to a GATT client, and its disconnect
         // callback is a second "link lost" signal.
+        // The replacement (BluetoothGattConnectionSettings) is API 37+ only.
+        @Suppress("DEPRECATION")
         val g = device.connectGatt(ctx, false, cb, BluetoothDevice.TRANSPORT_LE) ?: error("connectGatt returned null")
         gatt = g
         cb.onDisconnect = { socket?.let { runCatching { it.close() } } }

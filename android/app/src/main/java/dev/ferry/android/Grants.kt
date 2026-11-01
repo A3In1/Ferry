@@ -48,8 +48,7 @@ object Grants {
 
     /** On, and Android still grants its runtime permissions / special access (they can be revoked in Settings). */
     fun allowed(ctx: Context, g: Grant) =
-        g in this && g.permissions.all { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED } &&
-            (g != Grant.FILES || PhoneFiles.accessGranted())
+        g in this && g.permissions.all(ctx::granted) && (g != Grant.FILES || PhoneFiles.accessGranted())
 
     fun set(ctx: Context, g: Grant, enabled: Boolean) {
         prefs.edit { putBoolean(g.key, enabled) }
@@ -77,3 +76,5 @@ object Grants {
         }
     }
 }
+
+fun Context.granted(permission: String) = ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
