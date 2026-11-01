@@ -246,6 +246,7 @@ class Bridge(private val ctx: Context) : FerryDelegate {
             is FfiEvent.SmsSend -> io(Grant.MESSAGES, "sms send failed") {
                 Sms.send(ctx, e.address, e.body)?.let { Outbox.broadcast(FfiEvent.SmsNew(it)) }
             }
+            is FfiEvent.SmsMarkRead -> io(Grant.MESSAGES, "sms mark read failed") { SmsReads.markRead(ctx, e.threadId) }
             is FfiEvent.CallCommand -> if (Grants.allowed(ctx, Grant.CALLS)) Calls.command(ctx, e.cmd)
             is FfiEvent.CallLogRequest -> reply(peerId, Grant.CALLS) { Calls.log(ctx, e.limit) }
             // Files answers with an error (not silence) when off, so the Mac can say why.
@@ -255,7 +256,7 @@ class Bridge(private val ctx: Context) : FerryDelegate {
             is FfiEvent.Dnd -> if (Grant.DND in Grants) Dnd.fromMac(ctx, from, e.on)
             // Phone → Mac kinds; a Mac shouldn't send them.
             is FfiEvent.Notification, is FfiEvent.NotificationRemoved, is FfiEvent.NowPlaying, is FfiEvent.Battery,
-            is FfiEvent.SmsThreads, is FfiEvent.SmsMessages, is FfiEvent.SmsNew, is FfiEvent.Call, is FfiEvent.CallLog, is FfiEvent.FsList -> {}
+            is FfiEvent.SmsThreads, is FfiEvent.SmsMessages, is FfiEvent.SmsNew, is FfiEvent.SmsRead, is FfiEvent.Call, is FfiEvent.CallLog, is FfiEvent.FsList -> {}
         }
     }
 

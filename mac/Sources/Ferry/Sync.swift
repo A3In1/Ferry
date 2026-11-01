@@ -50,13 +50,13 @@ extension AppModel {
             guard let url = webURL(url) else { return logger.notice("ignored non-web link from phone: \(url)") }
             NSWorkspace.shared.open(url)
             notify("Opened a link from \(peerName(peer) ?? "your phone")", url.absoluteString) { $0.threadIdentifier = "link" }
-        case .smsThreads, .smsMessages, .smsNew, .call, .callLog:
+        case .smsThreads, .smsMessages, .smsNew, .smsRead, .call, .callLog:
             handleTexts(event, from: peer) // Messages.swift
         case let .fsList(path, entries, error):
             handleFiles(path: path, entries: entries, error: error, from: peer) // Files.swift
         case let .dnd(on):
             phoneDndChanged(on, peer: peer) // WifiFocus.swift
-        case .notificationAction, .mediaCommand, .ring, .smsThreadsRequest, .smsMessagesRequest, .smsSend, .callCommand,
+        case .notificationAction, .mediaCommand, .ring, .smsThreadsRequest, .smsMessagesRequest, .smsSend, .smsMarkRead, .callCommand,
              .callLogRequest, .fsListRequest, .fsGet, .wifiNetwork:
             break // Mac → phone only
         }

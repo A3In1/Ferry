@@ -92,4 +92,28 @@ class Phase5Test {
         assertEquals(idle, Calls.next(active, FfiCallState.IDLE, "+15550100"))
         assertEquals(CallSnap(FfiCallState.ACTIVE, ""), Calls.next(idle, FfiCallState.ACTIVE, null)) // outgoing: unknown
     }
+
+    @Test
+    fun readOnMacLeavesOlderTextsOut() {
+        val rows = listOf(1L to 100L, 1L to 200L, 2L to 50L, 3L to 10L)
+        assertEquals(mapOf(1L to 2, 2L to 1, 3L to 1), SmsReads.countUnread(rows, emptyMap()))
+        // thread 1 read on the Mac at 150: only the text after that counts; thread 2 fully read
+        assertEquals(mapOf(1L to 1, 3L to 1), SmsReads.countUnread(rows, mapOf(1L to 150L, 2L to 50L)))
+    }
+
+    @Test
+    fun phoneReadsAreThreadsThatWentToZero() {
+        assertEquals(listOf(2L), SmsReads.readSince(mapOf(1L to 3, 2L to 1), mapOf(1L to 2, 4L to 1)))
+        assertEquals(emptyList<Long>(), SmsReads.readSince(emptyMap(), mapOf(1L to 1)))
+    }
+
+    @Test
+    fun conversationNotificationsMatchByNameOrNumber() {
+        assertTrue(FerryListener.isConversation(listOf("Ann"), "ann", "+15550100"))
+        assertTrue(FerryListener.isConversation(listOf("(555) 555-0100"), "", "+1 555 555 0100"))
+        assertTrue(FerryListener.isConversation(listOf("HDFCBK"), "", "hdfcbk"))
+        assertFalse(FerryListener.isConversation(listOf("Bob"), "Ann", "+15550100"))
+        assertFalse(FerryListener.isConversation(listOf("2 new messages"), "", "+15550100"))
+        assertFalse(FerryListener.isConversation(listOf("Ann"), "", ""))
+    }
 }

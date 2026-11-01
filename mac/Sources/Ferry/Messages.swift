@@ -24,6 +24,7 @@ import UserNotifications
     @ObservationIgnored var heard: [Feed: Int] = [:]
 
     func thread(_ id: Int64?) -> FfiSmsThread? { threads.first { $0.threadId == id } }
+    var unread: Int { threads.reduce(0) { $0 + Int($1.unread) } }
 }
 
 func displayName(_ name: String, _ number: String) -> String {
@@ -52,12 +53,25 @@ extension AppModel {
     }
 
     func openThread(_ id: Int64, peer: String) {
+        markRead(id, peer: peer)
+        ask(.smsMessagesRequest(threadId: id, limit: 0), .messages, peer: peer)
+    }
+
+    /// The user is looking at thread `id`: tell the phone if it had unread texts (it answers every Mac with SmsRead).
+    func markRead(_ id: Int64, peer: String) {
         let t = texts(peer)
-        // shortcut: read state stays on the Mac, the phone still counts it unread; send it once the protocol has a mark-read event.
+        guard let i = t.threads.firstIndex(where: { $0.threadId == id }), t.threads[i].unread > 0 else { return }
+        cleared(id, peer: peer)
+        broadcast(.smsMarkRead(threadId: id), to: [peer])
+    }
+
+    /// Thread `id` has nothing unread any more (read here, on the phone or on another Mac).
+    private func cleared(_ id: Int64, peer: String) {
+        let t = texts(peer)
         if let i = t.threads.firstIndex(where: { $0.threadId == id }) { t.threads[i].unread = 0 }
         let thread = textThread(peer, id)
-        removeNotifications { $0.request.content.threadIdentifier == thread } // read here: banners are stale
-        ask(.smsMessagesRequest(threadId: id, limit: 0), .messages, peer: peer)
+        removeNotifications { $0.request.content.threadIdentifier == thread } // read: banners are stale
+        onChange()
     }
 
     /// Only on an explicit Send/Return or a notification reply. Shown as "sending…" until the echo.
@@ -81,6 +95,9 @@ extension AppModel {
         case let .smsThreads(threads):
             heard(t, .messages)
             t.threads = threads
+            onChange()
+        case let .smsRead(id):
+            cleared(id, peer: peer)
         case let .smsMessages(id, messages):
             heard(t, .messages)
             t.messages[id] = messages
@@ -128,6 +145,8 @@ extension AppModel {
             t.selected = m.threadId
         }
         if !m.outgoing, !viewing { notifyText(m, peer: peer) }
+        if !m.outgoing, viewing { broadcast(.smsMarkRead(threadId: m.threadId), to: [peer]) } // read as it arrived
+        onChange()
     }
 
     private func notifyText(_ m: FfiSmsMessage, peer: String) {
@@ -208,6 +227,11 @@ final class MessagesWindow: PeerWindow {
         host(MessagesView(model: model, peer: peer.id, texts: model.texts(peer.id)))
         model.refreshTexts(peer.id)
         present()
+    }
+
+    /// Back to a conversation that got texts while the window was in the background: now they're read.
+    override func windowDidBecomeKey(_ notification: Notification) {
+        if let id = model.texts(peerId).selected { model.markRead(id, peer: peerId) }
     }
 }
 
@@ -309,13 +333,17 @@ struct MessagesView: View {
                     HStack {
                         Text(displayName(t.name, t.address)).fontWeight(t.unread > 0 ? .semibold : .regular).lineLimit(1)
                         Spacer()
+                        if t.unread > 0 {
+                            Text("\(t.unread)").font(.caption2.bold()).monospacedDigit().foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 1).background(Color.accentColor, in: Capsule())
+                        }
                         Text(shortDate(t.dateMs)).font(.caption).foregroundStyle(.secondary)
                     }
                     Text(t.snippet).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityValue(t.unread > 0 ? "Unread" : "")
+            .accessibilityValue(t.unread > 0 ? "\(t.unread) unread" : "")
         }
     }
 

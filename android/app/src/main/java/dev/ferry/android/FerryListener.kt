@@ -103,6 +103,21 @@ class FerryListener : NotificationListenerService() {
         }
     }
 
+    /**
+     * After a read on the Mac: cancels [pkg]'s (the messaging app's) notifications for the conversation
+     * with [address], matched by title. The texts stay unread in that app; this is all Android allows us.
+     */
+    fun cancelConversation(pkg: String, name: String, address: String) {
+        val hits = runCatching { activeNotifications.orEmpty() }.getOrDefault(emptyArray()).filter { sbn ->
+            val e = sbn.notification.extras
+            val titles = listOfNotNull(e.getCharSequence(Notification.EXTRA_TITLE), e.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE))
+            sbn.packageName == pkg && sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY == 0 &&
+                isConversation(titles.map { it.toString() }, name, address)
+        }
+        hits.forEach { cancelNotification(it.key) }
+        Log.w(PHONE_TAG, "cancelled ${hits.size} messaging notification(s) read on a Mac")
+    }
+
     // --- media sessions ---
 
     private val sessionsChanged = MediaSessionManager.OnActiveSessionsChangedListener { pick(it.orEmpty()) }
@@ -193,6 +208,11 @@ class FerryListener : NotificationListenerService() {
         /** Ours, ongoing/foreground-service, group summaries, local-only and empty ones stay on the phone. */
         fun shouldForward(pkg: String, ownPkg: String, flags: Int, title: String, text: String): Boolean =
             pkg != ownPkg && flags and SKIP == 0 && (title.isNotBlank() || text.isNotBlank())
+
+        /** A messaging notification titled with the contact's name or number. */
+        fun isConversation(titles: List<String>, name: String, address: String) = titles.any { t ->
+            (name.isNotBlank() && t.trim().equals(name.trim(), ignoreCase = true)) || (address.isNotBlank() && Sms.sameNumber(t, address))
+        }
 
         fun enabled(ctx: Context) = ctx.packageName in NotificationManagerCompat.getEnabledListenerPackages(ctx)
 

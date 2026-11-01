@@ -121,7 +121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return [
             ClosureItem("Mirror Screen", key: keys ? "1" : "") { [weak self] in self?.model.mirror(peer) }.symbol("iphone")
                 .tip("See and control \(peer.name)'s screen in a window"),
-            ClosureItem("Messages", key: keys ? "2" : "") { [weak self] in self?.model.openMessages(peer) }.symbol("message"),
+            ClosureItem("Messages", key: keys ? "2" : "") { [weak self] in self?.model.openMessages(peer) }.symbol("message")
+                .unreadBadge(model.phoneTexts[peer.id]?.unread ?? 0),
             ClosureItem("Browse Files", key: keys ? "3" : "") { [weak self] in self?.model.openFiles(peer) }.symbol("folder"),
             .separator(),
             ClosureItem("Send Files…", key: keys ? "o" : "") { [weak self] in self?.model.chooseAndSend(to: peer) }.symbol("paperplane")
@@ -424,6 +425,12 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
 }
 
 extension NSMenuItem {
+    /// Unread texts on the Messages item (the ones Ferry has heard about).
+    func unreadBadge(_ n: Int) -> Self {
+        if n > 0 { badge = NSMenuItemBadge(count: n) }
+        return self
+    }
+
     func enabled(_ on: Bool) -> Self {
         isEnabled = on
         return self

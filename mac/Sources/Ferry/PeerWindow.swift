@@ -42,6 +42,7 @@ import SwiftUI
     }
 
     func windowWillClose(_ notification: Notification) { onClose() }
+    func windowDidBecomeKey(_ notification: Notification) {}
 }
 
 extension AppModel {

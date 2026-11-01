@@ -83,6 +83,8 @@ message Event {
     FsGet fs_get = 22;
     WifiNetwork wifi_network = 23;
     Dnd dnd = 24;
+    SmsMarkRead sms_mark_read = 25;
+    SmsRead sms_read = 26;
   }
 }
 message NotifButton {
@@ -149,7 +151,7 @@ message SmsThread {
   string name = 3; // contact name, empty if unknown
   string snippet = 4;
   int64 date_ms = 5;
-  int32 unread = 6;
+  int32 unread = 6; // inbox texts not yet read on the phone or on any Mac
 }
 message SmsThreads { // phone → Mac, newest first
   repeated SmsThread threads = 1;
@@ -174,6 +176,12 @@ message SmsMessages { // phone → Mac, oldest first
 message SmsSend { // Mac → phone: the user pressed Send on the Mac
   string address = 1;
   string body = 2;
+}
+message SmsMarkRead { // Mac → phone: the user read this conversation on the Mac
+  int64 thread_id = 1;
+}
+message SmsRead { // phone → Mac: this conversation has no unread texts any more (read on the phone or another Mac)
+  int64 thread_id = 1;
 }
 message Call { // phone → Mac on every call state change
   enum State {

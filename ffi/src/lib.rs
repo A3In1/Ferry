@@ -191,6 +191,14 @@ pub enum FfiEvent {
         address: String,
         body: String,
     },
+    /// Mac → phone: the user read this conversation on the Mac
+    SmsMarkRead {
+        thread_id: i64,
+    },
+    /// phone → Mac: this conversation has no unread texts any more
+    SmsRead {
+        thread_id: i64,
+    },
     Call {
         state: FfiCallState,
         number: String,
@@ -493,6 +501,12 @@ impl FfiEvent {
                 password: w.password,
             },
             Kind::Dnd(d) => Self::Dnd { on: d.on },
+            Kind::SmsMarkRead(r) => Self::SmsMarkRead {
+                thread_id: r.thread_id,
+            },
+            Kind::SmsRead(r) => Self::SmsRead {
+                thread_id: r.thread_id,
+            },
         })
     }
 
@@ -645,6 +659,8 @@ impl FfiEvent {
                 Kind::WifiNetwork(proto::WifiNetwork { ssid, password })
             }
             Self::Dnd { on } => Kind::Dnd(proto::Dnd { on }),
+            Self::SmsMarkRead { thread_id } => Kind::SmsMarkRead(proto::SmsMarkRead { thread_id }),
+            Self::SmsRead { thread_id } => Kind::SmsRead(proto::SmsRead { thread_id }),
         };
         proto::Event { kind: Some(kind) }
     }
@@ -1194,6 +1210,8 @@ mod event_tests {
                 password: "pw".into(),
             },
             FfiEvent::Dnd { on: true },
+            FfiEvent::SmsMarkRead { thread_id: 3 },
+            FfiEvent::SmsRead { thread_id: 3 },
         ];
         for e in all {
             assert_eq!(FfiEvent::from_proto(e.clone().into_proto()), Some(e));
