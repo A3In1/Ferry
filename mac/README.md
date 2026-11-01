@@ -306,3 +306,10 @@ A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
 - **Share extension** (Share menu in Finder and other apps) needs an Xcode app-extension target, which
   this SwiftPM package can't build. It comes with the Xcode project.
 - Universal build: arm64 only for now; see the comment in `scripts/build-apple.sh`.
+
+### Mac Focus → phone
+Ferry handles `ferry://focus?on=1` / `ferry://focus?on=0`. In Shortcuts → Automation, add a Focus
+automation for Do Not Disturb: when turning on, Open URL `ferry://focus?on=1`; when turning off,
+`ferry://focus?on=0` (turn off "Ask Before Running"). The phone needs Do Not Disturb sync on.
+Menu → **Mac Focus → phone…** shows these steps. A change that already matches the phone is not
+sent, so the phone → Mac "Ferry Focus On/Off" Shortcuts can't loop.

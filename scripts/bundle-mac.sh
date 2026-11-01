@@ -27,6 +27,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSUIElement</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>dev.ferry.mac</string>
+    <key>CFBundleURLSchemes</key><array><string>ferry</string></array>
+  </dict></array>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Ferry finds and connects to your paired phone on this network.</string>
   <key>NSBluetoothAlwaysUsageDescription</key>

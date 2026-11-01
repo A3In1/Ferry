@@ -1,4 +1,5 @@
 import AppKit
+import FerryLogic
 import CoreLocation
 import CoreWLAN
 import FerryCore
@@ -48,6 +49,23 @@ extension AppModel {
     /// Menu toggle "Phone Do Not Disturb". The check mark only moves when the phone reports back.
     func setPhoneDnd(_ on: Bool) {
         broadcast(.dnd(on: on), what: on ? "Do Not Disturb on" : "Do Not Disturb off")
+    }
+
+    /// `ferry://focus?on=1|0` from the user's Shortcuts Focus automation: Mac Focus → phone.
+    func openURL(_ url: URL) {
+        guard let on = focusState(from: url) else { return logger.info("ignored URL \(url, privacy: .private)") }
+        // Already matching: usually our own "Ferry Focus On/Off" Shortcut echoing the phone's change.
+        guard on != phoneDnd else { return }
+        broadcast(.dnd(on: on))
+    }
+
+    func showFocusSetup() {
+        showAlert("Have the phone follow your Mac's Focus",
+                  "In the Shortcuts app, open Automation and add two Focus automations for Do Not Disturb "
+                      + "(or the Focus you use):\n\n• When turning on: Open URL ferry://focus?on=1\n"
+                      + "• When turning off: Open URL ferry://focus?on=0\n\n"
+                      + "Turn off “Ask Before Running” for both. Ferry then sets the phone's Do Not Disturb "
+                      + "(turn on Do Not Disturb sync in Ferry on the phone).")
     }
 
     /// The phone's Do Not Disturb changed: run the user's "Ferry Focus On/Off" Shortcut, if there is one.

@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var liveItems: [NSMenuItem] = []
     private var pairWindow: NSWindow?
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        urls.forEach(model.openURL)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let button = statusItem.button!
         button.image = NSImage(systemSymbolName: "ferry", accessibilityDescription: "Ferry")
@@ -92,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         dnd.state = model.phoneDnd ? .on : .off
         dnd.toolTip = "Follows the phone's Do Not Disturb; your “Ferry Focus On/Off” Shortcuts make the Mac follow too"
         menu.addItem(dnd.enabled(hasPhone))
+        menu.addItem(ClosureItem("Mac Focus → phone…") { [weak self] in self?.model.showFocusSetup() }.enabled(hasPhone))
 
         menu.addItem(.separator())
         let running = model.node != nil
