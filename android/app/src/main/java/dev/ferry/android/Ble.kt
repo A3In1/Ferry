@@ -80,6 +80,23 @@ class Cooldown {
     }
 }
 
+/** Per-key retry delays that double on each failure ([base], 2×, 4×…, at most [max]) until [reset]. */
+class Backoff(private val base: Long, private val max: Long) {
+    private val failures = HashMap<String, Int>()
+
+    @Synchronized
+    fun next(key: String): Long {
+        val n = failures[key] ?: 0
+        failures[key] = n + 1
+        return (base shl n.coerceAtMost(20)).coerceAtMost(max)
+    }
+
+    @Synchronized
+    fun reset(key: String) {
+        failures.remove(key)
+    }
+}
+
 /**
  * Bluetooth (API 31+ only): a battery-friendly PendingIntent scan for paired Macs' presence
  * UUIDs, and an L2CAP byte-stream bridge carrying the normal Ferry session when Wi-Fi/USB fail.
@@ -89,6 +106,7 @@ class Cooldown {
 object Ble {
     private const val RETRY_MS = 60_000L // after a bridge attempt
     private const val CHECKED_IN_MS = 5 * 60_000L // Wi-Fi/USB worked: don't re-check every scan hit
+    private const val MAX_RETRY_MS = 15 * 60_000L // a Mac in range whose bridge keeps failing
     @SuppressLint("InlinedApi") // plain strings, only requested on 31+
     val PERMISSIONS = arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
 
@@ -99,6 +117,7 @@ object Ble {
     fun allowed(ctx: Context) = supported && PERMISSIONS.all(ctx::granted)
 
     private val cooldown = Cooldown()
+    private val backoff = Backoff(RETRY_MS, MAX_RETRY_MS)
     @Volatile private var scanning = false
     @Volatile private var noStartUntil = 0L
 
@@ -184,7 +203,10 @@ object Ble {
         if (Ferry.ble.value == peer || link?.isActive == true) return
         if (!cooldown.take(peer, SystemClock.elapsedRealtime(), RETRY_MS)) return
         catching { node.checkIn(peer) }
-            .onSuccess { return cooldown.hold(peer, SystemClock.elapsedRealtime(), CHECKED_IN_MS) }
+            .onSuccess {
+                backoff.reset(peer)
+                return cooldown.hold(peer, SystemClock.elapsedRealtime(), CHECKED_IN_MS)
+            }
             .onFailure { Log.w(BLE_TAG, "check-in with ${peer.take(8)} failed (${it.text()}); trying Bluetooth") }
         startLink(ctx, node, device, peer)
     }
@@ -198,11 +220,14 @@ object Ble {
 
     @Synchronized
     private fun startLink(ctx: Context, node: FerryNode, device: BluetoothDevice, peer: String) {
-        if (link?.isActive == true) return
+        // Not just isActive: a cancelled bridge still closing would close the new one's socket/gatt in its finally.
+        if (link?.isCompleted == false) return
         linkDevice = device
+        val app = ctx.applicationContext // the bridge can outlive the service that started it
         link = Ferry.scope.launch {
+            var up = false
             try {
-                bridge(ctx, node, device, peer)
+                bridge(app, node, device, peer) { up = true }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -210,6 +235,9 @@ object Ble {
             } finally {
                 closeLink()
                 Ferry.ble.compareAndSet(peer, null)
+                // Never got a hello through: wait longer each time, so a Mac in range that can't bridge
+                // doesn't cost a GATT connect every minute.
+                if (up) backoff.reset(peer) else cooldown.hold(peer, SystemClock.elapsedRealtime(), backoff.next(peer))
             }
         }
     }
@@ -246,7 +274,8 @@ object Ble {
         gatt = null
     }
 
-    private suspend fun bridge(ctx: Context, node: FerryNode, device: BluetoothDevice, peer: String) {
+    /** [onUp]: the Mac answered the bridge hello. */
+    private suspend fun bridge(ctx: Context, node: FerryNode, device: BluetoothDevice, peer: String, onUp: () -> Unit) {
         val cb = GattSteps()
         // GATT stays connected for the bridge's lifetime: it's idle (no cost), holds the LE link
         // and connection priority on stacks that tie them to a GATT client, and its disconnect
@@ -314,6 +343,7 @@ object Ble {
                     runCatching { s.close() } // ends the reader
                 } else {
                     Log.w(BLE_TAG, "connected over Bluetooth to ${peer.take(8)}")
+                    onUp()
                     Ferry.ble.value = peer
                 }
             }

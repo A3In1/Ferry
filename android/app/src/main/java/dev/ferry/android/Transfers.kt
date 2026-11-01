@@ -23,8 +23,9 @@ import java.io.IOException
  */
 object Transfers {
     private val events = Channel<FfiFileEvent>(Channel.UNLIMITED)
-    private val incoming = HashMap<String, List<String>>() // transfer id -> offered names
-    private val lastShown = HashMap<String, Long>()
+    // The core sends no end event for a transfer whose connection dropped, so these only keep the latest few.
+    private val incoming = lru<List<String>>(64) // transfer id -> offered names
+    private val lastShown = lru<Long>(256) // transfer id/index -> last progress update
     /** Per-file progress notifications still up, so a stopped service doesn't leave them behind. */
     private val shown = HashSet<Int>()
 
@@ -95,6 +96,11 @@ object Transfers {
     }
 
     private fun key(tid: String, index: UInt) = "$tid/$index"
+
+    /** Insertion-ordered map that drops its oldest entry beyond [max]. Not thread-safe. */
+    fun <V> lru(max: Int): MutableMap<String, V> = object : LinkedHashMap<String, V>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?) = size > max
+    }
 
     private fun name(tid: String, index: UInt): String =
         incoming[tid]?.getOrNull(index.toInt()) ?: "file ${index + 1u}"

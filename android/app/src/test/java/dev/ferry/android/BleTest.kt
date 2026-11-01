@@ -48,4 +48,22 @@ class BleTest {
         assertFalse(c.take("mac", 200_000, 60_000))
         assertTrue(c.take("mac", 361_000, 60_000))
     }
+
+    @Test
+    fun backoffDoublesToMaxAndResets() {
+        val b = Backoff(60_000, 15 * 60_000)
+        assertEquals(listOf(60_000L, 120_000, 240_000, 480_000, 900_000, 900_000), List(6) { b.next("mac") })
+        assertEquals(60_000L, b.next("other")) // per key
+        repeat(100) { b.next("mac") } // no overflow
+        assertEquals(900_000L, b.next("mac"))
+        b.reset("mac")
+        assertEquals(60_000L, b.next("mac"))
+    }
+
+    @Test
+    fun lruKeepsNewest() {
+        val m = Transfers.lru<Int>(3)
+        (1..5).forEach { m["t$it"] = it }
+        assertEquals(listOf("t3", "t4", "t5"), m.keys.toList())
+    }
 }

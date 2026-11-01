@@ -104,7 +104,11 @@ object Notifs {
             .build(),
     )
 
-    /** [percent] < 0: still connecting (indeterminate bar). */
+    /**
+     * [percent] < 0: still connecting (indeterminate bar). Each update restarts a 2 min timeout: a
+     * transfer whose connection dropped gets no final event, and would otherwise leave this ongoing
+     * (unswipeable) notification up until Ferry stops.
+     */
     fun progress(ctx: Context, id: Int, title: String, percent: Int, text: String? = null) = post(
         ctx,
         id,
@@ -114,6 +118,7 @@ object Notifs {
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setTimeoutAfter(120_000)
             .setContentIntent(openApp(ctx))
             .build(),
     )

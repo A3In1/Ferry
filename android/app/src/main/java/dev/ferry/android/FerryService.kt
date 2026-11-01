@@ -170,9 +170,10 @@ class FerryService : Service() {
         Ferry.status.value = RUNNING
         Ferry.refreshPeers()
         presence = NsdPresence(this, node).also { it.start(Ferry.scope) }
-        catching { node.usbServe() }
+        val usbUp = catching { node.usbServe() }
             .onSuccess { Ferry.usbListening.value = true }
             .onFailure { Log.w(TAG, "USB bridge unavailable", it) } // Wi-Fi still works without it.
+            .isSuccess
         // Re-send now and then so a Mac that just connected learns the level.
         coroutineScope {
             launch {
@@ -181,10 +182,12 @@ class FerryService : Service() {
                     sendBattery()
                 }
             }
-            // The core has no USB link events; a cheap poll keeps "Connected over USB" honest.
-            launch {
+            // The core has no USB link events; a cheap poll keeps "Connected over USB" honest. Off the
+            // main thread (it's a blocking core call), and only when the USB bridge is listening at all.
+            if (usbUp) launch(Dispatchers.Default) {
                 while (true) {
-                    Ferry.usb.value = catching { node.usbLinks().map { it.peerId }.toSet() }.getOrDefault(emptySet())
+                    // Bluetooth bridges are listed too ("ble:…"); they're Ferry.ble, not USB.
+                    Ferry.usb.value = catching { node.usbLinks().filterNot { it.serial.startsWith("ble:") }.map { it.peerId }.toSet() }.getOrDefault(emptySet())
                     delay(3_000)
                 }
             }

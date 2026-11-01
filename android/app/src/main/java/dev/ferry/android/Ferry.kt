@@ -20,6 +20,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -119,15 +120,17 @@ object Ferry {
         }
         nearby.update { it - peer.id }
         usb.update { it - peer.id }
+        if (ble.value == peer.id) Ble.stopBridge()
         refreshPeers()
         toast(ctx, "Forgot ${peer.name}. To use it again, pair from your Mac.")
     }
 
     /**
      * Opens the documents now, while the calling activity still holds the URI grant; an open
-     * fd stays readable after the grant ends. Runs on IO (providers may block).
+     * fd stays readable after the grant ends. Runs on IO (providers may block). Not cancellable:
+     * the caller's scope ending mid-way would otherwise drop the opened fds unclosed.
      */
-    suspend fun open(ctx: Context, uris: List<Uri>): List<Source> = withContext(Dispatchers.IO) {
+    suspend fun open(ctx: Context, uris: List<Uri>): List<Source> = withContext(Dispatchers.IO + NonCancellable) {
         uris.mapNotNull { uri -> openOne(ctx, uri) }
     }
 

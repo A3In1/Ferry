@@ -41,10 +41,15 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
     private val seen = ConcurrentHashMap<String, String>() // service name -> peer id
     private val toResolve = Channel<NsdServiceInfo>(Channel.UNLIMITED) // pre-34: one resolve at a time
     private var job: Job? = null
+    /** Set by [stop]: NSD callbacks still in flight must not touch the stopped node or re-add nearby peers. */
+    @Volatile private var stopped = false
 
+    /** Call [start] and [stop] on the main thread. */
     fun start(scope: CoroutineScope) {
-        job = scope.launch {
-            if (Build.VERSION.SDK_INT < 34) launch { for (info in toResolve) resolveLegacy(info)?.let(::onResolved) }
+        // Main, like stop(): a round can't be half-registered (listener or multicast lock not yet
+        // recorded) when stop() runs, which would leak it, keeping discovery or the Wi-Fi lock on for good.
+        job = scope.launch(Dispatchers.Main) {
+            if (Build.VERSION.SDK_INT < 34) launch(Dispatchers.IO) { for (info in toResolve) resolveLegacy(info)?.let(::onResolved) }
             // The presence tag rotates every 15 min: re-advertise, and restart discovery so a
             // network change can't leave it dead for long.
             // Battery: discovery and the multicast lock (which keeps Wi-Fi awake for every
@@ -66,6 +71,7 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
     }
 
     fun stop() {
+        stopped = true
         job?.cancel()
         stopRound()
         if (multicast.isHeld) multicast.release()
@@ -96,6 +102,7 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
             override fun onStartDiscoveryFailed(type: String, err: Int) { Log.w(TAG, "NSD discovery failed: $err") }
             override fun onStopDiscoveryFailed(type: String, err: Int) {}
             override fun onServiceFound(info: NsdServiceInfo) {
+                if (stopped) return
                 if (Build.VERSION.SDK_INT >= 34) watch(info) else toResolve.trySend(info)
             }
 
@@ -149,6 +156,7 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
     }
 
     private fun onResolved(info: NsdServiceInfo) {
+        if (stopped) return
         val txt = info.attributes.map { (k, v) -> FfiTxt(k, v?.decodeToString() ?: "") }
         val peerId = node.matchPresence(txt) ?: return // not one of our paired Macs (or ourselves)
         val addrs = hosts(info).mapNotNull { a ->
@@ -162,7 +170,7 @@ class NsdPresence(private val ctx: Context, private val node: FerryNode) {
             return
         }
         seen[info.serviceName] = peerId
-        Ferry.nearby.update { it + peerId }
+        if (!stopped) Ferry.nearby.update { it + peerId }
     }
 
     private fun lost(serviceName: String) {
