@@ -76,6 +76,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
     private var started = false
     @Volatile private var capture: Capture? = null
     @Volatile private var projection: MediaProjection? = null
+    @Volatile private var stopped: MediaProjection.Callback? = null
 
     // ATOMIC: runs (and finishes the stream) even if ended before it was dispatched.
     @OptIn(DelicateCoroutinesApi::class)
@@ -110,8 +111,8 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             override fun onReceive(c: Context, i: Intent) = end(Fsp.END_LOCKED, "phone locked")
         }
         ContextCompat.registerReceiver(ctx, screenOff, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
-        Notifs.screen(ctx, mac, "Getting ready…")
         try {
+            Notifs.screen(ctx, mac, "Getting ready…")
             coroutineScope {
                 val parser = FspParser()
                 while (true) {
@@ -131,6 +132,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             ended = true // nothing more on the wire, incl. END from our own projection.stop() below
             ctx.unregisterReceiver(screenOff)
             projection?.let {
+                stopped?.let(it::unregisterCallback) // our own stop isn't "stopped on the phone"
                 it.stop()
                 FerryService.instance?.projecting(false)
             }
@@ -169,12 +171,11 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         }
         val p = project() ?: return end(Fsp.END_NOT_ALLOWED, "screen sharing was not allowed on the phone")
         projection = p
-        p.registerCallback(
-            object : MediaProjection.Callback() {
-                override fun onStop() = end(if (locked()) Fsp.END_LOCKED else Fsp.END_STOPPED, "screen sharing stopped on the phone")
-            },
-            Handler(Looper.getMainLooper()),
-        )
+        val cb = object : MediaProjection.Callback() {
+            override fun onStop() = end(if (locked()) Fsp.END_LOCKED else Fsp.END_STOPPED, "screen sharing stopped on the phone")
+        }
+        p.registerCallback(cb, Handler(Looper.getMainLooper()))
+        stopped = cb
         Notifs.screen(ctx, mac, if (control) "Screen sharing is on, and $mac can tap and type here" else "Screen sharing is on")
         Capture(ctx, p, m).also { capture = it }.run(::send)
     }
@@ -194,8 +195,15 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             val (code, data) = withTimeoutOrNull(120_000) { a.result.await() } ?: return null
             if (code != Activity.RESULT_OK || data == null) return null
             // Android 14+: the service must hold the mediaProjection type before getMediaProjection.
-            (FerryService.instance ?: error("Ferry isn't running")).projecting(true)
-            return ctx.getSystemService(MediaProjectionManager::class.java).getMediaProjection(code, data)
+            val service = FerryService.instance ?: error("Ferry isn't running")
+            service.projecting(true)
+            // Don't leave the service holding the mediaProjection type if Android refuses the token.
+            return runCatching { ctx.getSystemService(MediaProjectionManager::class.java).getMediaProjection(code, data) }
+                .onFailure { Log.w(SCREEN_TAG, "getMediaProjection failed", it) }
+                .getOrNull() ?: run {
+                service.projecting(false)
+                null
+            }
         } finally {
             Screen.ask = null
             Notifs.cancel(ctx, Notifs.ID_SCREEN_ASK)
