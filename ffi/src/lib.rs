@@ -201,6 +201,35 @@ pub enum FfiEvent {
     CallLog {
         calls: Vec<FfiCallEntry>,
     },
+    /// Mac → phone; answered with FsList. `path` is relative to the phone's storage root.
+    FsListRequest {
+        path: String,
+    },
+    FsList {
+        path: String,
+        entries: Vec<FfiFsEntry>,
+        error: String,
+    },
+    /// Mac → phone: send these files back over the file channel
+    FsGet {
+        paths: Vec<String>,
+    },
+    /// Mac → phone: offer to add this Wi-Fi network
+    WifiNetwork {
+        ssid: String,
+        password: String,
+    },
+    Dnd {
+        on: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiFsEntry {
+    pub name: String,
+    pub dir: bool,
+    pub size: u64,
+    pub modified_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -441,6 +470,25 @@ impl FfiEvent {
                     })
                     .collect(),
             },
+            Kind::FsListRequest(r) => Self::FsListRequest { path: r.path },
+            Kind::FsList(l) => Self::FsList {
+                path: l.path,
+                entries: (l.entries.into_iter())
+                    .map(|e| FfiFsEntry {
+                        name: e.name,
+                        dir: e.dir,
+                        size: e.size,
+                        modified_ms: e.modified_ms,
+                    })
+                    .collect(),
+                error: l.error,
+            },
+            Kind::FsGet(g) => Self::FsGet { paths: g.paths },
+            Kind::WifiNetwork(w) => Self::WifiNetwork {
+                ssid: w.ssid,
+                password: w.password,
+            },
+            Kind::Dnd(d) => Self::Dnd { on: d.on },
         })
     }
 
@@ -571,6 +619,28 @@ impl FfiEvent {
                     })
                     .collect(),
             }),
+            Self::FsListRequest { path } => Kind::FsListRequest(proto::FsListRequest { path }),
+            Self::FsList {
+                path,
+                entries,
+                error,
+            } => Kind::FsList(proto::FsList {
+                path,
+                entries: (entries.into_iter())
+                    .map(|e| proto::FsEntry {
+                        name: e.name,
+                        dir: e.dir,
+                        size: e.size,
+                        modified_ms: e.modified_ms,
+                    })
+                    .collect(),
+                error,
+            }),
+            Self::FsGet { paths } => Kind::FsGet(proto::FsGet { paths }),
+            Self::WifiNetwork { ssid, password } => {
+                Kind::WifiNetwork(proto::WifiNetwork { ssid, password })
+            }
+            Self::Dnd { on } => Kind::Dnd(proto::Dnd { on }),
         };
         proto::Event { kind: Some(kind) }
     }
@@ -1110,6 +1180,27 @@ mod event_tests {
                     kind: FfiCallKind::Missed,
                 }],
             },
+            FfiEvent::FsListRequest {
+                path: "DCIM".into(),
+            },
+            FfiEvent::FsList {
+                path: "DCIM".into(),
+                entries: vec![FfiFsEntry {
+                    name: "a.jpg".into(),
+                    dir: false,
+                    size: 5,
+                    modified_ms: 6,
+                }],
+                error: "".into(),
+            },
+            FfiEvent::FsGet {
+                paths: vec!["DCIM/a.jpg".into()],
+            },
+            FfiEvent::WifiNetwork {
+                ssid: "Home".into(),
+                password: "pw".into(),
+            },
+            FfiEvent::Dnd { on: true },
         ];
         for e in all {
             assert_eq!(FfiEvent::from_proto(e.clone().into_proto()), Some(e));

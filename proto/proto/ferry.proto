@@ -78,6 +78,11 @@ message Event {
     CallCommand call_command = 17;
     CallLogRequest call_log_request = 18;
     CallLog call_log = 19;
+    FsListRequest fs_list_request = 20;
+    FsList fs_list = 21;
+    FsGet fs_get = 22;
+    WifiNetwork wifi_network = 23;
+    Dnd dnd = 24;
   }
 }
 message NotifButton {
@@ -204,4 +209,30 @@ message CallEntry {
 }
 message CallLog { // phone → Mac, newest first
   repeated CallEntry calls = 1;
+}
+
+// --- Phase 6: phone files, Wi-Fi sharing, Do Not Disturb ---
+message FsListRequest { // Mac → phone; answered with FsList
+  string path = 1; // relative to the phone's shared storage root; "" = root
+}
+message FsEntry {
+  string name = 1;
+  bool dir = 2;
+  uint64 size = 3;
+  int64 modified_ms = 4;
+}
+message FsList { // phone → Mac
+  string path = 1;
+  repeated FsEntry entries = 2;
+  string error = 3; // non-empty: e.g. "allow file access in Ferry on the phone"
+}
+message FsGet { // Mac → phone: send these files to me over the file channel
+  repeated string paths = 1; // relative to the root
+}
+message WifiNetwork { // Mac → phone: offer to add this network (the phone asks the user)
+  string ssid = 1;
+  string password = 2; // empty = open network
+}
+message Dnd { // both ways: Do Not Disturb turned on/off (phone → Mac), or please set it (Mac → phone)
+  bool on = 1;
 }
