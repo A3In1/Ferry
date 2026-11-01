@@ -53,6 +53,10 @@ final class AppModel {
     var phoneTexts: [String: PhoneTexts] = [:]
     var messageWindows: [String: MessagesWindow] = [:]
     var activeCalls: [String: String] = [:]
+    // Phase 6: phone file browsing (Files.swift) by peer id, and the phone's last reported Do Not Disturb (WifiFocus.swift).
+    var phoneFiles: [String: PhoneFiles] = [:]
+    var fileWindows: [String: FilesWindow] = [:]
+    var phoneDnd = false
 
     init() {
         startTask = Task { await start() }
@@ -143,13 +147,16 @@ final class AppModel {
     }
 
     func chooseAndSend(to peer: FfiPeer) {
+        chooseFiles("Send to \(peer.name)").map { send($0, to: peer) }
+    }
+
+    func chooseFiles(_ message: String) -> [URL]? {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.message = "Send to \(peer.name)"
+        panel.message = message
         NSApp.activate()
-        guard panel.runModal() == .OK else { return }
-        send(panel.urls, to: peer)
+        return panel.runModal() == .OK ? panel.urls : nil
     }
 
     func send(_ urls: [URL], to peer: FfiPeer) {

@@ -31,6 +31,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <string>Ferry finds and connects to your paired phone on this network.</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>Ferry uses Bluetooth to reach your paired phone when you're not on the same Wi-Fi.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>macOS only shows apps your Wi-Fi network's name with Location access. Ferry uses it to share the network with your phone, never your location.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>macOS only shows apps your Wi-Fi network's name with Location access. Ferry uses it to share the network with your phone, never your location.</string>
   <key>NSBonjourServices</key>
   <array><string>_ferry._udp</string></array>
   <key>NSServices</key>

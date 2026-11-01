@@ -38,8 +38,12 @@ extension AppModel {
             notify("Opened link from \(peerName(peer) ?? "your phone")", url.absoluteString)
         case .smsThreads, .smsMessages, .smsNew, .call, .callLog:
             handleTexts(event, from: peer) // Messages.swift
+        case let .fsList(path, entries, error):
+            handleFiles(path: path, entries: entries, error: error, from: peer) // Files.swift
+        case let .dnd(on):
+            phoneDndChanged(on) // WifiFocus.swift
         case .notificationAction, .mediaCommand, .ring, .smsThreadsRequest, .smsMessagesRequest, .smsSend, .callCommand,
-             .callLogRequest:
+             .callLogRequest, .fsListRequest, .fsGet, .wifiNetwork:
             break // Mac → phone only
         }
     }

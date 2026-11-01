@@ -1,4 +1,4 @@
-# Ferry for Mac (Phases 1–5)
+# Ferry for Mac (Phases 1–6)
 
 Menu-bar app (no Dock icon) over the shared Rust core, via UniFFI bindings from `ffi/`.
 AppKit `NSStatusItem` + `NSMenu` (so the icon can take drops); the pairing window is SwiftUI.
@@ -171,6 +171,37 @@ FerryLogic (`Texts.swift`, tested).
 - **Time-sensitive** needs the `com.apple.developer.usernotifications.time-sensitive` entitlement to break through
   Focus. The ad-hoc bundle doesn't have it, so macOS shows the call as a normal notification.
 
+### Phone files, Wi-Fi sharing, Do Not Disturb (Phase 6)
+
+The browse window is `Sources/Ferry/Files.swift` (SwiftUI in an `NSWindow`, like Messages). Wi-Fi and Do Not
+Disturb are in `Sources/Ferry/WifiFocus.swift`. Path joining, breadcrumbs and sort order are in FerryLogic
+(`PhonePath.swift`, tested). Phone paths are always relative to the phone's shared storage root (`""` = root).
+A path or name with `.` / `..` or a `/` inside a name is refused, never sent.
+
+- **Browse <phone>** (menu) opens a window and sends `FsListRequest("")`. Path bar: the phone, then one
+  breadcrumb per folder (click one to jump there). The list shows name, size and date, folders first. Double-click
+  a folder to open it (a new `FsListRequest`). Double-click a file to download it. **Back** / **Up** / **Refresh**
+  are in the toolbar. An answer for a folder you've already left is ignored.
+- **Download** (or **⌘D**) sends `FsGet` with the selected files (folders in the selection are skipped). The bottom line says
+  "Requested …, arriving in Downloads…". The phone sends them over the normal file channel, so they land in
+  `~/Downloads` with the usual progress, quarantine and notification.
+- **Upload…**, or drop Mac files anywhere on the window (it gets a blue outline), sends them with the normal
+  send-files path. The bottom line says they land in Download/Ferry on the phone.
+- **Errors**: a non-empty `FsList.error` is shown in the list (e.g. "Allow file access in Ferry on the phone").
+  If nothing comes back within 5 s: "Turn on Files in Ferry on your phone".
+- **Share Wi-Fi with <phone>** (menu): reads the current network name with CoreWLAN. macOS only gives that to
+  apps with **Location** access. If it's missing, an alert explains why and then asks
+  (`NSLocationWhenInUseUsageDescription`), or opens System Settings → Location Services if it was denied. Then
+  "Send Wi-Fi “SSID” and its password to <phone>?". On Send, `security find-generic-password -D "AirPort network
+  password" -a <SSID> -w` reads the password, and macOS shows its own keychain/admin prompt. If that fails (cancelled,
+  or the password isn't in the System keychain), Ferry offers to send it as an open network or cancel. Then
+  `WifiNetwork` goes to the phone, which asks before adding it. The password is never logged.
+- **Do Not Disturb**: when the phone reports `Dnd(on)`, Ferry runs your Shortcut **Ferry Focus On** or
+  **Ferry Focus Off** (`/usr/bin/shortcuts run`), if `shortcuts list` has it. If not, a one-time alert explains how to make
+  them (Shortcuts app → new shortcut → **Set Focus** action → Do Not Disturb On / Off). **Phone Do Not Disturb**
+  (menu toggle) sends `Dnd(on)` to the phone. Its check mark only follows what the phone last reported, so it moves
+  once the phone confirms.
+
 ## Test it
 
 **With the CLI** (`cargo build --release -p ferry-cli`, then `F=target/release/ferry`):
@@ -237,7 +268,31 @@ FerryLogic (`Texts.swift`, tested).
 - Without a phone, the CLI's `listen` prints what the Mac sends (`SmsThreadsRequest`, `SmsSend`, `CallCommand`, …).
   The CLI can't send Phase 5 events yet, so it can only test the Mac → phone direction.
 
+**Phase 6 with the phone** (turn on **Files** in Ferry on the phone first):
+1. Menu → **Browse <phone>**. The root of the phone's storage appears, folders first. Double-click `DCIM`, then
+   `Camera`: the path bar reads <phone> › DCIM › Camera. Click **Up** and **Back**, and click a breadcrumb.
+2. Select a photo or two and press **⌘D**: "Requested …, arriving in Downloads…", then the usual incoming
+   transfer in the menu and a "Received" notification. Check `~/Downloads`.
+3. Drop a Mac file on the window (or **Upload…**). The menu shows "Sending…". Check Download/Ferry on the phone.
+4. Turn file access off on the phone and **Refresh**: its error shows in the list. Turn **Files** off in Ferry
+   on the phone and Refresh: after 5 s, "Turn on Files in Ferry on your phone".
+5. Menu → **Share Wi-Fi with <phone>**. The first time: the Location alert, then the macOS prompt; Allow, then choose it
+   again. Confirm "Send Wi-Fi “…” …?". macOS asks for your admin password or keychain access (Allow). The phone offers to
+   add the network. Repeat and cancel the macOS prompt: Ferry offers "Send without password". Check Console
+   (`log stream --predicate 'process == "Ferry"'`): the password never shows.
+6. Turn Do Not Disturb on on the phone. With no Ferry Focus Shortcuts: the one-time hint. In Shortcuts, create
+   **Ferry Focus On** (Set Focus → Do Not Disturb → On) and **Ferry Focus Off** (Set Focus → turn off). Toggle DND on the
+   phone: the Mac's Focus follows, and **Phone Do Not Disturb** in the menu shows its state. Toggle it from the
+   menu: the phone's DND changes and the check mark follows.
+- Without a phone, the CLI's `listen` prints what the Mac sends (`FsListRequest`, `FsGet`, `Dnd`, `WifiNetwork`).
+  It prints `WifiNetwork` with the password, so only use a test network. The CLI can't send Phase 6 events yet, so
+  the list stays empty and turns into "Turn on Files…" after 5 s.
+
 ## Later
+
+- Phase 6: one folder listing at a time, no paging or thumbnails. Download skips folders. Two quick Do Not Disturb changes can
+  run their Shortcuts out of order. Ferry doesn't watch the Mac's own Focus, so changing Focus on the Mac doesn't
+  reach the phone.
 
 - Phase 5: read state isn't sent back to the phone (opening a thread clears its dot on the Mac only), a send
   that never echoes stays "sending…", and threads/messages aren't paged (the phone's default limits).

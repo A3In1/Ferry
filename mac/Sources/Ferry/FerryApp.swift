@@ -93,10 +93,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(sync)
         menu.addItem(ClosureItem("Ring phone") { [weak self] in self?.model.ring(true) }.enabled(hasPhone))
         menu.addItem(ClosureItem("Stop ringing") { [weak self] in self?.model.ring(false) }.enabled(hasPhone))
+        let dnd = ClosureItem("Phone Do Not Disturb") { [weak self] in
+            guard let model = self?.model else { return }
+            model.setPhoneDnd(!model.phoneDnd)
+        }
+        dnd.state = model.phoneDnd ? .on : .off
+        dnd.toolTip = "Follows the phone's Do Not Disturb; your “Ferry Focus On/Off” Shortcuts make the Mac follow too"
+        menu.addItem(dnd.enabled(hasPhone))
 
         menu.addItem(.separator())
         for peer in model.peers {
             menu.addItem(ClosureItem("Messages \(peer.name)") { [weak self] in self?.model.openMessages(peer) }.enabled(model.node != nil))
+            menu.addItem(ClosureItem("Browse \(peer.name)") { [weak self] in self?.model.openFiles(peer) }.enabled(model.node != nil))
+            menu.addItem(ClosureItem("Share Wi-Fi with \(peer.name)") { [weak self] in self?.model.shareWifi(with: peer) }
+                .enabled(model.node != nil))
             menu.addItem(ClosureItem("Mirror \(peer.name)") { [weak self] in self?.model.mirror(peer) }.enabled(model.node != nil))
             let share = ClosureItem("Share cursor with \(peer.name)") { [weak self] in
                 guard let model = self?.model else { return }
