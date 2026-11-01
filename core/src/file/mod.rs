@@ -308,12 +308,14 @@ impl Receiver {
             slots: Vec::with_capacity(items.len()),
             parts_in_use: self.parts_in_use.clone(),
         };
+        // one wait for the whole offer: per item, a big retried offer could wait for hours
+        let deadline = Instant::now() + PART_WAIT;
         for (i, item) in items.into_iter().enumerate() {
             if !accepted.get(i).copied().unwrap_or(false) {
                 transfer.slots.push(None);
                 continue;
             }
-            let part = self.claim_part(partial_dir.join(part_name(&item)), || {
+            let part = self.claim_part(partial_dir.join(part_name(&item)), deadline, || {
                 // Same file still busy: the duplicate gets a private, non-resumable partial.
                 partial_dir.join(format!("{}-{i}.part", hex::encode(id)))
             });
@@ -336,10 +338,14 @@ impl Receiver {
         Ok(transfer)
     }
 
-    /// Claims `part`, waiting up to [`PART_WAIT`] if another transfer still holds it.
+    /// Claims `part`, waiting until `deadline` if another transfer still holds it.
     /// Runs on a blocking thread (see handle_control), so sleeping is fine.
-    fn claim_part(&self, part: PathBuf, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
-        let deadline = Instant::now() + PART_WAIT;
+    fn claim_part(
+        &self,
+        part: PathBuf,
+        deadline: Instant,
+        fallback: impl FnOnce() -> PathBuf,
+    ) -> PathBuf {
         loop {
             let mut parts = self.parts_in_use.lock().unwrap();
             if !parts.contains(&part) {
@@ -397,6 +403,8 @@ impl Receiver {
         if done != size {
             bail!("data stream ended after {done} of {size} bytes");
         }
+        // on disk before it's renamed into place and reported saved (power loss, phone reboot)
+        file.sync_data().await?;
         Ok(hasher.finalize())
     }
 
