@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.ConnectivityManager
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
@@ -85,7 +86,10 @@ class FerryService : Service() {
         checkIn = Ferry.scope.launch {
             delay(3_000) // let addresses settle; collapses bursts of callbacks
             val node = Ferry.node.value ?: return@launch
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val onWifi = cm.getNetworkCapabilities(cm.activeNetwork)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             Ferry.peers.value.forEach { p ->
+                if (onWifi && Ferry.ble.value == p.id) return@forEach Ble.tryWifi(this@FerryService, node, p.id)
                 catching { node.checkIn(p.id) }.onFailure { Log.w(TAG, "check-in with ${p.name}: ${it.message}") }
             }
         }

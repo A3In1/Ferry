@@ -192,12 +192,14 @@ object Ble {
     // The one live (or connecting) bridge. Its socket/gatt are closed directly on stop, because
     // blocking connect()/read() don't react to coroutine cancellation.
     @Volatile private var link: Job? = null
+    @Volatile private var linkDevice: BluetoothDevice? = null
     @Volatile private var socket: BluetoothSocket? = null
     @Volatile private var gatt: BluetoothGatt? = null
 
     @Synchronized
     private fun startLink(ctx: Context, node: FerryNode, device: BluetoothDevice, peer: String) {
         if (link?.isActive == true) return
+        linkDevice = device
         link = Ferry.scope.launch {
             try {
                 bridge(ctx, node, device, peer)
@@ -210,6 +212,24 @@ object Ble {
                 Ferry.ble.compareAndSet(peer, null)
             }
         }
+    }
+
+    /** Joined Wi-Fi while bridged to [peer]: drop Bluetooth and check in directly. If the Mac
+     * isn't reachable that way (another network), reopen the bridge at once. */
+    suspend fun tryWifi(ctx: Context, node: FerryNode, peer: String) {
+        val device = linkDevice ?: return
+        if (Ferry.ble.value != peer) return
+        stopBridge()
+        link?.join() // the core drops the Bluetooth path when the bridge ends
+        catching { node.checkIn(peer) }
+            .onSuccess {
+                cooldown.hold(peer, SystemClock.elapsedRealtime(), CHECKED_IN_MS)
+                Log.w(BLE_TAG, "back on Wi-Fi with ${peer.take(8)}, Bluetooth closed")
+            }
+            .onFailure {
+                Log.w(BLE_TAG, "Wi-Fi can't reach ${peer.take(8)} (${it.text()}); back to Bluetooth")
+                startLink(ctx, node, device, peer)
+            }
     }
 
     /** Service stopping: tear the bridge down. */
