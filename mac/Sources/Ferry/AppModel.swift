@@ -54,6 +54,9 @@ final class AppModel {
     var seenClipboardChange = NSPasteboard.general.changeCount
     /// The 1 s clipboard poll; only runs while "Sync clipboard to phone" is on.
     var clipboardPoll: Task<Void, Never>?
+    /// Phones with a synced copy in flight, and the newest copy waiting behind each (Sync.swift).
+    var clipboardSending: Set<String> = []
+    var clipboardNext: [String: String] = [:]
     // Phase 4 (Screen.swift, Crossing.swift): open viewer windows by peer id, and cursor sharing.
     var viewers: [String: ScreenWindow] = [:]
     var crossing: Crossing?

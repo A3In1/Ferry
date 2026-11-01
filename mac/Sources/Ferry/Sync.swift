@@ -135,7 +135,27 @@ extension AppModel {
         guard types.isDisjoint(with: secretPasteboardTypes), // password managers
               let text = pb.string(forType: .string), !text.isEmpty, text.utf8.count <= clipboardLimit
         else { return }
-        broadcast(.clipboard(text: text))
+        for peer in peers.map(\.id) {
+            if clipboardSending.contains(peer) { clipboardNext[peer] = text } else { pushClipboard(text, to: peer) }
+        }
+    }
+
+    /// One synced copy in flight per phone: copies made meanwhile collapse into the newest, sent
+    /// when this one is done. An unreachable phone takes ~10 s to fail, so they'd otherwise pile up
+    /// (and could land out of order once it's back).
+    private func pushClipboard(_ text: String, to peer: String) {
+        clipboardSending.insert(peer)
+        Task {
+            await ready()
+            if let node {
+                let event = FfiEvent.clipboard(text: text)
+                do { try await Task.detached { try await node.sendEvent(peerId: peer, event: event) }.value } catch {
+                    logger.error("clipboard sync to \(self.peerName(peer) ?? "phone") failed: \(error, privacy: .public)")
+                }
+            }
+            clipboardSending.remove(peer)
+            if let next = clipboardNext.removeValue(forKey: peer) { pushClipboard(next, to: peer) }
+        }
     }
 
     /// True when the user denied pasteboard access to Ferry (sync can't read anything).
