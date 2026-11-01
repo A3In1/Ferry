@@ -54,12 +54,7 @@ extension AppModel {
 /// No main menu in a menu-bar app, so text editing shortcuts and ⌘W are wired here.
 final class EditingWindow: NSWindow {
     override func performKeyEquivalent(with e: NSEvent) -> Bool {
-        Self.editShortcut(e, from: self) || super.performKeyEquivalent(with: e)
-    }
-
-    /// ⌘X/C/V/A/Z/W to the first responder; true if one took it. Also used for alert text fields (Relay.swift).
-    static func editShortcut(_ e: NSEvent, from sender: Any?) -> Bool {
-        guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return false }
+        guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return super.performKeyEquivalent(with: e) }
         let action: Selector? = switch e.charactersIgnoringModifiers {
         case "x": #selector(NSText.cut(_:))
         case "c": #selector(NSText.copy(_:))
@@ -69,7 +64,7 @@ final class EditingWindow: NSWindow {
         case "w": #selector(NSWindow.performClose(_:))
         default: nil
         }
-        guard let action else { return false }
-        return NSApp.sendAction(action, to: nil, from: sender)
+        if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
+        return super.performKeyEquivalent(with: e)
     }
 }

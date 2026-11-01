@@ -102,15 +102,6 @@ object Ferry {
         refreshPeers()
     }
 
-    /** Saves the internet relay URL (null/"" = off) and restarts the node to apply it; false (toasted) on error. */
-    fun setRelay(ctx: Context, url: String?): Boolean {
-        val node = node.value ?: return false.also { toast(ctx, "Ferry isn't running") }
-        catching { node.setRelayUrl(url) }.onFailure { toast(ctx, it.text()); return false }
-        FerryService.instance?.restart()
-        toast(ctx, if (url.isNullOrBlank()) "Internet relay off" else "Internet relay saved")
-        return true
-    }
-
     /**
      * Opens the documents now, while the calling activity still holds the URI grant; an open
      * fd stays readable after the grant ends. Runs on IO (providers may block).

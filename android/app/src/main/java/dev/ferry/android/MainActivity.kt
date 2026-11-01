@@ -285,8 +285,6 @@ private fun Home(onScan: () -> Unit, onPaste: () -> Unit, onSend: () -> Unit, li
 
             if (peers.isNotEmpty()) ScreenSection()
 
-            RelaySection()
-
             if (recent.isNotEmpty()) {
                 Text("Recent", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
                 recent.forEach { Text(it.text, style = MaterialTheme.typography.bodyMedium) }
@@ -367,45 +365,6 @@ private fun ScreenSection() {
     OutlinedButton(onClick = { ControlService.openSettings(ctx) }) {
         Text(if (control != null) "Ferry control: on" else "Turn on Ferry control")
     }
-}
-
-/** Phase 7: the user's own relay for reaching the Mac from another network. Off unless set here. */
-@Composable
-private fun RelaySection() {
-    val node by Ferry.node.collectAsStateWithLifecycle()
-    val relay = remember(node) { node?.relayUrl() } // a restart (new node) re-reads it
-    var editing by remember { mutableStateOf(false) }
-    Text("Internet relay", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
-    Text(
-        "Connect to your Mac from a different network through your own relay server. The relay only passes encrypted data.",
-        style = MaterialTheme.typography.bodySmall,
-    )
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(relay ?: "Off", Modifier.weight(1f))
-        TextButton(onClick = { editing = true }, enabled = node != null) { Text("Edit") }
-    }
-    // shortcut: a self-signed relay needs relay-ca.pem in the node data dir by hand (see README); no UI for it.
-    if (editing) RelayDialog(relay, onDismiss = { editing = false })
-}
-
-@Composable
-private fun RelayDialog(current: String?, onDismiss: () -> Unit) {
-    val ctx = LocalContext.current
-    var text by remember { mutableStateOf(current ?: "https://") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Internet relay") },
-        text = {
-            OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("https://relay.example.com") }, singleLine = true)
-        },
-        confirmButton = {
-            TextButton(onClick = { if (Ferry.setRelay(ctx, text.trim())) onDismiss() }, enabled = text.isNotBlank()) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = { if (Ferry.setRelay(ctx, null)) onDismiss() }) { Text("Turn off") }
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
 }
 
 @Composable

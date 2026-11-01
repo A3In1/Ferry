@@ -97,23 +97,6 @@ final class AppModel {
         tick()
     }
 
-    /// Applies settings the core only reads at start (the relay): shuts the node down, then runs `start` again.
-    /// Bluetooth and crossing stop with `node` nil and come back on the next tick; open windows reconnect via `model.node`.
-    func restartNode() {
-        guard let old = node else { return }
-        node = nil
-        bluetooth?.setWanted(false)
-        bluetooth = nil
-        bluetoothNote = nil
-        usbLinks = []
-        status = "Restarting…"
-        tick()
-        startTask = Task {
-            await old.shutdown() // closes the endpoint (frees the port), mDNS and the USB watcher
-            await start()
-        }
-    }
-
     /// Cheap (in-memory lists); also catches pairings that finished since the last look.
     func tick() {
         refreshPeers()

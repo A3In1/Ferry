@@ -13,9 +13,6 @@ pub struct TrustedPeer {
     pub presence_key: String, // hex, 32 bytes: recognises the peer's presence tags
     pub paired_at_unix: i64,
     pub last_addrs: Vec<std::net::SocketAddr>,
-    /// The peer's internet relay URL, learned from its Hello (Phase 7).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_relay: Option<String>,
 }
 
 /// `<data_dir>/peers.json`. Every mutation is saved immediately (atomic replace).
@@ -86,7 +83,6 @@ mod tests {
             presence_key: "00".repeat(32),
             paired_at_unix: 1,
             last_addrs: vec!["192.168.1.2:4000".parse().unwrap()],
-            last_relay: Some("https://relay.example.com/".into()),
         };
         s.upsert(p.clone()).unwrap();
         p.name = "Renamed".into();

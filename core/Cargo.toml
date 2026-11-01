@@ -16,7 +16,6 @@ serde_json.workspace = true
 tracing.workspace = true
 rand = "0.10"
 hex = "0.4"
-rustls-pki-types = { version = "1", features = ["std"] }
 mdns-sd = { version = "0.21", optional = true, default-features = false, features = ["async"] }
 
 [features]
@@ -25,5 +24,3 @@ mdns = ["dep:mdns-sd"]
 
 [dev-dependencies]
 tempfile = "3"
-iroh-relay = { version = "1.4", features = ["server", "test-utils"] }
-tokio = { workspace = true, features = ["net", "process", "rt-multi-thread"] }
