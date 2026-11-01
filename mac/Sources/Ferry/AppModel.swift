@@ -34,6 +34,7 @@ final class AppModel {
         var saved: [URL] = []
         var failed = 0
         var rateStart: (Date, UInt64)? // first progress seen, for MB/s (resumes start mid-way)
+        var lastEvent = Date.now // a dropped connection sends no more events (see dropStalled)
     }
     private var incoming: [String: Incoming] = [:]
     private var startTask: Task<Void, Never>?
@@ -71,7 +72,8 @@ final class AppModel {
 
     init() {
         startTask = Task { await start() }
-        Task { while (try? await Task.sleep(for: .seconds(2))) != nil { tick() } }
+        // Tolerance lets macOS coalesce the wake-ups with other timers.
+        Task { while (try? await Task.sleep(for: .seconds(2), tolerance: .seconds(1))) != nil { tick() } }
         updateClipboardPoll()
     }
 
@@ -117,6 +119,7 @@ final class AppModel {
         // USB and Bluetooth bridges (serial "ble:…") both show up here.
         if let node { usbLinks = node.usbLinks() }
         bluetooth?.setWanted(bluetoothEnabled && !peers.isEmpty)
+        dropStalled()
         updateCrossing()
         onChange()
     }
@@ -168,6 +171,8 @@ final class AppModel {
             activeCalls[peer.id] = nil
             lastHeard[peer.id] = nil
             phoneDnd[peer.id] = nil
+            phoneTexts[peer.id] = nil // its cached threads and messages
+            phoneFiles[peer.id] = nil
             for w in [viewers[peer.id], messageWindows[peer.id], fileWindows[peer.id]] as [PeerWindow?] { w?.window.close() }
             removeNotifications { $0.request.content.userInfo[Notifications.peerKey] as? String == peer.id }
         } catch {
@@ -246,6 +251,7 @@ final class AppModel {
             guard var t = incoming[tid] else { return }
             let bytes = t.finishedBytes + done
             if t.rateStart == nil { t.rateStart = (.now, bytes) }
+            t.lastEvent = .now
             incoming[tid] = t
             let pct = t.totalBytes > 0 ? min(100, bytes * 100 / t.totalBytes) : 100
             var text = "\(t.names.count > 1 ? "\(index + 1) of \(t.names.count): " : "")\(name(t, index)) — \(pct)%"
@@ -254,17 +260,21 @@ final class AppModel {
                 if secs > 0.5 { text += " · " + rate(Double(bytes) - Double(startBytes), seconds: secs) }
             }
             put(tid, text, "arrow.down.circle")
+        // The core also reports our own sends (path = the phone's file name); only offered transfers are
+        // incoming. A send's own line reports its result.
         case let .saved(tid, _, path):
+            guard var t = incoming[tid] else { return }
             let url = URL(filePath: path)
             quarantine(url)
-            var t = incoming[tid] ?? Incoming(names: [url.lastPathComponent], totalBytes: 0)
             t.saved.append(url)
+            t.lastEvent = .now
             t.finishedBytes += UInt64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
             incoming[tid] = t
             finishIfDone(tid)
         case let .failed(tid, index, error):
-            var t = incoming[tid] ?? Incoming(names: [], totalBytes: 0)
+            guard var t = incoming[tid] else { return }
             t.failed += 1
+            t.lastEvent = .now
             incoming[tid] = t
             logger.error("receiving \(self.name(t, index), privacy: .private) failed: \(error, privacy: .public)")
             put(tid, "Couldn't receive \(name(t, index))", "exclamationmark.triangle")
@@ -272,13 +282,26 @@ final class AppModel {
         }
     }
 
-    private func finishIfDone(_ tid: String) {
-        guard let t = incoming[tid], t.saved.count + t.failed >= t.names.count else { return }
+    /// `stalled`: no event for a while (the connection dropped), so the rest won't come.
+    private func finishIfDone(_ tid: String, stalled: Bool = false) {
+        guard var t = incoming[tid], stalled || t.saved.count + t.failed >= t.names.count else { return }
         incoming[tid] = nil
+        t.failed = max(t.failed, t.names.count - t.saved.count)
         if !t.saved.isEmpty {
             let what = describe(t.saved.map(\.lastPathComponent))
             put(tid, t.failed == 0 ? "Received \(what)" : "Received \(what); \(t.failed) couldn't be received", "checkmark.circle")
             notifyReceived(t.saved, what: what, failed: t.failed, id: tid)
+        } else if stalled {
+            put(tid, "Couldn't receive \(describe(t.names)): the connection was lost", "exclamationmark.triangle")
+        }
+    }
+
+    /// The core sends nothing more for a transfer whose connection dropped; without this its line would
+    /// stay at "…45%" for good.
+    private func dropStalled() {
+        for (tid, t) in incoming where Date.now.timeIntervalSince(t.lastEvent) > 120 {
+            logger.notice("transfer \(tid.prefix(8), privacy: .public) stalled, giving up")
+            finishIfDone(tid, stalled: true)
         }
     }
 

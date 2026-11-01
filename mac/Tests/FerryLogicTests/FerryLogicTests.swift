@@ -73,6 +73,31 @@ import Testing
     pump.close() // idempotent
 }
 
+/// A closed pump is freed, even after more close() calls (each used to leave a block, holding the pump,
+/// on the exited thread's run loop).
+@Test func streamPumpFreedAfterClose() {
+    func pair() -> (InputStream, OutputStream) {
+        var i: InputStream?, o: OutputStream?
+        Stream.getBoundStreams(withBufferSize: 1024, inputStream: &i, outputStream: &o)
+        return (i!, o!)
+    }
+    let (aIn, _) = pair(), (_, bOut) = pair()
+    let closed = DispatchSemaphore(value: 0)
+    weak var weakPump: StreamPump?
+    do {
+        let pump = StreamPump(input: aIn, output: bOut, onRead: { _ in }, onClose: { closed.signal() })
+        weakPump = pump
+        pump.close()
+        #expect(closed.wait(timeout: .now() + 5) == .success)
+        pump.close()
+        pump.close()
+        #expect(!pump.write(Data([1])))
+    }
+    let deadline = Date.now + 5
+    while weakPump != nil, Date.now < deadline { Thread.sleep(forTimeInterval: 0.01) }
+    #expect(weakPump == nil)
+}
+
 final class Box: @unchecked Sendable {
     private let lock = NSLock()
     private var d = Data()

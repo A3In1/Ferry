@@ -9,7 +9,6 @@ public final class StreamPump: NSObject, StreamDelegate, @unchecked Sendable {
     private let output: OutputStream
     private let onRead: @Sendable (Data) -> Void
     private let onClose: @Sendable () -> Void
-    private var runLoop: CFRunLoop!
     private var pending = Data() // pump thread only
     private var inFlight = false // pump thread only: a writer is waiting on `pending`
 
@@ -18,6 +17,9 @@ public final class StreamPump: NSObject, StreamDelegate, @unchecked Sendable {
     private var closed = false
     private var waiter: DispatchSemaphore?
     private var writeOK = false
+    /// The pump thread's run loop; nil once it has exited, so late blocks (which capture `self`) aren't
+    /// queued on a dead run loop forever (a retain cycle that leaked every closed pump and its streams).
+    private var runLoop: CFRunLoop?
 
     public init(input: InputStream, output: OutputStream,
                 onRead: @escaping @Sendable (Data) -> Void, onClose: @escaping @Sendable () -> Void) {
@@ -29,7 +31,7 @@ public final class StreamPump: NSObject, StreamDelegate, @unchecked Sendable {
         let ready = DispatchSemaphore(value: 0)
         // The thread keeps `self` alive until the streams close.
         let thread = Thread { [self] in
-            runLoop = CFRunLoopGetCurrent()
+            lock.withLock { runLoop = CFRunLoopGetCurrent() }
             for s in [self.input, self.output] as [Stream] {
                 s.delegate = self
                 s.schedule(in: .current, forMode: .default)
@@ -37,6 +39,7 @@ public final class StreamPump: NSObject, StreamDelegate, @unchecked Sendable {
             }
             ready.signal()
             while !isClosed { _ = RunLoop.current.run(mode: .default, before: .distantFuture) }
+            lock.withLock { runLoop = nil } // blocks still queued are released with the run loop
         }
         thread.name = "ferry.stream-pump"
         thread.qualityOfService = .userInitiated
@@ -82,9 +85,13 @@ public final class StreamPump: NSObject, StreamDelegate, @unchecked Sendable {
 
     // MARK: pump thread
 
+    /// A no-op once the pump thread has exited.
     private func perform(_ block: @escaping () -> Void) {
-        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, block)
-        CFRunLoopWakeUp(runLoop)
+        lock.withLock {
+            guard let runLoop else { return }
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, block)
+            CFRunLoopWakeUp(runLoop)
+        }
     }
 
     private func readAll() {
@@ -131,7 +138,7 @@ public final class StreamPump: NSObject, StreamDelegate, @unchecked Sendable {
             s.remove(from: .current, forMode: .default)
             s.close()
         }
-        CFRunLoopStop(runLoop)
+        CFRunLoopStop(CFRunLoopGetCurrent())
         onClose()
     }
 }

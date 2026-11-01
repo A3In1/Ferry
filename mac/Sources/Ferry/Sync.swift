@@ -22,7 +22,7 @@ extension AppModel {
         clipboardPoll = nil
         guard syncClipboard else { return }
         seenClipboardChange = NSPasteboard.general.changeCount
-        clipboardPoll = Task { while (try? await Task.sleep(for: .seconds(1))) != nil { pollClipboard() } }
+        clipboardPoll = Task { while (try? await Task.sleep(for: .seconds(1), tolerance: .milliseconds(500))) != nil { pollClipboard() } }
     }
 
     // MARK: incoming (via Bridge.onEvent)
