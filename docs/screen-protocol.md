@@ -51,6 +51,9 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   lifts after holding still (no fling on top of the Mac's momentum): on `end` (after 40 ms, in case
   momentum follows the finger lift), after 120 ms without a wheel step or 500 ms without trackpad
   deltas, and to re-grip when the finger would leave the screen. Trackpad: 2 dp per point; wheel: 40 dp per line.
+- Cursor crossing (Mac): the pointer crosses after pushing 8 pt into the edge (pauses over 0.4 s start
+  over) and comes back after 4 pt past the phone's Mac-side edge, at the proportional height. Moves
+  are merged and sent at most at 120 Hz; the phone moves its overlay once per frame to the latest spot.
 - Messages may grow trailing fields; a receiver ignores bytes past what it knows and treats missing
   optional fields as 0.
 - Video: H.264, no B-frames, realtime priority/low latency where supported, repeat previous frame

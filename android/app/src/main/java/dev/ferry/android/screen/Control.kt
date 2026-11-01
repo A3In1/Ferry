@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.GestureDescription.StrokeDescription
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -17,6 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.View
 import android.view.ViewConfiguration
@@ -33,6 +35,9 @@ import kotlin.math.hypot
 class ControlService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private var cursor: View? = null
+    private var cursorAt: PointF? = null
+    private var cursorFrame = false
+    private var size: ScreenSize? = null
     private var downAt = 0L
     private var down: PointF? = null
     private var last = PointF()
@@ -79,16 +84,24 @@ class ControlService : AccessibilityService() {
     /** Session over: hide the cursor and lift a finger that's still down. */
     fun reset() = main.post {
         edits.clear()
+        main.removeCallbacks(applyEdits)
         stopScroll(lift = true)
         if (stroke != null) segment(last, SystemClock.uptimeMillis(), false)
         down = null
         stroke = null
-        cursor?.let { runCatching { getSystemService(WindowManager::class.java).removeView(it) } }
-        cursor = null
+        hideCursor()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        size = null // rotated, folded, …
+    }
+
+    /** The screen size, cached: input arrives up to every frame and the lookup isn't free. */
+    private fun size() = size ?: screenSize(this).also { size = it }
+
     private fun px(x: Float, y: Float): PointF {
-        val s = screenSize(this)
+        val s = size()
         return PointF(x.coerceIn(0f, 1f) * (s.w - 1), y.coerceIn(0f, 1f) * (s.h - 1))
     }
 
@@ -146,7 +159,7 @@ class ControlService : AccessibilityService() {
     private fun scroll(m: Msg.Scroll) {
         if (down != null) return // don't break a drag in progress
         val p = px(m.x, m.y)
-        val d = scrollDrag?.takeIf { it.busy } ?: screenSize(this).let { s ->
+        val d = scrollDrag?.takeIf { it.busy } ?: size().let { s ->
             ScrollDrag(s.w - 1f, s.h - 1f, 8 * resources.displayMetrics.density).also { scrollDrag = it }
         }
         // Trackpad points arrive as tenths of a line: 2 dp of finger per point; a wheel step is a list row's worth.
@@ -188,14 +201,11 @@ class ControlService : AccessibilityService() {
     }
 
     private fun cursor(action: Int, x: Float, y: Float) {
-        val wm = getSystemService(WindowManager::class.java)
-        if (action == 3) {
-            cursor?.let { runCatching { wm.removeView(it) } }
-            cursor = null
-            return
-        }
+        if (action == 3) return hideCursor()
         val p = px(x, y)
-        val v = cursor ?: Pointer(this).also {
+        cursorAt = p
+        if (cursor == null) {
+            val v = Pointer(this)
             val size = (24 * resources.displayMetrics.density).toInt()
             val lp = WindowManager.LayoutParams(
                 size,
@@ -207,14 +217,33 @@ class ControlService : AccessibilityService() {
             )
             lp.gravity = Gravity.TOP or Gravity.START
             lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            wm.addView(it, lp)
-            cursor = it
+            lp.x = p.x.toInt()
+            lp.y = p.y.toInt()
+            if (runCatching { getSystemService(WindowManager::class.java).addView(v, lp) }.isSuccess) cursor = v
+        } else if (!cursorFrame) {
+            // The Mac may send moves faster than the screen redraws: move the overlay once per frame, to the latest spot.
+            cursorFrame = true
+            Choreographer.getInstance().postFrameCallback(moveCursor)
         }
+        touch(action, x, y)
+    }
+
+    private val moveCursor = Choreographer.FrameCallback {
+        cursorFrame = false
+        val v = cursor ?: return@FrameCallback
+        val p = cursorAt ?: return@FrameCallback
         val lp = v.layoutParams as WindowManager.LayoutParams
+        if (lp.x == p.x.toInt() && lp.y == p.y.toInt()) return@FrameCallback
         lp.x = p.x.toInt()
         lp.y = p.y.toInt()
-        wm.updateViewLayout(v, lp)
-        touch(action, x, y)
+        runCatching { getSystemService(WindowManager::class.java).updateViewLayout(v, lp) }
+    }
+
+    private fun hideCursor() {
+        if (cursorFrame) Choreographer.getInstance().removeFrameCallback(moveCursor)
+        cursorFrame = false
+        cursor?.let { runCatching { getSystemService(WindowManager::class.java).removeView(it) } }
+        cursor = null
     }
 
     /**

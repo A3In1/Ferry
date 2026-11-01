@@ -111,12 +111,19 @@ private let expected: [Fsp.Message] = [
     #expect(c.x == 0 && c.y == 600)
     var stays = c.move(dx: 100, dy: 0)
     #expect(stays && c.x == 240)
+    stays = c.move(dx: 0.25, dy: 0.25) // sub-pixel moves add up
+    stays = c.move(dx: 0.25, dy: 0.25)
+    #expect(stays && c.x == 241.2 && c.y == 601.2)
     stays = c.move(dx: 10_000, dy: 10_000)
     #expect(stays && c.x == 1080 && c.y == 2400) // clamped
     #expect(c.normalized == (1, 1))
     stays = c.move(dx: -450, dy: -1000)
     #expect(stays && c.x == 0 && c.y == 0)
     stays = c.move(dx: -1, dy: 0)
+    #expect(stays && c.normalized.x == 0) // inside the dead zone: still on the phone, drawn at its edge
+    stays = c.move(dx: 1, dy: 0)
+    #expect(stays && c.x == 0)
+    stays = c.move(dx: -VirtualCursor.exitPush, dy: 0)
     #expect(!stays) // back past the left edge → Mac
 
     var l = VirtualCursor(width: 2400, height: 1080, edge: .left, macScreenHeight: 1200, entryY: 2)
@@ -124,7 +131,26 @@ private let expected: [Fsp.Message] = [
     stays = l.move(dx: -10, dy: 0)
     #expect(stays && l.x == 2380)
     stays = l.move(dx: 11, dy: 0)
+    #expect(stays && l.x == 2402)
+    stays = l.move(dx: 3, dy: 0)
     #expect(!stays)
+}
+
+@Test func edgeDeadZoneAndPacing() {
+    var p = EdgePush(distance: 8, window: 0.4)
+    let pushes = [p.push(3, at: 0), p.push(3, at: 0.1), p.push(-3, at: 0.2)] // 9 pt of push → cross
+    #expect(pushes == [false, false, true])
+    let paused = [p.push(5, at: 1), p.push(5, at: 1.5)] // a pause starts over
+    #expect(paused == [false, false])
+    p.reset()
+    let after = p.push(7, at: 1.6)
+    #expect(!after)
+
+    var pacer = Pacer(interval: 0.01)
+    #expect(pacer.wait(now: 5) == 0)
+    pacer.sent(at: 5)
+    #expect(abs(pacer.wait(now: 5.004) - 0.006) < 1e-9)
+    #expect(pacer.wait(now: 5.02) == 0)
 }
 
 @Test func videoPoints() {

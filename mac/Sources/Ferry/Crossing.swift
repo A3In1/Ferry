@@ -5,12 +5,22 @@ import FerryLogic
 /// Mac cursor and drives the phone's overlay cursor (CURSOR/SCROLL/TEXT/KEY) until it comes back or
 /// Escape. A listen-only tap watches mouse moves for the push; a filtering tap, enabled only while
 /// crossed (so Ferry isn't in the path of every key and click otherwise), reads raw deltas and swallows input.
+/// It can't stay stuck swallowing: a disabled tap, a lost session, sleep, lock, a user switch or a display
+/// change all bring the pointer back.
 @MainActor final class Crossing {
     let peerId: String
     let edge: ScreenEdge
     private let model: AppModel
     private var tap: CFMachPort?
     private var watch: CFMachPort?
+    private var sources: [CFRunLoopSource] = []
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var watchdog: Timer?
+    private var push = EdgePush()
+    // Moves are merged and sent at most at 120 Hz (the phone redraws once per frame anyway).
+    private var pacer = Pacer(interval: 1.0 / 120)
+    private var unsent = false
+    private var flushQueued = false
     private var own: ScreenSession? // control-only, used when no viewer window is open
     private var cursor: VirtualCursor?
     private var screen = CGRect.zero
@@ -43,6 +53,16 @@ import FerryLogic
             return nil
         }
         self.watch = watch
+        // Anything that can strand the pointer on the phone brings it back.
+        let ws = NSWorkspace.shared.notificationCenter
+        for (center, name) in [(ws, NSWorkspace.willSleepNotification), (ws, NSWorkspace.screensDidSleepNotification),
+                               (ws, NSWorkspace.sessionDidResignActiveNotification),
+                               (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification),
+                               (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"))] {
+            observers.append((center, center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.leave() }
+            }))
+        }
     }
 
     private func addTap(_ options: CGEventTapOptions, _ place: CGEventTapPlacement, _ types: [CGEventType],
@@ -50,7 +70,12 @@ import FerryLogic
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: place, options: options,
                                           eventsOfInterest: types.reduce(0) { $0 | 1 << $1.rawValue }, callback: callback,
                                           userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return nil }
-        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
+        guard let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            return nil
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        sources.append(source)
         return tap
     }
 
@@ -58,8 +83,15 @@ import FerryLogic
     func stop() {
         leave()
         for t in [tap, watch].compactMap(\.self) { CFMachPortInvalidate(t) }
+        for s in sources {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes)
+            CFRunLoopSourceInvalidate(s)
+        }
+        sources = []
         tap = nil
         watch = nil
+        for (center, o) in observers { center.removeObserver(o) }
+        observers = []
         own?.finish()
         own = nil
     }
@@ -91,12 +123,14 @@ import FerryLogic
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             guard c.move(dx: dx, dy: dy) else { leave(); return true }
             cursor = c
-            s.send(Fsp.cursor(.move, c.normalized.x, c.normalized.y))
+            moved()
         case .leftMouseDown, .leftMouseUp:
+            flushMove()
             pressed = type == .leftMouseDown
             s.send(Fsp.cursor(pressed ? .down : .up, c.normalized.x, c.normalized.y))
         case .scrollWheel:
             guard let e = NSEvent(cgEvent: event), let w = Wheel(e) else { break }
+            flushMove()
             s.send(Fsp.scroll(c.normalized.x, c.normalized.y, dx: w.dx, dy: w.dy, flags: w.flags))
         case .keyDown:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -114,8 +148,9 @@ import FerryLogic
               let bounds = display(at: p),
               pushesEdge(edge, x: p.x, dx: dx, screenMinX: bounds.minX, screenMaxX: bounds.maxX),
               display(at: CGPoint(x: edge == .right ? bounds.maxX + 1 : bounds.minX - 1, y: p.y)) == nil // another screen there
-        else { return }
+        else { return push.reset() }
         guard let s = session else { return Date.now >= retryAfter ? openControl() : () }
+        guard push.push(dx, at: ProcessInfo.processInfo.systemUptime) else { return } // the dead zone
         guard let info = s.info, s.canControl else { return } // waiting for INFO, or control is off on the phone
         // shortcut: the size is fixed at entry, so a rotation while crossed keeps the old speed; re-init on INFO if it matters.
         let c = VirtualCursor(width: info.width, height: info.height, edge: edge, macScreenHeight: bounds.height,
@@ -130,13 +165,51 @@ import FerryLogic
         CGDisplayHideCursor(CGMainDisplayID())
         CGAssociateMouseAndMouseCursorPosition(0)
         s.send(Fsp.cursor(.move, c.normalized.x, c.normalized.y))
+        pacer.sent(at: ProcessInfo.processInfo.systemUptime)
+        // Catches what no event reports: the tap silently disabled, or the viewer's stream gone while the mouse rests.
+        watchdog = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.check() }
+        }
+    }
+
+    private func check() {
+        guard cursor != nil else { return }
+        if session == nil || !(tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false) { leave() }
+    }
+
+    /// The cursor moved: send now, or once the pacer allows (merging the moves in between).
+    private func moved() {
+        unsent = true
+        guard !flushQueued else { return }
+        let wait = pacer.wait(now: ProcessInfo.processInfo.systemUptime)
+        if wait == 0 { return flushMove() }
+        flushQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.flushQueued = false
+                self?.flushMove()
+            }
+        }
+    }
+
+    /// Sends the latest position if it hasn't gone yet (also before a press or scroll, so they land there).
+    private func flushMove() {
+        guard unsent, let c = cursor, let s = session else { return }
+        unsent = false
+        pacer.sent(at: ProcessInfo.processInfo.systemUptime)
+        s.send(Fsp.cursor(.move, c.normalized.x, c.normalized.y))
     }
 
     /// Back to the Mac: pointer to the edge at the same height, cursor shown, phone cursor hidden.
     private func leave() {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        watchdog?.invalidate()
+        watchdog = nil
+        push.reset()
         guard let c = cursor else { return }
+        flushMove()
         cursor = nil
+        unsent = false
         if pressed { session?.send(Fsp.cursor(.up, c.normalized.x, c.normalized.y)) }
         pressed = false
         session?.send(Fsp.cursor(.hide, c.normalized.x, c.normalized.y))
