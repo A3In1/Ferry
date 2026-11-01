@@ -113,8 +113,9 @@ pub struct Node {
     /// The live incoming session per peer. A reconnecting peer (e.g. after a crash) replaces
     /// its old one at once instead of waiting for the idle timeout, which frees its partial files.
     sessions: Mutex<HashMap<EndpointId, Connection>>,
-    /// Serialises dialing so concurrent sends to one peer share a single new session.
-    dial: tokio::sync::Mutex<()>,
+    /// Per-peer dial locks, so concurrent sends to one peer share a single new session while
+    /// a slow dial to one peer never holds up the others. Entries go when their last user does.
+    dials: DialLocks,
     on_event: EventFn,
     on_screen: ScreenFn,
     /// Open screen streams (see [`Screen`]).
@@ -179,7 +180,7 @@ impl Node {
             receiver: Receiver::new(cfg.download_dir, cfg.accept, cfg.events.clone()),
             events: cfg.events,
             sessions: Mutex::default(),
-            dial: tokio::sync::Mutex::default(),
+            dials: Mutex::default(),
             on_event: cfg.on_event,
             on_screen: cfg.on_screen,
             screens: Arc::default(),
@@ -407,7 +408,9 @@ impl Node {
 
     /// The live session with `id` (either direction), or a newly dialed one.
     async fn session(self: &Arc<Self>, id: EndpointId) -> Result<Connection> {
-        let _dialing = self.dial.lock().await;
+        let slot = DialSlot::new(&self.dials, id);
+        let _dialing = slot.lock.lock().await;
+        // re-checked under the lock: a concurrent caller may have just dialed
         if let Some(c) = self.sessions.lock().unwrap().get(&id)
             && c.close_reason().is_none()
         {
@@ -639,6 +642,35 @@ impl Node {
     }
 }
 
+type DialLocks = Mutex<HashMap<EndpointId, Arc<tokio::sync::Mutex<()>>>>;
+
+/// One caller's share of a peer's dial lock; the map entry is removed when the last one drops
+/// (also when the dialing future is cancelled).
+struct DialSlot<'a> {
+    dials: &'a DialLocks,
+    id: EndpointId,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl<'a> DialSlot<'a> {
+    fn new(dials: &'a DialLocks, id: EndpointId) -> Self {
+        let lock = dials.lock().unwrap().entry(id).or_default().clone();
+        Self { dials, id, lock }
+    }
+}
+
+impl Drop for DialSlot<'_> {
+    fn drop(&mut self) {
+        let mut dials = self.dials.lock().unwrap();
+        // clones are only taken under this map lock, so 2 = the map's and ours
+        if Arc::strong_count(&self.lock) == 2
+            && dials.get(&self.id).is_some_and(|l| Arc::ptr_eq(l, &self.lock))
+        {
+            dials.remove(&self.id);
+        }
+    }
+}
+
 /// Closes sessions with no stream traffic for two checks in a row (~30 s): iroh pings an
 /// open path every 5 s, which keeps a phone's Wi-Fi radio awake. Sends redial on demand.
 async fn reap_idle_sessions(node: std::sync::Weak<Node>) {
@@ -778,4 +810,25 @@ pub(crate) fn addr_of(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
 /// Link-local v6 needs a scope id, which neither tickets nor iroh's lookup carry.
 pub(crate) fn is_link_local_v6(ip: std::net::IpAddr) -> bool {
     matches!(ip, std::net::IpAddr::V6(v6) if v6.is_unicast_link_local())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dial_slots_clean_up() {
+        let dials = DialLocks::default();
+        let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        let a = DialSlot::new(&dials, id);
+        let held = a.lock.clone().lock_owned().await;
+        let b = DialSlot::new(&dials, id);
+        assert!(Arc::ptr_eq(&a.lock, &b.lock), "same peer shares one lock");
+        assert!(b.lock.try_lock().is_err());
+        drop(held);
+        drop(a);
+        assert_eq!(dials.lock().unwrap().len(), 1, "b still uses it");
+        drop(b);
+        assert!(dials.lock().unwrap().is_empty());
+    }
 }
