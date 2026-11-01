@@ -22,6 +22,8 @@ class FspTest {
         Msg.Frame(123_456_789_000L, 3, byteArrayOf(0, 0, 0, 1, 0x67, 0x42)),
         Msg.End(Fsp.END_NOT_ALLOWED, "turn on Ferry control"),
         Msg.End(Fsp.END_NORMAL),
+        Msg.Quality(2_500_000),
+        Msg.Key(Keys.LEFT, Keys.SHIFT),
     )
 
     private fun stream(msgs: List<Msg>) = msgs.fold(Fsp.MAGIC) { acc, m -> acc + Fsp.encode(m) }

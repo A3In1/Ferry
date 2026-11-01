@@ -36,6 +36,7 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
 | `0x01` | INFO | `u16 width`, `u16 height` (screen px, current rotation), `u8 caps` (bit0 video, bit1 control). Sent first and again on rotation |
 | `0x02` | FRAME | `u64 pts_us`, `u8 flags` (bit0 keyframe, bit1 codec config), then H.264 Annex-B bytes as MediaCodec emits them. Config (SPS+PPS) precedes the first keyframe after each INFO |
 | `0x03` | END | `u8 reason` (0 normal, 1 stopped on the phone, 2 phone locked, 3 not allowed, 4 error), UTF-8 detail; then close |
+| `0x04` | QUALITY | `u32 bitrate` (bps): the encoder's new target after the phone adapted to the link (informational) |
 
 ## Rules
 - The phone sends nothing before START. START with video → MediaProjection consent on the phone
@@ -54,6 +55,12 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   optional fields as 0.
 - Video: H.264, no B-frames, realtime priority/low latency where supported, repeat previous frame
   after 100 ms, keyframe every 10 s and on KEYFRAME. Defaults: max_size 1280, 8 Mbps.
+- Adaptive bitrate (phone side, no Mac input needed): START's bitrate is the ceiling. The phone times
+  each FRAME write; QUIC flow control makes writes block when the link can't keep up. Per 1 s window:
+  writes blocked > 50% of the time → bitrate × 0.7; < 10% for 3 windows in a row → × 1.2 (up to the
+  ceiling); floor max(500 kbps, ceiling / 8). A single write blocked ≥ 400 ms means the queued frames
+  are stale: bitrate halves, frames are dropped until a requested keyframe (at most every 2 s).
+  Applied with `PARAMETER_KEY_VIDEO_BITRATE`, kept across rotations, and reported as QUALITY.
 - Rotation: new INFO, encoder restarted at the new size, config + keyframe.
 - Bluetooth-only session: START with video → `END 4 "Bluetooth is too slow for video"`; control-only is allowed.
 - Either side may close at any time; EOF = END 0.

@@ -60,8 +60,9 @@ private let expected: [Fsp.Message] = [
 @Test func fspSkipsUnknownTypes() throws {
     var p = FspParser()
     let data = Fsp.magic + Fsp.message(0x7F, [1, 2, 3]) + Fsp.message(0x01, [0, 10, 0, 20, 1]) + Fsp.message(0x42, [])
+        + Fsp.message(0x04, [0, 0x26, 0x25, 0xA0, 9]) // QUALITY 2.5 Mbps, with a byte from a future version
     let got = try p.push(data)
-    #expect(got == [.info(width: 10, height: 20, caps: 1)])
+    #expect(got == [.info(width: 10, height: 20, caps: 1), .quality(bitrate: 2_500_000)])
 }
 
 @Test func fspRejectsOversizeAndBadMagic() {

@@ -11,6 +11,7 @@ object Fsp {
     const val INFO = 0x01
     const val FRAME = 0x02
     const val END = 0x03
+    const val QUALITY = 0x04
     const val TOUCH = 0x10
     const val SCROLL = 0x11
     const val KEY = 0x12
@@ -45,6 +46,7 @@ object Fsp {
             is Msg.Info -> buf(5).putShort(m.width.toShort()).putShort(m.height.toShort()).put(m.caps.toByte())
             is Msg.Frame -> buf(9 + m.data.size).putLong(m.ptsUs).put(m.flags.toByte()).put(m.data)
             is Msg.End -> m.detail.toByteArray().let { buf(1 + it.size).put(m.reason.toByte()).put(it) }
+            is Msg.Quality -> buf(4).putInt(m.bitrate)
         }
         return p.put(0, m.type.toByte()).putInt(1, p.capacity() - 5).array()
     }
@@ -68,6 +70,7 @@ object Fsp {
                 INFO -> Msg.Info(b.short.u16(), b.short.u16(), b.get().u8())
                 FRAME -> Msg.Frame(b.long, b.get().u8(), p.copyOfRange(9, p.size))
                 END -> Msg.End(b.get().u8(), String(p, 1, p.size - 1))
+                QUALITY -> Msg.Quality(b.int)
                 else -> null
             }
         } catch (_: BufferUnderflowException) {
@@ -103,6 +106,8 @@ sealed class Msg(val type: Int) {
     data class Info(val width: Int, val height: Int, val caps: Int) : Msg(Fsp.INFO)
     class Frame(val ptsUs: Long, val flags: Int, val data: ByteArray) : Msg(Fsp.FRAME)
     data class End(val reason: Int, val detail: String = "") : Msg(Fsp.END)
+    /** The encoder's bitrate (bps) after the phone adapted it to the link. */
+    data class Quality(val bitrate: Int) : Msg(Fsp.QUALITY)
 }
 
 /** Incremental parser: feed it whatever chunks the stream returns. Throws [FspException] on a protocol error. */

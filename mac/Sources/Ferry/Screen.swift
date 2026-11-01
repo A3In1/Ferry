@@ -302,6 +302,8 @@ final class ScreenWindow: PeerWindow {
             window.setContentSize(NSSize(width: (size.width * s).rounded(), height: (size.height * s).rounded()))
         case .frame:
             break // the session hands frames to its VideoDecoder
+        case let .quality(bitrate):
+            logger.debug("phone encoder at \(bitrate / 1000) kbps")
         case let .end(reason, detail):
             if !detail.isEmpty { logger.notice("screen sharing ended (\(reason)): \(detail, privacy: .public)") }
             show(Fsp.endText(reason: reason, detail: detail))

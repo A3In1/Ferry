@@ -13,6 +13,7 @@ public enum Fsp {
         case info(width: Int, height: Int, caps: UInt8) // caps bit0 video, bit1 control
         case frame(pts: UInt64, flags: UInt8, data: Data) // flags bit0 keyframe, bit1 codec config
         case end(reason: UInt8, detail: String)
+        case quality(bitrate: UInt32) // the phone adapted its encoder to the link
     }
 
     public struct ProtocolError: Error, Equatable, Sendable { public let why: String }
@@ -126,6 +127,9 @@ public struct FspParser {
         case 0x03:
             try need(1)
             return .end(reason: p[0], detail: String(decoding: p.dropFirst(), as: UTF8.self))
+        case 0x04:
+            try need(4)
+            return .quality(bitrate: u32(p, 0))
         default:
             return nil
         }

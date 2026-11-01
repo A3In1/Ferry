@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 data class ScreenSize(val w: Int, val h: Int, val dpi: Int)
 
@@ -46,9 +48,80 @@ fun screenSizes(ctx: Context) = callbackFlow {
     awaitClose { dm.unregisterDisplayListener(l) }
 }.distinctUntilChanged()
 
+/**
+ * Adapts the encoder's bitrate to the link from how long FRAME writes block (QUIC flow control pushes
+ * back when the network can't keep up): down fast when writes block much of the time, back up slowly
+ * when they don't, never above the Mac's START bitrate. A write that stalls means the frames queued
+ * behind it are stale: [Change.catchUp] says to drop frames until a fresh keyframe.
+ */
+class BitrateControl(private val ceiling: Int, now: Long) {
+    data class Change(val bitrate: Int?, val catchUp: Boolean)
+
+    private val floor = maxOf(MIN_BPS, ceiling / 8).coerceAtMost(ceiling)
+    var bitrate = ceiling
+        private set
+    private var windowStart = now
+    private var blocked = 0L
+    private var calm = 0
+    private var lastCatchUp = Long.MIN_VALUE / 2
+
+    /** One FRAME was written in [writeMs]; [now] in ms. */
+    fun sent(writeMs: Long, now: Long): Change {
+        blocked += writeMs
+        if (writeMs >= STALL_MS && now - lastCatchUp >= CATCH_UP_EVERY_MS) {
+            lastCatchUp = now
+            restart(now)
+            return Change(set(bitrate / 2), catchUp = true)
+        }
+        val elapsed = now - windowStart
+        if (elapsed < WINDOW_MS) return Change(null, false)
+        val busy = blocked.toDouble() / elapsed
+        restart(now)
+        return when {
+            busy > CONGESTED -> {
+                calm = 0
+                Change(set((bitrate * 0.7).roundToInt()), false)
+            }
+            busy < CLEAR && ++calm >= CALM_WINDOWS -> {
+                calm = 0
+                Change(set((bitrate * 1.2).roundToInt()), false)
+            }
+            else -> {
+                if (busy >= CLEAR) calm = 0
+                Change(null, false)
+            }
+        }
+    }
+
+    private fun restart(now: Long) {
+        windowStart = now
+        blocked = 0
+    }
+
+    /** The new bitrate, or null if it didn't change. */
+    private fun set(bps: Int): Int? {
+        val b = bps.coerceIn(floor, ceiling)
+        if (b == bitrate) return null
+        bitrate = b
+        return b
+    }
+
+    companion object {
+        const val MIN_BPS = 500_000
+        const val WINDOW_MS = 1_000L
+        const val CONGESTED = 0.5
+        const val CLEAR = 0.1
+        const val CALM_WINDOWS = 3
+        const val STALL_MS = 400L
+        const val CATCH_UP_EVERY_MS = 2_000L
+    }
+}
+
 /** H.264 from a VirtualDisplay into FRAME messages; INFO + a fresh encoder on every rotation. */
 class Capture(private val ctx: Context, private val projection: MediaProjection, private val start: Msg.Start) {
     @Volatile private var codec: MediaCodec? = null
+    private val ceiling = start.bitrate.takeIf { it > 0 }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 8_000_000
+    private val quality = BitrateControl(ceiling, SystemClock.elapsedRealtime())
 
     fun keyframe() {
         runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
@@ -90,16 +163,35 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
 
     private suspend fun drain(c: MediaCodec, send: suspend (Msg) -> Unit) = withContext(Dispatchers.IO) {
         val info = MediaCodec.BufferInfo()
+        var skipping = false // behind after a stalled write: drop frames until a keyframe
         while (isActive) {
             val i = c.dequeueOutputBuffer(info, 100_000)
             if (i < 0) continue
+            val key = if (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) 1 else 0
+            val config = if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) 2 else 0
+            if (key != 0) skipping = false
+            if (skipping && config == 0 || info.size == 0) {
+                c.releaseOutputBuffer(i, false)
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
+                continue
+            }
             val data = ByteArray(info.size)
             c.getOutputBuffer(i)?.apply { position(info.offset) }?.get(data)
             c.releaseOutputBuffer(i, false)
             if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
-            val key = if (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) 1 else 0
-            val config = if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) 2 else 0
-            if (data.isNotEmpty()) send(Msg.Frame(info.presentationTimeUs, key or config, data))
+            val t = SystemClock.elapsedRealtime()
+            send(Msg.Frame(info.presentationTimeUs, key or config, data))
+            val now = SystemClock.elapsedRealtime()
+            val change = quality.sent(now - t, now)
+            change.bitrate?.let {
+                Log.w(SCREEN_TAG, "bitrate ${it / 1000} kbps${if (change.catchUp) " (catching up)" else ""}")
+                runCatching { c.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, it) }) }
+                send(Msg.Quality(it))
+            }
+            if (change.catchUp) {
+                skipping = true
+                keyframe()
+            }
         }
     }
 
@@ -116,7 +208,7 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
 
     private fun format(w: Int, h: Int, c: MediaCodec) = MediaFormat.createVideoFormat(AVC, w, h).apply {
         setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        setInteger(MediaFormat.KEY_BIT_RATE, start.bitrate.takeIf { it > 0 }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 8_000_000)
+        setInteger(MediaFormat.KEY_BIT_RATE, quality.bitrate) // a rotation keeps what the link settled on
         setInteger(MediaFormat.KEY_FRAME_RATE, 60)
         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
         setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
