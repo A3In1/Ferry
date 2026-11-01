@@ -18,10 +18,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private let model = AppModel()
+    private lazy var updates = Updates(model: model)
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
     private var menuOpen = false
-    private var liveItems: [NSMenuItem] = [] // the status block at the top, refreshed while the menu is open
+    private var liveItems: [NSMenuItem] = [] // the status block under the updates item, refreshed while the menu is open
+    private var updateItem: NSMenuItem?
     private var pairWindow: NSWindow?
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -51,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
 
         model.onChange = { [weak self] in self?.refreshLive() }
+        updates.onChange = { [weak self] in self?.refreshUpdateItem() }
         model.onPaired = { [weak self] name in
             self?.pairWindow?.close()
             self?.model.notify("Paired with \(name)", "Open the Ferry menu to mirror its screen, read messages and send files.") {
@@ -61,10 +64,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: menu
 
-    /// Status (phones, now playing, transfers) on top, then what you can do with the phone, then Settings, Pair, About and Quit.
+    /// Ferry's version and Check for Updates… on top, then status (phones, now playing, transfers),
+    /// then what you can do with the phone, then Pair, Settings, About and Quit.
     func menuNeedsUpdate(_ menu: NSMenu) {
         model.refreshPeers()
         menu.removeAllItems()
+        let update = ClosureItem("") { [weak self] in self?.updates.check() }
+        updateItem = update
+        refreshUpdateItem()
+        menu.items = [.sectionHeader(title: "Ferry \(Updates.version)"), update, .separator()]
         liveItems = []
         insertLive()
         let peers = model.peers, running = model.node != nil
@@ -148,10 +156,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }).enabled(hasPhone).tip(hasPhone ? "Which edge of the screen Share Cursor moves across" : "Pair a phone first")
         let login = ClosureItem("Open at Login") { [weak self] in self?.toggleLaunchAtLogin() }
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        let autoUpdate = ClosureItem("Automatically Check for Updates") { [weak self] in self?.updates.automatic.toggle() }
+            .enabled(updates.feed != nil)
+            .tip(updates.feed != nil ? "Look for a new version of Ferry once a day" : "Updates aren't set up for this build yet")
+        autoUpdate.state = updates.automatic ? .on : .off
         var items = [sync, bluetooth, edge,
                      ClosureItem("Set Up Focus Sync…") { [weak self] in self?.model.showFocusSetup() }
                          .enabled(hasPhone).tip(hasPhone ? "Have your phone follow this Mac's Focus" : "Pair a phone first"),
-                     .separator(), login]
+                     .separator(), login, autoUpdate]
         if hasPhone {
             items.append(.separator())
             items += model.peers.map { peer in ClosureItem("Forget \(peer.name)…") { [weak self] in self?.model.forget(peer) } }
@@ -164,6 +176,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard menuOpen else { return } // menuNeedsUpdate rebuilds everything on the next open
         liveItems.forEach(menu.removeItem)
         insertLive()
+    }
+
+    /// "Check for Updates…", or the version a background check found. Enabled unless Sparkle is already busy.
+    private func refreshUpdateItem() {
+        guard let item = updateItem else { return }
+        if let version = updates.available {
+            item.title = "Update to Ferry \(version)…"
+            _ = item.symbol("arrow.down.circle.fill").tip("See what's new and install it")
+        } else {
+            item.title = "Check for Updates…"
+            _ = item.symbol("arrow.triangle.2.circlepath").tip(nil)
+        }
+        item.isEnabled = updates.canCheck
     }
 
     private func insertLive() {
@@ -209,7 +234,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             items.append(.sectionHeader(title: "Recent Transfers"))
             items += model.lines.map { label(short($0.text)).symbol($0.symbol) }
         }
-        for (i, item) in items.enumerated() { menu.insertItem(item, at: i) }
+        let top = 3 // version, Check for Updates…, separator
+        for (i, item) in items.enumerated() { menu.insertItem(item, at: top + i) }
         liveItems = items
     }
 
@@ -368,6 +394,10 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         if id.hasPrefix(Notifications.phonePrefix) {
             guard let peer = info[Notifications.peerKey] as? String, let key = info[Notifications.keyKey] as? String else { return }
             await MainActor.run { model.phoneNotificationResponse(peer: peer, key: key, action: action, reply: reply) }
+            return
+        }
+        if id == Notifications.update {
+            if action != UNNotificationDismissActionIdentifier { await MainActor.run { updates.check() } }
             return
         }
         guard action != UNNotificationDismissActionIdentifier, let paths = info[Notifications.pathsKey] as? [String] else { return }

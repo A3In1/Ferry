@@ -2,3 +2,4 @@
 build/
 Frameworks/
 Sources/FerryCore/FerryCore.swift
+release/

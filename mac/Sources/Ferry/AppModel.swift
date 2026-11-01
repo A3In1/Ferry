@@ -448,6 +448,8 @@ enum Notifications {
     static let sms = "sms", smsCode = "sms-code", call = "call"
     static let replyAction = "reply", copyAction = "copy", answerAction = "answer", declineAction = "decline"
     static let addressKey = "address", threadKey = "thread", codeKey = "code"
+    /// "A new Ferry is available" from a background update check (Updates.swift).
+    static let update = "update"
 }
 
 /// Receives callbacks from Rust worker threads and hops to the main actor.

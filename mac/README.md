@@ -24,6 +24,60 @@ scripts/bundle-mac.sh` signs with a stable identity so the grant sticks.
 
 The xcframework and `FerryCore.swift` are generated and git-ignored.
 
+## Updates
+
+[Sparkle 2](https://sparkle-project.org) (2.10.0, pinned in `Package.swift`). The menu starts with
+"Ferry <version>" and **Check for Updates…**; Ferry also checks once a day unless Settings → **Automatically
+Check for Updates** is off. A background check that finds something shows "Update to Ferry x.y…" in the menu and
+a notification instead of opening a window behind your apps.
+
+- **Version**: `mac/VERSION` is the only place it lives; `bundle-mac.sh` puts it in both `CFBundleShortVersionString`
+  and `CFBundleVersion` (what Sparkle compares).
+- **Feed**: `FERRY_FEED_URL=https://…/appcast.xml scripts/bundle-mac.sh` bakes it in (must be https). Without it
+  (the default) `SUFeedURL` is empty and Check for Updates… says "Updates aren't set up for this build yet".
+- **Hosting (planned)**: zips as GitHub Release assets (`v<version>/Ferry-<version>.zip`), `appcast.xml` committed at
+  the repo root and read via `raw.githubusercontent.com` (public repo), or GitHub Pages via `FERRY_FEED_URL`.
+
+**Signing key.** Updates are EdDSA-signed; the app ships the public key (`PUBLIC_ED_KEY` in `bundle-mac.sh`).
+The private key was made with Sparkle's `generate_keys --account ferry` and lives only in this Mac's **login
+Keychain** ("Private key for signing Sparkle updates", account `ferry`). Never commit it. **Back it up**: if it's
+lost, every installed copy rejects all future updates and users have to download a new build by hand.
+
+```sh
+cd mac && swift package resolve
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account ferry -x ~/ferry-sparkle-key.txt  # export, then store
+#   it in a password manager and delete the file
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account ferry -f ferry-sparkle-key.txt    # restore on a new Mac
+```
+
+**Cutting a release** (builds and signs locally; uploads nothing):
+
+```sh
+FERRY_GITHUB_REPO=owner/Ferry scripts/release-mac.sh 0.2.0 notes.md   # notes: .md, .txt or .html
+```
+
+It writes `mac/VERSION`, runs `bundle-mac.sh` with the feed URL, zips the app (`ditto -c -k --keepParent`), signs
+the zip with `sign_update` (macOS asks once to let it use the Keychain key: **Always Allow**), and adds the item,
+newest first, to `mac/release/appcast.xml` (git-ignored, along with the zips). It refuses if the Keychain key
+doesn't match the shipped public key. Then: create GitHub release `v0.2.0` with `mac/release/Ferry-0.2.0.zip`, copy
+`mac/release/appcast.xml` to `appcast.xml` at the repo root and push, and commit `mac/VERSION`. Keep
+`mac/release/appcast.xml` between releases (or copy the published one back first) so the feed keeps its history.
+`FERRY_FEED_URL` / `FERRY_DOWNLOAD_URL` override the GitHub defaults; `FERRY_ED_KEY_FILE` signs from an exported key.
+
+**Limits without a Developer ID.** The build is ad-hoc signed and not notarized, so the first copy someone
+downloads in a browser is blocked by Gatekeeper ("Apple could not verify…"): they allow it once in System Settings →
+Privacy & Security → **Open Anyway**. Updates Sparkle installs don't hit this (it handles quarantine), but each
+update is a new binary, so macOS asks again for Downloads access, like any rebuild (see above). Ad-hoc signing
+also means the hardened runtime is off (with it, the app can't load the ad-hoc Sparkle.framework). With a
+Developer ID later: set `FERRY_SIGN_IDENTITY="Developer ID Application: …"` (which turns the hardened runtime on),
+notarize and staple the zip before `sign_update`; the EdDSA key and feed stay the same.
+
+**Testing an update end to end** (on a Mac or account not running your everyday Ferry, since two copies clash):
+build 0.1.1 with `FERRY_FEED_URL=https://<you>.github.io/test/appcast.xml` (any https host you control) via
+`release-mac.sh`, install that `Ferry.app` in /Applications and open it; release 0.1.2 the same way and publish its
+zip and appcast; then Ferry menu → Check for Updates… should offer 0.1.2, install it and relaunch, and the menu
+header reads "Ferry 0.1.2".
+
 ## What it does
 
 - Starts a `FerryNode` with data in `~/Library/Application Support/Ferry`, saving received files to `~/Downloads`.
