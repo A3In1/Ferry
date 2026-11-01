@@ -514,7 +514,8 @@ impl Node {
         if let Some(old) = sessions.insert(id, new)
             && old.conn.stable_id() != conn.stable_id()
         {
-            old.conn.close(ERR_REPLACED.into(), b"replaced by a new session");
+            old.conn
+                .close(ERR_REPLACED.into(), b"replaced by a new session");
         }
         Ok(())
     }
@@ -737,7 +738,9 @@ impl Drop for DialSlot<'_> {
         let mut dials = self.dials.lock().unwrap();
         // clones are only taken under this map lock, so 2 = the map's and ours
         if Arc::strong_count(&self.lock) == 2
-            && dials.get(&self.id).is_some_and(|l| Arc::ptr_eq(l, &self.lock))
+            && dials
+                .get(&self.id)
+                .is_some_and(|l| Arc::ptr_eq(l, &self.lock))
         {
             dials.remove(&self.id);
         }
@@ -757,8 +760,9 @@ async fn reap_idle_sessions(node: std::sync::Weak<Node>) {
             seen.clear();
             continue;
         }
-        let conns: Vec<Connection> =
-            (node.sessions.lock().unwrap().values()).map(|s| s.conn.clone()).collect();
+        let conns: Vec<Connection> = (node.sessions.lock().unwrap().values())
+            .map(|s| s.conn.clone())
+            .collect();
         let mut next = HashMap::new();
         for c in conns {
             let st = c.stats();

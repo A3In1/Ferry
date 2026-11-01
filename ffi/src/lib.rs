@@ -79,8 +79,8 @@ impl ScreenStream {
     /// The next chunk of bytes; empty once the other side has finished.
     pub async fn read(&self) -> Result<Vec<u8>> {
         // read_chunk hands over QUIC's own buffer: no zeroed 64 KiB per call on the frame path
-        let chunk = (self.recv.lock().await.read_chunk(64 * 1024).await)
-            .map_err(anyhow::Error::from)?;
+        let chunk =
+            (self.recv.lock().await.read_chunk(64 * 1024).await).map_err(anyhow::Error::from)?;
         Ok(chunk.map(|b| b.to_vec()).unwrap_or_default())
     }
 

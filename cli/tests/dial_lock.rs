@@ -72,7 +72,9 @@ async fn unreachable_peer_does_not_block_others() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let t = Instant::now();
-    mac.send_event(&live.device_id(), &clip("hi")).await.unwrap();
+    mac.send_event(&live.device_id(), &clip("hi"))
+        .await
+        .unwrap();
     let took = t.elapsed();
     let ev = tokio::time::timeout(Duration::from_secs(5), live_rx.recv())
         .await
@@ -84,7 +86,10 @@ async fn unreachable_peer_does_not_block_others() {
     assert!(r.is_err(), "the shut-down peer can't have answered");
     // only meaningful if the dead dial really was slow (it waits for the connect timeout)
     assert!(gone_took > Duration::from_secs(3), "{gone_took:?}");
-    assert!(took < Duration::from_secs(3), "send to live peer took {took:?}");
+    assert!(
+        took < Duration::from_secs(3),
+        "send to live peer took {took:?}"
+    );
 
     for n in [mac, live] {
         n.shutdown().await;
@@ -131,7 +136,9 @@ async fn simultaneous_dials_keep_one_session() {
         let (phone, mut phone_rx) = node(root.path(), &format!("phone{round}")).await;
         pair(&phone, &mac).await;
         // the phone learns the mac's address from this first session; then drop it
-        mac.send_event(&phone.device_id(), &clip("hello")).await.unwrap();
+        mac.send_event(&phone.device_id(), &clip("hello"))
+            .await
+            .unwrap();
         phone_rx.recv().await.unwrap();
         mac.check_in(&phone.device_id()).await.unwrap(); // fresh, so both sides know each other
         for n in [&mac, &phone] {
@@ -142,7 +149,9 @@ async fn simultaneous_dials_keep_one_session() {
         let (a, b) = tokio::join!(mac.send_event(&phone_id, &m), phone.send_event(&mac_id, &p));
         a.unwrap();
         b.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), mac_rx.recv()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), mac_rx.recv())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(
             (mac.session_count(), phone.session_count()),
@@ -178,6 +187,9 @@ async fn queued_sends_to_unreachable_peer_fail_together() {
         assert!(s.await.unwrap().is_err());
     }
     let took = t.elapsed();
-    assert!(took < Duration::from_secs(15), "4 queued sends took {took:?}");
+    assert!(
+        took < Duration::from_secs(15),
+        "4 queued sends took {took:?}"
+    );
     mac.shutdown().await;
 }
