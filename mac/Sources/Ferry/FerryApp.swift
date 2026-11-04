@@ -126,6 +126,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return [
             ClosureItem("Mirror Screen", key: keys ? "1" : "") { [weak self] in self?.model.mirror(peer) }.symbol("iphone")
                 .tip("See and control \(peer.name)'s screen in a window"),
+            ClosureItem("Open Phone") { [weak self] in self?.model.openPhone(peer) }.symbol("lock.iphone")
+                .enabled(model.usbSerial(peer.id) != nil)
+                .tip(model.usbSerial(peer.id) != nil
+                    ? "Use \(peer.name) from the Mac, even when it's locked. Its screen stays dark and locks again when you close the window."
+                    : "Plug \(peer.name) in with the USB cable to use it from the Mac, even when it's locked"),
             ClosureItem("Messages", key: keys ? "2" : "") { [weak self] in self?.model.openMessages(peer) }.symbol("message")
                 .unreadBadge(model.phoneTexts[peer.id]?.unread ?? 0),
             ClosureItem("Browse Files", key: keys ? "3" : "") { [weak self] in self?.model.openFiles(peer) }.symbol("folder"),
@@ -301,7 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     private func showAbout() {
         NSApp.activate()
-        let credits = NSAttributedString(string: "Core \(coreVersion())", attributes: [
+        let credits = NSAttributedString(string: "Core \(coreVersion())\nOpen Phone uses scrcpy by Genymobile (Apache-2.0)", attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.secondaryLabelColor,
         ])
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])

@@ -53,6 +53,7 @@ final class AppModel {
     var clipboardNext: [String: String] = [:]
     // Phase 4 (Screen.swift, Crossing.swift): open viewer windows by peer id, and cursor sharing.
     var viewers: [String: ScreenWindow] = [:]
+    var phoneWindows: [String: Process] = [:] // Open Phone, per phone
     var crossing: Crossing?
     // Phase 5 (Messages.swift), by peer id: texts and calls, open Messages windows, who an active call is with.
     var phoneTexts: [String: PhoneTexts] = [:]
