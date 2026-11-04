@@ -99,6 +99,8 @@ class MainActivity : ComponentActivity() {
     private var explain by mutableStateOf<Explain?>(null)
     /** Sent to Settings for this grant's access: switched on in onResume if it was given. */
     private var pending: Grant? = null
+    /** "Turn on all sharing": the grants still to go, one explain/ask at a time; "Not now" clears it. */
+    private val allQueue = ArrayDeque<Grant>()
     private val asked: SharedPreferences by lazy { getSharedPreferences("asked", MODE_PRIVATE) }
 
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { notifsOn = notificationsOn() }
@@ -118,11 +120,13 @@ class MainActivity : ComponentActivity() {
         val g = Grant.entries.firstOrNull { it.permissions.isNotEmpty() && r.keys.containsAll(it.permissions) } ?: return@registerForActivityResult
         if (r.values.all { it }) Grants.set(this, g, true)
         else Ferry.toast(this, "${g.label} stays off. It needs every permission Android asked about.")
+        nextOfAll()
     }
     /** Files: the switch turns on only once All files access is granted. */
     private val askStorage = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (PhoneFiles.accessGranted()) Grants.set(this, Grant.FILES, true)
         else Ferry.toast(this, "Files stays off. It needs All files access for Ferry.")
+        nextOfAll()
     }
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) toSend = uris
@@ -171,6 +175,7 @@ class MainActivity : ComponentActivity() {
                             onFix = ::turnOn,
                             onControl = ::explainControl,
                             onAllowNotifications = ::allowNotifications,
+                            onAllOn = ::turnOnAll,
                         ),
                     )
                 }
@@ -186,11 +191,11 @@ class MainActivity : ComponentActivity() {
                 }
                 explain?.let { e ->
                     AlertDialog(
-                        onDismissRequest = { explain = null },
+                        onDismissRequest = { explain = null; allQueue.clear() },
                         title = { Text(e.title) },
                         text = { Text(e.text) },
                         confirmButton = { TextButton(onClick = { explain = null; e.go() }) { Text(e.button) } },
-                        dismissButton = { TextButton(onClick = { explain = null }) { Text("Not now") } },
+                        dismissButton = { TextButton(onClick = { explain = null; allQueue.clear() }) { Text("Not now") } },
                     )
                 }
                 PairPromptDialog()
@@ -228,6 +233,7 @@ class MainActivity : ComponentActivity() {
                 g in Grants -> Ferry.toast(this, "${g.label} still can't work without that access")
                 else -> Ferry.toast(this, "${g.label} stays off. Ferry wasn't given the access it needs.")
             }
+            nextOfAll()
         }
         FerryService.instance?.let(Calls::sync)
     }
@@ -266,6 +272,23 @@ class MainActivity : ComponentActivity() {
         (g != Grant.FILES || PhoneFiles.accessGranted()) &&
         (g != Grant.NOTIFICATIONS && g != Grant.MEDIA || FerryListener.enabled(this)) &&
         (g != Grant.DND || getSystemService(NotificationManager::class.java).isNotificationPolicyAccessGranted)
+
+    private fun turnOnAll() {
+        allQueue.clear()
+        allQueue.addAll(Grant.entries.filter { it !in Grants })
+        nextOfAll()
+    }
+
+    /** Turns on what needs nothing more, up to the next grant that has to ask; that one's answer continues. */
+    private fun nextOfAll() {
+        while (allQueue.isNotEmpty()) {
+            val g = allQueue.removeFirst()
+            if (g in Grants) continue
+            if (ready(g)) { Grants.set(this, g, true); continue }
+            if (g == Grant.FILES && PhoneFiles.unavailable() != null) continue
+            return turnOn(g)
+        }
+    }
 
     /** A switch turned on: on right away if nothing is missing, else explain what Android will ask first. */
     private fun turnOn(g: Grant) {
@@ -381,7 +404,7 @@ class HomeUi(
     val listenerOn: Boolean, val dndAccess: Boolean, val notifsOn: Boolean, val bluetooth: BluetoothUi,
     val onScan: () -> Unit, val onPaste: () -> Unit, val onSend: () -> Unit,
     val onGrant: (Grant, Boolean) -> Unit, val onFix: (Grant) -> Unit, val onControl: (Boolean) -> Unit,
-    val onAllowNotifications: () -> Unit,
+    val onAllowNotifications: () -> Unit, val onAllOn: () -> Unit,
 )
 
 /** Main screen sections, in order, with the grants each holds. */
@@ -473,7 +496,10 @@ private fun Home(ui: HomeUi) {
                     GrantItem(Grant.FILES, Grant.FILES in on, ui.onGrant, unavailable = PhoneFiles.unavailable())
                 }
                 ConnectionSection(ui.bluetooth, usb = Ferry.usbListening.collectAsStateWithLifecycle().value, running)
-                TextButton(onClick = { Grants.allOff(ctx) }, enabled = on.isNotEmpty()) { Text("Turn off all sharing") }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = ui.onAllOn, enabled = on.size < Grant.entries.size) { Text("Turn on all sharing") }
+                    TextButton(onClick = { Grants.allOff(ctx) }, enabled = on.isNotEmpty()) { Text("Turn off all sharing") }
+                }
             }
 
             // remember: Home recomposes on every progress tick; these are binder / FFI calls.
