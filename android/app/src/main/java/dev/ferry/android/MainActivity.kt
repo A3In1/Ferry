@@ -69,6 +69,7 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
@@ -396,6 +397,7 @@ private fun Home(ui: HomeUi) {
     val usb by Ferry.usb.collectAsStateWithLifecycle()
     val ble by Ferry.ble.collectAsStateWithLifecycle()
     val recent by Ferry.recent.collectAsStateWithLifecycle()
+    val transfers by Transfers.cards.collectAsStateWithLifecycle()
     val pairing by Ferry.pairing.collectAsStateWithLifecycle()
     val on by Grants.on.collectAsStateWithLifecycle()
     var forgetting by remember { mutableStateOf<FfiPeer?>(null) }
@@ -434,8 +436,14 @@ private fun Home(ui: HomeUi) {
                 }
             }
 
-            if (recent.isNotEmpty()) Section("Recent activity") {
-                recent.forEach { r ->
+            if (transfers.isNotEmpty()) Section("Transfers") {
+                transfers.forEach { TransferCard(it) }
+            }
+
+            // A running transfer's line is its card above.
+            val done = recent.filter { r -> transfers.none { it.id == r.id } }
+            if (done.isNotEmpty()) Section("Recent activity") {
+                done.forEach { r ->
                     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(r.text, style = MaterialTheme.typography.bodyMedium)
                         r.progress?.takeIf { it < 1f }?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth()) }
@@ -611,6 +619,29 @@ private fun Section(title: String, about: String? = null, content: @Composable C
         about?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow), modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(vertical = 4.dp), content = content)
+        }
+    }
+}
+
+/** Title, "File 2 of 3: name", bar, "12 MB of 40 MB · 25 MB/s · 2 s left", and Cancel. */
+@Composable
+private fun TransferCard(t: Transfers.Card) {
+    Column(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 4.dp).semantics(mergeDescendants = true) {
+            liveRegion = LiveRegionMode.Polite
+        },
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(t.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        t.files?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        if (t.running) {
+            val f = t.fraction
+            if (f != null) LinearProgressIndicator(progress = { f }, modifier = Modifier.fillMaxWidth().padding(end = 8.dp))
+            else LinearProgressIndicator(Modifier.fillMaxWidth().padding(end = 8.dp))
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(t.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            if (t.running) TextButton(onClick = { Transfers.cancel(t.id) }, modifier = Modifier.semantics { contentDescription = "Cancel ${t.title}" }) { Text("Cancel") }
         }
     }
 }

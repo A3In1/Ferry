@@ -135,6 +135,11 @@
             android:name=".RingStop"
             android:exported="false" />
 
+        <!-- Cancel on a file transfer's progress notification. -->
+        <receiver
+            android:name=".TransferCancel"
+            android:exported="false" />
+
         <!-- Bluetooth presence scan results (PendingIntent; works with the process dead). -->
         <receiver
             android:name=".BleScanReceiver"

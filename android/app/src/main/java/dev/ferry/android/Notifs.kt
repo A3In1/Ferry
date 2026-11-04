@@ -109,18 +109,27 @@ object Notifs {
      * transfer whose connection dropped gets no final event, and would otherwise leave this ongoing
      * (unswipeable) notification up until Ferry stops.
      */
-    fun progress(ctx: Context, id: Int, title: String, percent: Int, text: String? = null) = post(
+    fun progress(ctx: Context, id: Int, title: String, percent: Int, text: String? = null, cancel: String? = null) = post(
         ctx,
         id,
         builder(ctx, CH_PROGRESS, title)
-            .setContentText(text ?: if (percent >= 0) "$percent%" else null)
+            .setContentText(text?.lineSequence()?.last() ?: if (percent >= 0) "$percent%" else null)
+            .setStyle(text?.takeIf { '\n' in it }?.let { NotificationCompat.BigTextStyle().bigText(it) })
             .setProgress(100, percent.coerceAtLeast(0), percent < 0)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setTimeoutAfter(120_000)
             .setContentIntent(openApp(ctx))
+            .apply { cancel?.let { addAction(0, "Cancel", cancelTransfer(ctx, id, it)) } }
             .build(),
+    )
+
+    private fun cancelTransfer(ctx: Context, request: Int, transferId: String): PendingIntent = PendingIntent.getBroadcast(
+        ctx,
+        request,
+        Intent(ctx, TransferCancel::class.java).putExtra(Transfers.EXTRA_ID, transferId),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
     fun received(ctx: Context, id: Int, name: String, uri: Uri, mime: String) {

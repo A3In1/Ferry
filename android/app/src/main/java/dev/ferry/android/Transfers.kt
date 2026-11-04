@@ -1,7 +1,9 @@
 package dev.ferry.android
 
+import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.os.SystemClock
@@ -12,88 +14,184 @@ import android.webkit.MimeTypeMap
 import dev.ferry.core.FfiFileEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.IOException
 
+/** Cancel on a transfer's progress notification. */
+class TransferCancel : BroadcastReceiver() {
+    override fun onReceive(ctx: Context, intent: Intent) {
+        intent.getStringExtra(Transfers.EXTRA_ID)?.let(Transfers::cancel)
+    }
+}
+
 /**
- * File events from the core, handled in order on one coroutine (Rust threads must not block
- * on the MediaStore copy). The core reports both directions; only transfers that started with
- * an `Offered` event are incoming.
+ * File transfers in both directions, each with one progress notification (with Cancel) and a card
+ * in the app. Core events are handled in order on one coroutine (Rust threads must not block on
+ * the MediaStore copy); a send also reports its start and result from [Ferry.send].
  */
 object Transfers {
+    const val EXTRA_ID = "transfer"
+    private const val NOTIFY_MS = 500L // Android drops notification updates faster than a few a second
+    private const val CARD_MS = 200L
+    private const val STALL_MS = 120_000L
+    private const val LINGER_MS = 4_000L
+
     private val events = Channel<FfiFileEvent>(Channel.UNLIMITED)
-    // The core sends no end event for a transfer whose connection dropped, so these only keep the latest few.
-    private val incoming = lru<List<String>>(64) // transfer id -> offered names
-    private val lastShown = lru<Long>(256) // transfer id/index -> last progress update
-    /** Per-file progress notifications still up, so a stopped service doesn't leave them behind. */
-    private val shown = HashSet<Int>()
 
-    /**
-     * A send from [Ferry.send]: one notification ([id]) from "Sending…" to the result. The core's
-     * progress events carry only a transfer id, so a send claims the first unknown outgoing id
-     * while it is the only unclaimed send; otherwise progress falls back to per-file notifications.
-     */
-    class Outgoing(val mac: String, val names: List<String>) {
-        val id = System.identityHashCode(this) xor 0x5e4d
-        var tid: String? = null
-        var done = false
+    /** What the in-app card shows for one transfer. */
+    data class Card(
+        val id: String,
+        val outgoing: Boolean,
+        val title: String,
+        val files: String?, // "File 2 of 3: name"
+        val fraction: Float?, // null: indeterminate
+        val detail: String,
+        val running: Boolean,
+    )
+
+    val cards = MutableStateFlow<List<Card>>(emptyList())
+
+    private class Live(val id: String, val outgoing: Boolean, val peer: String?, names: List<String>, total: Long = 0) {
+        val p = TransferProgress(names, total)
+        val notif = id.hashCode()
+        var saved = 0
+        var failed = 0
+        var end: String? = null // final status once over
+        var lastEvent = SystemClock.elapsedRealtime()
+        var notified = 0L
+        var carded = 0L
+        val running get() = end == null
     }
 
-    private val sends = ArrayList<Outgoing>() // guarded by itself; notifications for a send are posted under it
+    private val live = LinkedHashMap<String, Live>() // guarded by itself; newest last
 
-    fun sending(ctx: Context, o: Outgoing) = synchronized(sends) {
-        sends += o
-        Ferry.put("send-${o.id}", "Sending ${count(o.names.size, "file")} to ${o.mac}…")
-        Notifs.progress(ctx, o.id, "Sending ${count(o.names.size, "file")} to ${o.mac}", -1, "Connecting…")
+    private fun find(id: String) = synchronized(live) { live[id] }
+
+    private fun what(names: List<String>) = names.singleOrNull() ?: count(names.size, "file")
+
+    private fun Live.title(): String {
+        val w = what(p.names)
+        return if (outgoing) "Sending $w" + (peer?.let { " to $it" } ?: "") else "Receiving $w" + (peer?.let { " from $it" } ?: "")
     }
 
-    /** The send's result replaces its progress notification. */
-    fun done(ctx: Context, o: Outgoing, title: String, text: String) = synchronized(sends) {
-        o.done = true
-        Ferry.put("send-${o.id}", title)
-        Notifs.result(ctx, title, text, o.id)
+    private fun Live.files(): String? =
+        if (p.fileCount > 1) "File ${p.fileNumber} of ${p.fileCount}" + (p.currentName?.let { ": $it" } ?: "") else null
+
+    private fun Live.detail(ctx: Context, now: Long): String =
+        end ?: if (p.totalBytes == 0L) "Connecting…" else p.detail(now) { Formatter.formatShortFileSize(ctx, it) }
+
+    /** Updates this transfer's notification and card, throttled unless [force]. */
+    private fun Live.show(ctx: Context, force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        if (force || now - carded >= CARD_MS) {
+            carded = now
+            publishCards(ctx)
+        }
+        if (running && (force || now - notified >= NOTIFY_MS)) {
+            notified = now
+            val pct = p.fraction?.let { (it * 100).toInt() } ?: -1
+            val text = listOfNotNull(files(), detail(ctx, now).takeIf { it.isNotEmpty() }).joinToString("\n")
+            Notifs.progress(ctx, notif, title(), pct, text, cancel = id)
+        }
     }
 
-    /** Always called last: a cancelled send leaves no "Sending…" behind. */
-    fun end(ctx: Context, o: Outgoing) = synchronized(sends) {
-        if (!o.done) Notifs.cancel(ctx, o.id)
-        o.done = true
-        // A claimed send stays listed a while, so its late events still find it (and post nothing).
-        if (o.tid == null) sends -= o
-        while (sends.count { it.done } > 16) sends.remove(sends.first { it.done })
+    private fun publishCards(ctx: Context) {
+        val now = SystemClock.elapsedRealtime()
+        cards.value = synchronized(live) {
+            live.values.reversed().map { Card(it.id, it.outgoing, it.title(), it.files(), it.p.fraction, it.detail(ctx, now), it.running) }
+        }
     }
 
-    private fun outgoing(tid: String): Outgoing? = synchronized(sends) {
-        sends.firstOrNull { it.tid == tid } ?: sends.singleOrNull { it.tid == null && !it.done }?.also { it.tid = tid }
+    private fun begin(ctx: Context, t: Live) {
+        synchronized(live) { live[t.id] = t }
+        t.show(ctx, force = true)
+    }
+
+    /** Over: the notification becomes [result] (or goes), the card shows [status] a few seconds, [line] stays in Recent. */
+    private fun finish(ctx: Context, t: Live, status: String, line: String, result: Pair<String, String>?) {
+        if (!t.running) return
+        t.end = status
+        Ferry.put(t.id, line)
+        if (result != null) Notifs.result(ctx, result.first, result.second, t.notif) else Notifs.cancel(ctx, t.notif)
+        publishCards(ctx)
+        Ferry.scope.launch {
+            delay(LINGER_MS)
+            synchronized(live) { live.remove(t.id) }
+            publishCards(ctx)
+        }
+    }
+
+    /** Cancel button (notification or card). Both devices then report the transfer cancelled. */
+    fun cancel(id: String) {
+        val node = Ferry.node.value ?: return
+        if (!node.cancelTransfer(id)) Log.w(TAG, "transfer ${id.take(8)} already over, nothing to cancel")
+    }
+
+    /** A send from [Ferry.send] starts; [id] is the transfer id it passes to the core. */
+    fun sending(ctx: Context, id: String, mac: String, names: List<String>) = begin(ctx, Live(id, true, mac, names))
+
+    fun sent(ctx: Context, id: String, title: String, text: String) {
+        val t = find(id) ?: return
+        finish(ctx, t, "Sent", title, title to text)
+    }
+
+    fun sendFailed(ctx: Context, id: String, title: String, text: String) {
+        val t = find(id) ?: return
+        finish(ctx, t, "Couldn't send", title, title to text)
+    }
+
+    fun sendCancelled(ctx: Context, id: String, byPeer: Boolean) {
+        val t = find(id) ?: return
+        val line = cancelledLine(t, byPeer)
+        finish(ctx, t, if (byPeer) "Cancelled on ${t.peer ?: "the Mac"}" else "Cancelled", line, null)
+    }
+
+    private fun cancelledLine(t: Live, byPeer: Boolean): String {
+        val w = what(t.p.names)
+        val base = when {
+            byPeer -> "$w: cancelled on ${t.peer ?: "the Mac"}"
+            t.outgoing -> "Cancelled sending $w"
+            else -> "Cancelled receiving $w"
+        }
+        return if (t.saved > 0 && !t.outgoing) "$base · ${t.saved} saved to Downloads/Ferry" else base
     }
 
     /** The service stopped: drop progress notifications no further event will update. */
-    fun clear(ctx: Context) = synchronized(shown) {
-        shown.forEach { Notifs.cancel(ctx, it) }
-        shown.clear()
+    fun clear(ctx: Context) {
+        val all = synchronized(live) { live.values.toList().also { live.clear() } }
+        all.forEach { Notifs.cancel(ctx, it.notif) }
+        cards.value = emptyList()
     }
-
-    private fun progress(ctx: Context, id: Int, title: String, pct: Int, text: String? = null) {
-        synchronized(shown) { shown += id }
-        Notifs.progress(ctx, id, title, pct, text)
-    }
-
-    private fun settled(id: Int) = synchronized(shown) { shown -= id }
 
     fun offer(e: FfiFileEvent) {
         events.trySend(e)
     }
 
-    fun start(ctx: Context) = Ferry.scope.launch(Dispatchers.IO) {
-        for (e in events) {
-            try {
-                handle(ctx, e)
-            } catch (ex: Exception) {
-                Log.e(TAG, "file event $e", ex)
+    fun start(ctx: Context) {
+        Ferry.scope.launch(Dispatchers.IO) {
+            for (e in events) {
+                try {
+                    handle(ctx, e)
+                } catch (ex: Exception) {
+                    Log.e(TAG, "file event $e", ex)
+                }
+            }
+        }
+        // The core sends nothing more for a transfer whose connection dropped.
+        Ferry.scope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(10_000)
+                val now = SystemClock.elapsedRealtime()
+                val stalled = synchronized(live) { live.values.filter { !it.outgoing && it.running && now - it.lastEvent > STALL_MS } }
+                stalled.forEach { events.trySend(FfiFileEvent.Failed(it.id, UInt.MAX_VALUE, STALLED)) }
             }
         }
     }
+
+    private const val STALLED = "connection lost"
 
     private fun key(tid: String, index: UInt) = "$tid/$index"
 
@@ -102,89 +200,96 @@ object Transfers {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?) = size > max
     }
 
-    private fun name(tid: String, index: UInt): String =
-        incoming[tid]?.getOrNull(index.toInt()) ?: "file ${index + 1u}"
+    private fun name(t: Live, index: UInt): String = t.p.names.getOrNull(index.toInt()) ?: "file ${index + 1u}"
+
+    /** Incoming: every item saved or failed. */
+    private fun receivedAll(ctx: Context, t: Live) {
+        if (t.saved + t.failed < t.p.fileCount) return
+        val w = what(t.p.names)
+        when {
+            t.failed == 0 -> finish(ctx, t, "Received", "Received $w", null) // each file has its own "Received" notification
+            t.saved > 0 -> finish(ctx, t, "${t.failed} couldn't be received", "Received ${t.saved} of ${t.p.fileCount} files", null)
+            else -> finish(ctx, t, "Couldn't receive", "Couldn't receive $w", null)
+        }
+    }
 
     private fun handle(ctx: Context, e: FfiFileEvent) {
         when (e) {
+            is FfiFileEvent.Sending -> {
+                val t = find(e.transferId) ?: return // a send not started from Ferry.send
+                t.p.names = e.names
+                t.p.totalBytes = e.totalBytes.toLong()
+                t.lastEvent = SystemClock.elapsedRealtime()
+                t.show(ctx, force = true)
+            }
+
             is FfiFileEvent.Offered -> {
-                incoming[e.transferId] = e.names
-                val size = Formatter.formatShortFileSize(ctx, e.totalBytes.toLong())
-                Ferry.put(e.transferId, "Receiving ${count(e.names.size, "file")} ($size)")
+                val mac = Ferry.peers.value.singleOrNull()?.name // the event doesn't say which Mac
+                begin(ctx, Live(e.transferId, false, mac, e.names, e.totalBytes.toLong()))
             }
 
             is FfiFileEvent.Progress -> {
-                val key = key(e.transferId, e.index)
+                val t = find(e.transferId)?.takeIf { it.running } ?: return
                 val now = SystemClock.elapsedRealtime()
-                // Throttle: at most two updates a second per file, plus the final one.
-                if (e.done < e.total && now - (lastShown[key] ?: 0) < 500) return
-                lastShown[key] = now
-                val pct = if (e.total > 0u) (e.done * 100u / e.total).toInt() else 100
-                if (e.transferId in incoming) {
-                    val label = "Receiving ${name(e.transferId, e.index)}"
-                    Ferry.put(key, "$label · $pct%", pct / 100f)
-                    return progress(ctx, key.hashCode(), label, pct)
-                }
-                val o = outgoing(e.transferId)
-                if (o == null) {
-                    val label = "Sending file ${e.index + 1u}"
-                    Ferry.put(key, "$label · $pct%", pct / 100f)
-                    return progress(ctx, key.hashCode(), label, pct)
-                }
-                val i = e.index.toInt()
-                val label = "Sending ${o.names.getOrElse(i) { "file ${i + 1}" }}"
-                Ferry.put(key, "$label · $pct%", pct / 100f)
-                synchronized(sends) {
-                    if (!o.done) Notifs.progress(ctx, o.id, "$label to ${o.mac}", pct, if (o.names.size > 1) "File ${i + 1} of ${o.names.size}" else null)
-                }
+                t.lastEvent = now
+                t.p.progress(e.index, e.done.toLong(), e.total.toLong(), now)
+                t.show(ctx, force = e.done == e.total && t.p.fraction == 1f)
             }
 
             is FfiFileEvent.Saved -> {
-                val key = key(e.transferId, e.index)
-                lastShown.remove(key)
-                settled(key.hashCode())
-                if (e.transferId !in incoming) {
-                    // Sender side: `path` is the name the receiver saved it under. A tracked send keeps
-                    // its one notification until its result.
-                    if (outgoing(e.transferId) == null) Notifs.cancel(ctx, key.hashCode())
-                    Ferry.put(key, "Sent ${File(e.path).name}")
-                    return
-                }
-                val file = File(e.path)
-                val inbox = Ferry.incomingDir(ctx).canonicalPath + File.separator
-                if (!file.canonicalPath.startsWith(inbox)) {
-                    Log.w(TAG, "saved file outside the incoming dir, not moving: ${e.path}")
-                    Notifs.cancel(ctx, key.hashCode())
-                    Ferry.put(key, "Saved ${file.name}")
-                    return
-                }
-                try {
-                    val (uri, mime) = publishToDownloads(ctx, file)
-                    Ferry.put(key, "Saved ${file.name} to Downloads/Ferry")
-                    Notifs.received(ctx, key.hashCode(), file.name, uri, mime) // replaces the progress notification
-                } catch (ex: Exception) {
-                    // The file is still complete in app storage; nothing is lost.
-                    Log.e(TAG, "couldn't move ${file.name} to Downloads", ex)
-                    Ferry.put(key, "Received ${file.name}, but couldn't save it to Downloads")
-                    Notifs.result(ctx, "Received ${file.name}", "Couldn't save it to Downloads/Ferry, so it's in Ferry's own storage. ${ex.friendly()}", key.hashCode())
-                }
+                val t = find(e.transferId)?.takeIf { it.running } ?: return
+                t.lastEvent = SystemClock.elapsedRealtime()
+                t.p.finish(e.index)
+                // Sender side: `path` is the name the receiver saved it under; the send's own result reports it.
+                if (t.outgoing) return t.show(ctx)
+                t.saved++
+                saveToDownloads(ctx, key(e.transferId, e.index), File(e.path))
+                t.show(ctx)
+                receivedAll(ctx, t)
             }
 
             is FfiFileEvent.Failed -> {
-                val key = key(e.transferId, e.index)
-                lastShown.remove(key)
-                settled(key.hashCode())
-                Log.w(TAG, "transfer ${e.transferId.take(8)}/${e.index} failed: ${e.error}")
-                if (e.transferId in incoming) {
-                    val n = name(e.transferId, e.index)
-                    Ferry.put(key, "Couldn't receive $n")
-                    Notifs.result(ctx, "Couldn't receive $n", Errors.friendly(e.error), key.hashCode())
-                } else {
-                    val o = outgoing(e.transferId)
-                    Ferry.put(key, "Couldn't send ${o?.names?.getOrNull(e.index.toInt()) ?: "file ${e.index + 1u}"}")
-                    if (o == null) Notifs.cancel(ctx, key.hashCode()) // the send's own result notification reports it
+                val t = find(e.transferId)?.takeIf { it.running } ?: return
+                if (e.error == STALLED && e.index == UInt.MAX_VALUE) {
+                    Log.w(TAG, "transfer ${e.transferId.take(8)} stalled, giving up")
+                    val w = what(t.p.names)
+                    return finish(ctx, t, "The connection was lost", "Couldn't receive $w: the connection was lost",
+                        "Couldn't receive $w" to "The connection to your Mac was lost. Send it again to continue where it stopped.")
                 }
+                Log.w(TAG, "transfer ${e.transferId.take(8)}/${e.index} failed: ${e.error}")
+                t.lastEvent = SystemClock.elapsedRealtime()
+                t.p.finish(e.index)
+                if (t.outgoing) return t.show(ctx) // the send's own result reports it
+                t.failed++
+                val n = name(t, e.index)
+                val k = key(e.transferId, e.index)
+                Notifs.result(ctx, "Couldn't receive $n", Errors.friendly(e.error), k.hashCode())
+                t.show(ctx)
+                receivedAll(ctx, t)
             }
+
+            is FfiFileEvent.Cancelled -> {
+                // A send's own result (FerryException.Cancelled) ends it.
+                val t = find(e.transferId)?.takeIf { it.running && !it.outgoing } ?: return
+                finish(ctx, t, if (e.byPeer) "Cancelled on ${t.peer ?: "the Mac"}" else "Cancelled", cancelledLine(t, e.byPeer), null)
+            }
+        }
+    }
+
+    /** A received file goes to public Downloads/Ferry, with its own "Received" notification. */
+    private fun saveToDownloads(ctx: Context, key: String, file: File) {
+        val inbox = Ferry.incomingDir(ctx).canonicalPath + File.separator
+        if (!file.canonicalPath.startsWith(inbox)) {
+            Log.w(TAG, "saved file outside the incoming dir, not moving: $file")
+            return
+        }
+        try {
+            val (uri, mime) = publishToDownloads(ctx, file)
+            Notifs.received(ctx, key.hashCode(), file.name, uri, mime)
+        } catch (ex: Exception) {
+            // The file is still complete in app storage; nothing is lost.
+            Log.e(TAG, "couldn't move ${file.name} to Downloads", ex)
+            Notifs.result(ctx, "Received ${file.name}", "Couldn't save it to Downloads/Ferry, so it's in Ferry's own storage. ${ex.friendly()}", key.hashCode())
         }
     }
 

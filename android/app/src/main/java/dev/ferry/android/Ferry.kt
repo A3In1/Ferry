@@ -9,6 +9,7 @@ import android.util.Log
 import android.widget.Toast
 import dev.ferry.android.screen.Screen
 import dev.ferry.core.FerryDelegate
+import dev.ferry.core.FerryException
 import dev.ferry.core.FerryNode
 import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiFileEvent
@@ -150,28 +151,29 @@ object Ferry {
 
     /**
      * Sends in [scope] so it survives leaving the UI; closes the fds when done. One notification
-     * follows the send from "Sending…" to its result (see [Transfers.Outgoing]).
+     * follows the send from "Sending…" to its result, with Cancel (see [Transfers]).
      */
     fun send(ctx: Context, peer: FfiPeer, files: List<Source>) {
         val app = ctx.applicationContext
         if (files.isEmpty()) return toast(app, "Couldn't open the selected files. Try picking them again.")
         if (bluetoothOnly(peer.id)) toast(app, "Connected over Bluetooth only, so big files are slow. Join the same Wi-Fi as your Mac to speed it up.")
-        val out = Transfers.Outgoing(peer.name, files.map { it.name ?: "file" })
-        Transfers.sending(app, out)
+        val tid = TransferProgress.newId() // ours, so Cancel works before the core's first event
+        Transfers.sending(app, tid, peer.name, files.map { it.name ?: "file" })
         scope.launch {
             try {
                 val node = awaitNode() ?: error(NOT_RUNNING)
                 // The core opens the path itself; /proc/self/fd/N reopens our fd.
-                val r = node.sendNamed(peer.id, files.map { FfiSource("/proc/self/fd/${it.pfd.fd}", it.name) })
+                val r = node.sendNamed(peer.id, files.map { FfiSource("/proc/self/fd/${it.pfd.fd}", it.name) }, tid)
                 val size = Formatter.formatShortFileSize(app, r.bytesSent.toLong())
-                Transfers.done(app, out, "Sent ${count(r.filesSent.toInt(), "file")} to ${peer.name}", "$size in ${"%.1f".format(r.elapsedMs.toLong() / 1000.0)} s")
+                Transfers.sent(app, tid, "Sent ${count(r.filesSent.toInt(), "file")} to ${peer.name}", "$size in ${"%.1f".format(r.elapsedMs.toLong() / 1000.0)} s")
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: FerryException.Cancelled) {
+                Transfers.sendCancelled(app, tid, e.byPeer)
             } catch (e: Exception) {
                 Log.w(TAG, "send to ${peer.name} failed: ${e.text()}")
-                Transfers.done(app, out, "Couldn't send to ${peer.name}", e.friendly())
+                Transfers.sendFailed(app, tid, "Couldn't send to ${peer.name}", e.friendly())
             } finally {
-                Transfers.end(app, out)
                 files.forEach { runCatching { it.pfd.close() } }
             }
         }
