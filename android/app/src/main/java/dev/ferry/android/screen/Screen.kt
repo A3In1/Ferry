@@ -98,10 +98,13 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         }
     }
 
-    private suspend fun send(m: Msg, last: Boolean = false) = lock.withLock {
+    private suspend fun send(m: Msg, last: Boolean = false) = sendRaw(Fsp.encode(m), last)
+
+    /** An encoded message (FRAMEs are encoded straight from the encoder's buffer). */
+    private suspend fun sendRaw(bytes: ByteArray, last: Boolean = false) = lock.withLock {
         if (ended) return@withLock
         ended = last
-        stream.write(if (opened) Fsp.encode(m) else Fsp.MAGIC + Fsp.encode(m))
+        stream.write(if (opened) bytes else Fsp.MAGIC + bytes)
         opened = true
     }
 
@@ -178,7 +181,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         p.registerCallback(cb, Handler(Looper.getMainLooper()))
         stopped = cb
         Notifs.screen(ctx, mac, if (control) "Screen sharing is on, and $mac can tap and type here" else "Screen sharing is on")
-        Capture(ctx, p, m).also { capture = it }.run(::send)
+        Capture(ctx, p, m).also { capture = it }.run(::send) { sendRaw(it) }
     }
 
     /** Consent: the activity if Android lets us start it, otherwise a notification the user taps. */

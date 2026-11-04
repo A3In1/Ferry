@@ -58,14 +58,25 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   are merged and sent at most at 120 Hz; the phone moves its overlay once per frame to the latest spot.
 - Messages may grow trailing fields; a receiver ignores bytes past what it knows and treats missing
   optional fields as 0.
-- Video: H.264, no B-frames, realtime priority/low latency where supported, repeat previous frame
-  after 100 ms, keyframe every 10 s and on KEYFRAME. Defaults: max_size 1280, 8 Mbps.
-- Adaptive bitrate (phone side, no Mac input needed): START's bitrate is the ceiling. The phone times
-  each FRAME write; QUIC flow control makes writes block when the link can't keep up. Per 1 s window:
-  writes blocked > 50% of the time → bitrate × 0.7; < 10% for 3 windows in a row → × 1.2 (up to the
-  ceiling); floor max(500 kbps, ceiling / 8). A single write blocked ≥ 400 ms means the queued frames
-  are stale: bitrate halves, frames are dropped until a requested keyframe (at most every 2 s).
-  Applied with `PARAMETER_KEY_VIDEO_BITRATE`, kept across rotations, and reported as QUALITY.
+- Video: H.264 High profile where offered (else the encoder's default), no B-frames, VBR, realtime
+  priority + operating rate, `KEY_LOW_LATENCY` where supported, at most 60 fps fed to the encoder (90/120 Hz
+  screens), SPS/PPS with every keyframe, repeat previous frame after 100 ms. Keyframes on demand (KEYFRAME,
+  catching up) plus one every 30 s: QUIC loses nothing, so periodic ones only cost bitrate spikes. Size: long
+  side ≤ max_size (0 = native), multiples of 16, stepping down 1920/1600/1280/1024/720 until the encoder
+  takes it at 60 fps (else at all; else 30 fps). Any key the encoder refuses → configured again with only
+  the basic keys. The encoder runs in async mode on its own thread and never waits for the network.
+  Defaults: max_size 1920 (older Macs ask 1280), 8 Mbps.
+- Pacing and adaptive bitrate (phone side): START's bitrate is the ceiling. With ACKs (newer Macs): per 1 s
+  window, mean write → ACK round trip above the best of the last 30 windows is the queueing on the link;
+  > 80 ms in two windows in a row (or > 160 ms in one) → bitrate × 0.75; < 25 ms for 3 windows and ≥ 5 s
+  after the last cut → × 1.15 (up to the ceiling). A steady high round trip (distance, relay) is not
+  congestion. The picture is *behind* when the oldest unacked FRAME is ≥ 300 ms old or ≥ 6 encoded frames
+  wait for the writer: bitrate × 0.6 (once per window), frames are dropped until the oldest unacked one is
+  < 60 ms old, then one keyframe is requested (again after 1 s if it doesn't come) and sending resumes from
+  it. So the Mac's picture is never far behind and stale frames never queue behind each other. Without
+  ACKs (older Macs): write timing (blocked > 50% of two windows in a row → × 0.75, < 10% for three → × 1.15;
+  one write ≥ 400 ms → behind). Floor max(500 kbps, ceiling / 8). Applied with
+  `PARAMETER_KEY_VIDEO_BITRATE`, kept across rotations, and reported as QUALITY.
 - Measurements: FRAME `pts_us` is the capture time (surface input: `System.nanoTime` µs on the phone). The
   clocks differ, so the Mac reports one-way delay as (received − pts) above the lowest seen this session
   (= queueing the link added), plus the phone's write → ACK round trip from STATS. Logs: phone

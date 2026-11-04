@@ -50,6 +50,12 @@ class FspTest {
     }
 
     @Test
+    fun frameStraightFromABuffer() {
+        val codec = java.nio.ByteBuffer.wrap(byteArrayOf(9, 9, 0, 0, 0, 1, 0x65, 9)).apply { limit(7).position(2) } // offset 2, size 5
+        assertArrayEquals(Fsp.encode(Msg.Frame(42, 1, byteArrayOf(0, 0, 0, 1, 0x65))), Fsp.frame(42, 1, codec))
+    }
+
+    @Test
     fun ackAndStatsLayout() {
         assertArrayEquals(byteArrayOf(0x17, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 1, 2), Fsp.encode(Msg.Ack(0x0102)))
         val s = Fsp.encode(Msg.Stats(2000, 1, 2, 3, 4, 5, 6, 7, 8, 9))

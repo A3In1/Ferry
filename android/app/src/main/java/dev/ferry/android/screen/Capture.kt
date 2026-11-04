@@ -10,19 +10,22 @@ import android.media.projection.MediaProjection
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withContext
-import kotlin.math.roundToInt
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 data class ScreenSize(val w: Int, val h: Int, val dpi: Int)
 
@@ -49,114 +52,79 @@ fun screenSizes(ctx: Context) = callbackFlow {
 }.distinctUntilChanged()
 
 /**
- * Adapts the encoder's bitrate to the link from how long FRAME writes block (QUIC flow control pushes
- * back when the network can't keep up): down fast when writes block much of the time, back up slowly
- * when they don't, never above the Mac's START bitrate. A write that stalls means the frames queued
- * behind it are stale: [Change.catchUp] says to drop frames until a fresh keyframe.
+ * Encode sizes to try for a [w]x[h] screen, best first: long side ≤ [maxSize] (0 = native), then smaller
+ * steps; both sides multiples of 16 (some encoders garble other widths).
  */
-class BitrateControl(private val ceiling: Int, now: Long) {
-    data class Change(val bitrate: Int?, val catchUp: Boolean)
-
-    private val floor = maxOf(MIN_BPS, ceiling / 8).coerceAtMost(ceiling)
-    var bitrate = ceiling
-        private set
-    private var windowStart = now
-    private var blocked = 0L
-    private var calm = 0
-    private var lastCatchUp = Long.MIN_VALUE / 2
-
-    /** One FRAME was written in [writeMs]; [now] in ms. */
-    fun sent(writeMs: Long, now: Long): Change {
-        blocked += writeMs
-        if (writeMs >= STALL_MS && now - lastCatchUp >= CATCH_UP_EVERY_MS) {
-            lastCatchUp = now
-            restart(now)
-            return Change(set(bitrate / 2), catchUp = true)
-        }
-        val elapsed = now - windowStart
-        if (elapsed < WINDOW_MS) return Change(null, false)
-        val busy = blocked.toDouble() / elapsed
-        restart(now)
-        return when {
-            busy > CONGESTED -> {
-                calm = 0
-                Change(set((bitrate * 0.7).roundToInt()), false)
-            }
-            busy < CLEAR && ++calm >= CALM_WINDOWS -> {
-                calm = 0
-                Change(set((bitrate * 1.2).roundToInt()), false)
-            }
-            else -> {
-                if (busy >= CLEAR) calm = 0
-                Change(null, false)
-            }
-        }
-    }
-
-    private fun restart(now: Long) {
-        windowStart = now
-        blocked = 0
-    }
-
-    /** The new bitrate, or null if it didn't change. */
-    private fun set(bps: Int): Int? {
-        val b = bps.coerceIn(floor, ceiling)
-        if (b == bitrate) return null
-        bitrate = b
-        return b
-    }
-
-    companion object {
-        const val MIN_BPS = 500_000
-        const val WINDOW_MS = 1_000L
-        const val CONGESTED = 0.5
-        const val CLEAR = 0.1
-        const val CALM_WINDOWS = 3
-        const val STALL_MS = 400L
-        const val CATCH_UP_EVERY_MS = 2_000L
-    }
+fun encodeSizes(w: Int, h: Int, maxSize: Int): List<Pair<Int, Int>> {
+    val native = maxOf(w, h)
+    val want = if (maxSize <= 0) native else minOf(maxSize, native)
+    return (listOf(want) + SIZE_LADDER.filter { it < want }).map { long ->
+        val f = long.toDouble() / native
+        ((w * f).toInt() and 15.inv()) to ((h * f).toInt() and 15.inv())
+    }.distinct()
 }
 
-/** H.264 from a VirtualDisplay into FRAME messages; INFO + a fresh encoder on every rotation. */
+private val SIZE_LADDER = listOf(1920, 1600, 1280, 1024, 720)
+
+/**
+ * H.264 from a VirtualDisplay into FRAME messages; INFO + a fresh encoder on every rotation. The encoder
+ * runs in async mode on its own thread and never waits for the network: each output buffer is copied once,
+ * straight into a whole FSP message, and queued; the sender writes them and [Pacer] drops stale ones.
+ */
 class Capture(private val ctx: Context, private val projection: MediaProjection, private val start: Msg.Start) {
     @Volatile private var codec: MediaCodec? = null
     private val ceiling = start.bitrate.takeIf { it > 0 }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 8_000_000
-    private val quality = BitrateControl(ceiling, SystemClock.elapsedRealtime())
-    private val inFlight = InFlight() // guarded by itself, with stats
+    // pacer, inFlight and stats are guarded by inFlight's lock (the encoder thread, sender and ACK reader all touch them).
+    private val pacer = Pacer(ceiling, SystemClock.elapsedRealtime())
+    private val inFlight = InFlight()
     private val stats = SendStats(SystemClock.elapsedRealtime())
+    private val waiting = AtomicInteger()
+    private val overflowed = AtomicBoolean()
 
-    /** The Mac has every FRAME up to [ptsUs]. Any thread. */
-    fun acked(ptsUs: Long) = synchronized(inFlight) {
-        inFlight.acked(ptsUs, SystemClock.elapsedRealtime())?.let(stats::rtt)
-    }
+    /** One encoded FRAME, already a whole FSP message. */
+    private class Out(val bytes: ByteArray, val ptsUs: Long, val key: Boolean, val config: Boolean)
 
     fun keyframe() {
         runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
     }
 
-    suspend fun run(send: suspend (Msg) -> Unit) {
+    /** The Mac has every FRAME up to [ptsUs]. Any thread. */
+    fun acked(ptsUs: Long) = synchronized(inFlight) {
+        inFlight.acked(ptsUs, SystemClock.elapsedRealtime())?.let {
+            stats.rtt(it)
+            pacer.rtt(it)
+        }
+    }
+
+    /** [send] a message; [sendRaw] an already-encoded one (FRAMEs). */
+    suspend fun run(send: suspend (Msg) -> Unit, sendRaw: suspend (ByteArray) -> Unit) {
+        val thread = HandlerThread("ferry-encoder", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
+        val handler = Handler(thread.looper)
         var vd: VirtualDisplay? = null
         try {
             screenSizes(ctx).collectLatest { s ->
                 send(Msg.Info(s.w, s.h, caps(true)))
+                val frames = Channel<Out>(FRAME_QUEUE)
+                waiting.set(0)
                 val c = MediaCodec.createEncoderByType(AVC)
                 try {
                     val (w, h) = fit(s, c)
-                    c.configure(format(w, h, c), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    configure(c, w, h, frames, handler, s)
                     val input = c.createInputSurface()
                     try {
                         c.start()
                         codec = c
-                        Log.w(SCREEN_TAG, "encoding ${w}x$h for screen ${s.w}x${s.h}")
                         // One VirtualDisplay per projection (Android 14+): resize it rather than make another.
                         vd = vd?.apply {
                             resize(w, h, s.dpi)
                             surface = input
                         } ?: projection.createVirtualDisplay("Ferry", w, h, s.dpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, input, null, null)
-                        drain(c, send)
+                        sendFrames(frames, send, sendRaw)
                     } finally {
                         codec = null
                         vd?.surface = null
+                        frames.close()
+                        runCatching { c.stop() }
                         input.release()
                     }
                 } finally {
@@ -165,79 +133,144 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
             }
         } finally {
             vd?.release()
+            thread.quitSafely()
         }
     }
 
-    private suspend fun drain(c: MediaCodec, send: suspend (Msg) -> Unit) = withContext(Dispatchers.IO) {
-        val info = MediaCodec.BufferInfo()
-        var skipping = false // behind after a stalled write: drop frames until a keyframe
-        while (isActive) {
-            val i = c.dequeueOutputBuffer(info, 100_000)
-            if (i < 0) continue
-            val key = if (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) 1 else 0
-            val config = if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) 2 else 0
-            if (key != 0) skipping = false
-            if (config == 0 && info.size > 0) {
-                // Surface input: pts is the capture time on System.nanoTime's clock.
-                synchronized(inFlight) { stats.encoded(System.nanoTime() / 1000 - info.presentationTimeUs) }
-            }
-            if (skipping && config == 0 || info.size == 0) {
-                if (info.size > 0) synchronized(inFlight) { stats.dropped() }
-                c.releaseOutputBuffer(i, false)
-                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
-                continue
-            }
-            val data = ByteArray(info.size)
-            c.getOutputBuffer(i)?.apply { position(info.offset) }?.get(data)
-            c.releaseOutputBuffer(i, false)
-            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
-            val t = SystemClock.elapsedRealtime()
-            send(Msg.Frame(info.presentationTimeUs, key or config, data))
+    private suspend fun sendFrames(frames: ReceiveChannel<Out>, send: suspend (Msg) -> Unit, sendRaw: suspend (ByteArray) -> Unit) {
+        for (f in frames) {
+            val queued = waiting.decrementAndGet()
             val now = SystemClock.elapsedRealtime()
+            val d = synchronized(inFlight) {
+                val backlog = if (inFlight.acking) inFlight.oldestAge(now) else null
+                // A frame the encoder thread couldn't queue broke the reference chain: same as being far behind.
+                val behind = if (overflowed.getAndSet(false)) Int.MAX_VALUE else queued
+                pacer.admit(f.key, f.config, backlog, behind, now).also { if (!it.send) stats.dropped() }
+            }
+            d.bitrate?.let { bitrate(it, send, " (behind: skipping to a keyframe)") }
+            if (d.askKeyframe) keyframe()
+            if (!d.send) continue
+            val t = SystemClock.elapsedRealtime()
+            sendRaw(f.bytes)
+            val done = SystemClock.elapsedRealtime()
+            var change: Int?
             val report = synchronized(inFlight) {
-                inFlight.sent(info.presentationTimeUs, data.size, now)
-                stats.sent(data.size, now - t)
-                stats.report(now, quality.bitrate)?.also { Log.w(SCREEN_TAG, it.line(inFlight.count)) }
+                if (!f.config) inFlight.sent(f.ptsUs, f.bytes.size, done)
+                stats.sent(f.bytes.size, done - t)
+                change = pacer.sent(done - t, done)
+                stats.report(done, pacer.bitrate)?.also { Log.w(SCREEN_TAG, it.line(inFlight.count)) }
             }
+            change?.let { bitrate(it, send, "") }
             report?.let { send(it) }
-            val change = quality.sent(now - t, now)
-            change.bitrate?.let {
-                Log.w(SCREEN_TAG, "bitrate ${it / 1000} kbps${if (change.catchUp) " (catching up)" else ""}")
-                runCatching { c.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, it) }) }
-                send(Msg.Quality(it))
-            }
-            if (change.catchUp) {
-                skipping = true
-                keyframe()
-            }
         }
     }
 
-    /** Long side ≤ max_size (0 = native), multiples of 8; falls back to 1280 if the encoder can't do it. */
+    private suspend fun bitrate(bps: Int, send: suspend (Msg) -> Unit, why: String) {
+        Log.w(SCREEN_TAG, "bitrate ${bps / 1000} kbps$why")
+        runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps) }) }
+        send(Msg.Quality(bps))
+    }
+
+    private fun callback(frames: SendChannel<Out>) = object : MediaCodec.Callback() {
+        override fun onInputBufferAvailable(c: MediaCodec, i: Int) {} // surface input
+
+        override fun onOutputBufferAvailable(c: MediaCodec, i: Int, info: MediaCodec.BufferInfo) {
+            try {
+                val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+                val config = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                val bytes = if (info.size > 0) {
+                    c.getOutputBuffer(i)?.let { b ->
+                        b.limit(info.offset + info.size).position(info.offset)
+                        Fsp.frame(info.presentationTimeUs, (if (key) 1 else 0) or (if (config) 2 else 0), b)
+                    }
+                } else {
+                    null
+                }
+                c.releaseOutputBuffer(i, false)
+                bytes ?: return
+                // Surface input: pts is the capture time on System.nanoTime's clock.
+                if (!config) synchronized(inFlight) { stats.encoded(System.nanoTime() / 1000 - info.presentationTimeUs) }
+                waiting.incrementAndGet()
+                if (frames.trySend(Out(bytes, info.presentationTimeUs, key, config)).isFailure) {
+                    waiting.decrementAndGet()
+                    overflowed.set(true)
+                    synchronized(inFlight) { stats.dropped() }
+                }
+            } catch (_: IllegalStateException) {
+                // stopped or released under us (rotation, end of session)
+            }
+        }
+
+        override fun onError(c: MediaCodec, e: MediaCodec.CodecException) {
+            Log.w(SCREEN_TAG, "encoder error", e)
+            frames.close(e)
+        }
+
+        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) {}
+    }
+
+    /** The best encode size the encoder takes at 60 fps (else at all), from [encodeSizes]. */
     private fun fit(s: ScreenSize, c: MediaCodec): Pair<Int, Int> {
-        fun scaled(max: Int): Pair<Int, Int> {
-            val f = if (max <= 0) 1.0 else minOf(1.0, max.toDouble() / maxOf(s.w, s.h))
-            return ((s.w * f).toInt() and 7.inv()) to ((s.h * f).toInt() and 7.inv())
-        }
-        val caps = c.codecInfo.getCapabilitiesForType(AVC).videoCapabilities
-        // shortcut: one fallback size, not a search of the encoder's ranges; upgrade if an encoder refuses 1280 too.
-        return scaled(start.maxSize).takeIf { (w, h) -> caps?.isSizeSupported(w, h) != false } ?: scaled(1280)
+        val caps = c.codecInfo.getCapabilitiesForType(AVC).videoCapabilities ?: return encodeSizes(s.w, s.h, start.maxSize).first()
+        val sizes = encodeSizes(s.w, s.h, start.maxSize)
+        return sizes.firstOrNull { (w, h) -> runCatching { caps.areSizeAndRateSupported(w, h, 60.0) }.getOrDefault(false) }
+            ?: sizes.firstOrNull { (w, h) -> caps.isSizeSupported(w, h) }
+            ?: encodeSizes(s.w, s.h, 1280).last()
     }
 
-    private fun format(w: Int, h: Int, c: MediaCodec) = MediaFormat.createVideoFormat(AVC, w, h).apply {
+    /** The low-latency format; if the encoder refuses it (some vendors reject keys they don't know), the plain one. */
+    private fun configure(c: MediaCodec, w: Int, h: Int, frames: SendChannel<Out>, handler: Handler, s: ScreenSize) {
+        val caps = c.codecInfo.getCapabilitiesForType(AVC)
+        val fps = if (runCatching { caps.videoCapabilities?.areSizeAndRateSupported(w, h, 60.0) }.getOrNull() != false) 60 else 30
+        c.setCallback(callback(frames), handler)
+        val full = format(w, h, fps, caps)
+        try {
+            c.configure(full, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            Log.w(SCREEN_TAG, "encoding ${w}x$h@$fps for screen ${s.w}x${s.h} with ${c.name}: $full")
+            return
+        } catch (e: Exception) {
+            Log.w(SCREEN_TAG, "${c.name} refused the low-latency format, using the plain one", e)
+        }
+        c.reset()
+        c.setCallback(callback(frames), handler)
+        val plain = format(w, h, fps, null)
+        c.configure(plain, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        Log.w(SCREEN_TAG, "encoding ${w}x$h@$fps for screen ${s.w}x${s.h} with ${c.name}: $plain")
+    }
+
+    /** [caps] null = only the keys every encoder takes. */
+    private fun format(w: Int, h: Int, fps: Int, caps: MediaCodecInfo.CodecCapabilities?) = MediaFormat.createVideoFormat(AVC, w, h).apply {
         setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        setInteger(MediaFormat.KEY_BIT_RATE, quality.bitrate) // a rotation keeps what the link settled on
-        setInteger(MediaFormat.KEY_FRAME_RATE, 60)
-        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
-        setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
+        setInteger(MediaFormat.KEY_BIT_RATE, synchronized(inFlight) { pacer.bitrate }) // a rotation keeps what the link settled on
+        setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+        // Over QUIC nothing is lost, so periodic keyframes only cost spikes: they come on demand (KEYFRAME, catching up).
+        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_S)
+        setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000) // a still screen still sends 10 fps, so nothing looks stuck
+        if (caps == null) return@apply
         setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
-        setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-        if (Build.VERSION.SDK_INT >= 30 &&
-            c.codecInfo.getCapabilitiesForType(AVC).isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)
-        ) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+        setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+        setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat()) // 90/120 Hz screens: don't feed it more than it's set for
+        setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) // B-frames add a frame of delay each
+        setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1) // SPS/PPS with every keyframe: any keyframe restarts the Mac
+        // VBR: screens are mostly still, then burst on a scroll. CBR would spend the whole budget on still frames
+        // (keeping the link loaded) for no gain; the Pacer handles bursts the link can't take.
+        if (caps.encoderCapabilities?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) == true) {
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+        }
+        // High profile (CABAC, 8x8 transform): ~10-20% fewer bits for the same picture, no B-frames (set above).
+        caps.profileLevels.filter { it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileHigh }.maxByOrNull { it.level }?.let {
+            setInteger(MediaFormat.KEY_PROFILE, it.profile)
+            setInteger(MediaFormat.KEY_LEVEL, it.level)
+        }
+        if (Build.VERSION.SDK_INT >= 30 && caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)) {
+            setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+        }
     }
 
     private companion object {
         const val AVC = MediaFormat.MIMETYPE_VIDEO_AVC
+        const val I_FRAME_INTERVAL_S = 30
+        /** Encoded frames waiting for the writer; past this the link is far behind anyway. */
+        const val FRAME_QUEUE = 32
     }
 }

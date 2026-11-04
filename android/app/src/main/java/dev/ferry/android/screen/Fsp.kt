@@ -57,6 +57,12 @@ object Fsp {
         return p.put(0, m.type.toByte()).putInt(1, p.capacity() - 5).array()
     }
 
+    /** A whole FRAME message with [data]'s remaining bytes, copied once (from the encoder's buffer). */
+    fun frame(ptsUs: Long, flags: Int, data: ByteBuffer): ByteArray {
+        val n = data.remaining()
+        return ByteBuffer.allocate(5 + 9 + n).put(FRAME.toByte()).putInt(9 + n).putLong(ptsUs).put(flags.toByte()).put(data).array()
+    }
+
     /** A whole message with room for [n] payload bytes, written past the 5-byte header (filled in last), so a FRAME is copied once. */
     private fun buf(n: Int): ByteBuffer = ByteBuffer.allocate(5 + n).put(0.toByte()).putInt(0)
 
