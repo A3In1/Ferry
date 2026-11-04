@@ -19,6 +19,7 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import dev.ferry.android.Ferry
 import dev.ferry.android.FerryService
 import dev.ferry.android.Notifs
@@ -33,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -59,7 +61,31 @@ object Screen {
 
     fun stop(reason: Int, detail: String) = current?.end(reason, detail)
 
+    /** The setting changed: apply it to the open session, if any. */
+    fun keepAwake(on: Boolean) {
+        if (current != null) ControlService.instance.value?.keepAwake(on)
+    }
+
     fun done(s: Session) = synchronized(this) { if (current === s) current = null }
+}
+
+/** Phone-side screen settings. */
+object ScreenPrefs {
+    private const val KEEP_AWAKE = "keepAwake"
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences("screen", Context.MODE_PRIVATE)
+
+    /** "Keep phone awake while mirroring" (default on); loaded by [load]. */
+    val keepAwake = MutableStateFlow(true)
+
+    fun load(ctx: Context) {
+        keepAwake.value = prefs(ctx).getBoolean(KEEP_AWAKE, true)
+    }
+
+    fun setKeepAwake(ctx: Context, on: Boolean) {
+        prefs(ctx).edit { putBoolean(KEEP_AWAKE, on) }
+        keepAwake.value = on
+        Screen.keepAwake(on)
+    }
 }
 
 /** MediaProjection consent, answered by [ProjectionActivity]. */
@@ -114,6 +140,9 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             override fun onReceive(c: Context, i: Intent) = end(Fsp.END_LOCKED, "phone locked")
         }
         ContextCompat.registerReceiver(ctx, screenOff, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ScreenPrefs.load(ctx)
+        // Needs Ferry control (the overlay window); without it the phone sleeps on its usual timeout.
+        if (ScreenPrefs.keepAwake.value) ControlService.instance.value?.keepAwake(true)
         try {
             Notifs.screen(ctx, mac, "Getting ready…")
             coroutineScope {
@@ -139,7 +168,10 @@ class Session(private val ctx: Context, private val peerId: String, private val 
                 it.stop()
                 FerryService.instance?.projecting(false)
             }
-            ControlService.instance.value?.reset()
+            ControlService.instance.value?.apply {
+                reset()
+                keepAwake(false)
+            }
             Notifs.cancel(ctx, Notifs.ID_SCREEN)
         }
     }

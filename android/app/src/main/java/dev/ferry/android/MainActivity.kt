@@ -77,6 +77,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import dev.ferry.android.screen.ControlService
+import dev.ferry.android.screen.ScreenPrefs
 import dev.ferry.core.FfiPeer
 import dev.ferry.core.coreVersion
 import kotlinx.coroutines.launch
@@ -574,6 +575,14 @@ private fun ScreenSection(onControl: (Boolean) -> Unit) {
             if (on) "On: your Mac can tap, scroll and type here while it's connected to your screen" else "Off: turn on to tap, scroll and type from your Mac, or use Share Cursor",
             Modifier.toggleable(on, role = Role.Switch) { onControl(on) },
         ) { Switch(checked = on, onCheckedChange = null) }
+        val ctx = LocalContext.current
+        LaunchedEffect(Unit) { ScreenPrefs.load(ctx) }
+        val awake by ScreenPrefs.keepAwake.collectAsStateWithLifecycle()
+        Item(
+            "Keep phone awake while mirroring",
+            if (on) "The screen stays on while your Mac shows or controls it" else "Needs Ferry control",
+            Modifier.toggleable(awake, enabled = on, role = Role.Switch) { ScreenPrefs.setKeepAwake(ctx, it) },
+        ) { Switch(checked = awake, onCheckedChange = null, enabled = on) }
     }
 }
 

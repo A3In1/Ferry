@@ -53,6 +53,12 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   lifts after holding still (no fling on top of the Mac's momentum): on `end` (after 40 ms, in case
   momentum follows the finger lift), after 120 ms without a wheel step or 500 ms without trackpad
   deltas, and to re-grip when the finger would leave the screen. Trackpad: 2 dp per point; wheel: 40 dp per line.
+- Phone input pacing: TOUCH drag moves are played at most every 8 ms (the newest point), so bursts from
+  the network don't become 1 ms finger jumps; a press whose drag is still queued is not a tap. CURSOR moves
+  are merged before the main thread (only the newest waits; a following non-move message brings it along
+  first) and move the arrow by its translation in a full-screen untouchable overlay (no window relayout).
+- Keep awake (phone setting, default on, needs Ferry control): while a session is open, a 1 px accessibility
+  overlay with `FLAG_KEEP_SCREEN_ON`; removed when the session ends. The keyguard is never touched.
 - Cursor crossing (Mac): the pointer crosses after pushing 8 pt into the edge (pauses over 0.4 s start
   over) and comes back after 4 pt past the phone's Mac-side edge, at the proportional height. Moves
   are merged and sent at most at 120 Hz; the phone moves its overlay once per frame to the latest spot.

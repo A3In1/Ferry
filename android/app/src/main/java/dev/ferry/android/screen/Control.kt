@@ -18,7 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
-import android.view.Choreographer
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewConfiguration
@@ -34,15 +34,20 @@ import kotlin.math.hypot
  */
 class ControlService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
-    private var cursor: View? = null
-    private var cursorAt: PointF? = null
-    private var cursorFrame = false
+    private val moves = Moves()
+    private var cursor: View? = null // the full-screen overlay window
+    private var pointer: View? = null
+    private var awake: View? = null
+    private var cursorMoves = 0
+    private var cursorSince = 0L
     private var size: ScreenSize? = null
     private var downAt = 0L
     private var down: PointF? = null
     private var last = PointF()
     private var lastAt = 0L
     private var stroke: StrokeDescription? = null
+    private var pendingMove: PointF? = null
+    private var moveQueued = false
     private var scrollDrag: ScrollDrag? = null
     private var scrollStroke: StrokeDescription? = null
     private var scrolling = false
@@ -62,8 +67,28 @@ class ControlService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
-    /** From the session's reader thread; applied in order on the main thread. */
+    /**
+     * From the session's reader thread; applied in order on the main thread. Cursor moves are merged: only
+     * the newest waits for the main thread, so a busy moment never leaves a queue of old moves to replay.
+     * A later non-move message brings the merged move along first, so order holds.
+     */
     fun input(m: Msg) {
+        if (m is Msg.Cursor && m.action == 2) {
+            synchronized(moves) {
+                val first = moves.latest == null
+                moves.latest = m
+                if (first) {
+                    val gen = moves.gen
+                    main.post { takeMove(gen)?.let { cursor(it.action, it.x, it.y) } }
+                }
+            }
+            return
+        }
+        val before = synchronized(moves) {
+            moves.gen++
+            moves.latest.also { moves.latest = null }
+        }
+        before?.let { b -> main.post { cursor(b.action, b.x, b.y) } }
         main.post {
             if (m is Msg.Text || m is Msg.Key) {
                 edits += m
@@ -81,11 +106,23 @@ class ControlService : AccessibilityService() {
         }
     }
 
+    /** The merged cursor move posted in generation [gen], unless a non-move message took it along since. */
+    private fun takeMove(gen: Int): Msg.Cursor? = synchronized(moves) {
+        if (moves.gen != gen) return null
+        moves.latest.also { moves.latest = null }
+    }
+
+    private class Moves {
+        var latest: Msg.Cursor? = null
+        var gen = 0
+    }
+
     /** Session over: hide the cursor and lift a finger that's still down. */
     fun reset() = main.post {
         edits.clear()
         main.removeCallbacks(applyEdits)
         stopScroll(lift = true)
+        dropMove()
         if (stroke != null) segment(last, SystemClock.uptimeMillis(), false)
         down = null
         stroke = null
@@ -111,6 +148,7 @@ class ControlService : AccessibilityService() {
         val p = px(x, y)
         when (action) {
             0 -> {
+                dropMove()
                 stopScroll(lift = false) // the touch's own gesture replaces the scroll's
                 if (stroke != null) segment(last, now, false)
                 stroke = null
@@ -122,9 +160,17 @@ class ControlService : AccessibilityService() {
             2 -> {
                 val d = down ?: return
                 if (stroke == null && hypot(p.x - d.x, p.y - d.y) < ViewConfiguration.get(this).scaledTouchSlop) return
-                segment(p, now, true)
+                // Moves can arrive in bursts (Wi-Fi batches packets): play the latest at most every MIN_SEGMENT_MS,
+                // so the finger moves in even steps instead of 1 ms jumps that jitter and fling oddly.
+                pendingMove = p
+                if (!moveQueued) {
+                    moveQueued = true
+                    main.postDelayed(flushMove, (lastAt + ScrollDrag.MIN_SEGMENT_MS - now).coerceAtLeast(0))
+                }
             }
             1 -> {
+                pendingMove?.let { if (down != null && stroke == null) segment(it, now, true) } // a drag still queued isn't a tap
+                dropMove()
                 val d = down ?: return
                 if (stroke == null) {
                     // Held time kept, so a long press stays a long press.
@@ -136,6 +182,19 @@ class ControlService : AccessibilityService() {
                 stroke = null
             }
         }
+    }
+
+    private val flushMove = Runnable {
+        moveQueued = false
+        val p = pendingMove ?: return@Runnable
+        pendingMove = null
+        if (down != null) segment(p, SystemClock.uptimeMillis(), true)
+    }
+
+    private fun dropMove() {
+        if (moveQueued) main.removeCallbacks(flushMove)
+        moveQueued = false
+        pendingMove = null
     }
 
     private fun segment(p: PointF, now: Long, more: Boolean) {
@@ -200,50 +259,82 @@ class ControlService : AccessibilityService() {
         scrollStroke = null
     }
 
+    /**
+     * The overlay cursor: a full-screen, untouchable accessibility overlay with the arrow as a child. A move
+     * only sets the arrow's translation (drawn on the next frame by the render thread): no window relayout.
+     */
     private fun cursor(action: Int, x: Float, y: Float) {
         if (action == 3) return hideCursor()
         val p = px(x, y)
-        cursorAt = p
         if (cursor == null) {
-            val v = Pointer(this)
+            val arrow = Pointer(this)
             val size = (24 * resources.displayMetrics.density).toInt()
-            val lp = WindowManager.LayoutParams(
-                size,
-                size,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT,
-            )
-            lp.gravity = Gravity.TOP or Gravity.START
-            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            lp.x = p.x.toInt()
-            lp.y = p.y.toInt()
-            if (runCatching { getSystemService(WindowManager::class.java).addView(v, lp) }.isSuccess) cursor = v
-        } else if (!cursorFrame) {
-            // The Mac may send moves faster than the screen redraws: move the overlay once per frame, to the latest spot.
-            cursorFrame = true
-            Choreographer.getInstance().postFrameCallback(moveCursor)
+            val root = android.widget.FrameLayout(this).apply { addView(arrow, android.widget.FrameLayout.LayoutParams(size, size)) }
+            val lp = overlayParams(WindowManager.LayoutParams.MATCH_PARENT, 0)
+            if (runCatching { getSystemService(WindowManager::class.java).addView(root, lp) }.isSuccess) {
+                cursor = root
+                pointer = arrow
+                cursorSince = SystemClock.uptimeMillis()
+                cursorMoves = 0
+                Log.w(SCREEN_TAG, "cursor: shown")
+            }
+        }
+        pointer?.apply {
+            translationX = p.x
+            translationY = p.y
+        }
+        cursorMoves++
+        val now = SystemClock.uptimeMillis()
+        if (now - cursorSince >= 2_000) {
+            Log.w(SCREEN_TAG, "cursor: ${cursorMoves * 1000 / (now - cursorSince)} updates/s")
+            cursorSince = now
+            cursorMoves = 0
         }
         touch(action, x, y)
     }
 
-    private val moveCursor = Choreographer.FrameCallback {
-        cursorFrame = false
-        val v = cursor ?: return@FrameCallback
-        val p = cursorAt ?: return@FrameCallback
-        val lp = v.layoutParams as WindowManager.LayoutParams
-        if (lp.x == p.x.toInt() && lp.y == p.y.toInt()) return@FrameCallback
-        lp.x = p.x.toInt()
-        lp.y = p.y.toInt()
-        runCatching { getSystemService(WindowManager::class.java).updateViewLayout(v, lp) }
+    private fun overlayParams(size: Int, extraFlags: Int) = WindowManager.LayoutParams(
+        size,
+        size,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or extraFlags,
+        PixelFormat.TRANSLUCENT,
+    ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        if (Build.VERSION.SDK_INT >= 30) fitInsetsTypes = 0 // the whole screen, so the arrow lands at screen px
     }
 
     private fun hideCursor() {
-        if (cursorFrame) Choreographer.getInstance().removeFrameCallback(moveCursor)
-        cursorFrame = false
-        cursor?.let { runCatching { getSystemService(WindowManager::class.java).removeView(it) } }
+        cursor?.let {
+            runCatching { getSystemService(WindowManager::class.java).removeView(it) }
+            Log.w(SCREEN_TAG, "cursor: hidden")
+        }
         cursor = null
+        pointer = null
+    }
+
+    /**
+     * Keeps the screen on while a session is open: a 1 px invisible overlay window with FLAG_KEEP_SCREEN_ON
+     * (the supported way; wake locks that turn the screen on are deprecated). It never touches the keyguard:
+     * the phone still locks if the user presses power, and that ends the session. Any thread.
+     */
+    fun keepAwake(on: Boolean) = main.post {
+        val wm = getSystemService(WindowManager::class.java)
+        if (on && awake == null) {
+            val v = View(this)
+            if (runCatching { wm.addView(v, overlayParams(1, WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)) }.isSuccess) {
+                awake = v
+                Log.w(SCREEN_TAG, "keeping the screen on")
+            }
+        } else if (!on) {
+            awake?.let {
+                runCatching { wm.removeView(it) }
+                Log.w(SCREEN_TAG, "screen may sleep again")
+            }
+            awake = null
+        }
     }
 
     /**
