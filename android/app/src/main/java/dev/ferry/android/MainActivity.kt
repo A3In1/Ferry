@@ -79,7 +79,6 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import dev.ferry.android.screen.ControlService
-import dev.ferry.android.screen.ScreenDim
 import dev.ferry.android.screen.ScreenPrefs
 import dev.ferry.core.FfiPeer
 import dev.ferry.core.coreVersion
@@ -593,48 +592,12 @@ private fun ScreenSection(onControl: (Boolean) -> Unit) {
             if (on) "The screen stays on while your Mac shows or controls it" else "Needs Ferry control",
             Modifier.toggleable(awake, enabled = on, role = Role.Switch) { ScreenPrefs.setKeepAwake(ctx, it) },
         ) { Switch(checked = awake, onCheckedChange = null, enabled = on) }
-
-        // Privacy while the Mac mirrors: Android stops capture when the phone locks, so it must stay unlocked.
-        var canWrite by remember { mutableStateOf(ScreenDim.allowed(ctx)) }
-        LifecycleResumeEffect(Unit) {
-            canWrite = ScreenDim.allowed(ctx) // back from Modify system settings
-            onPauseOrDispose {}
-        }
-        var askWrite by remember { mutableStateOf(false) }
-        val dim by ScreenPrefs.dim.collectAsStateWithLifecycle()
-        Item(
-            "Dim phone screen while mirroring",
-            if (canWrite) "The phone's screen goes to its lowest brightness while your Mac shows it, and back afterwards"
-            else "Needs permission to change brightness",
-            Modifier.toggleable(dim && canWrite, role = Role.Switch) {
-                ScreenPrefs.setDim(ctx, it)
-                if (it && !canWrite) askWrite = true
-            },
-        ) { Switch(checked = dim && canWrite, onCheckedChange = null) }
         val lock by ScreenPrefs.lockOnEnd.collectAsStateWithLifecycle()
         Item(
             "Lock phone when mirroring ends",
             if (on) "When your Mac stops mirroring, the phone locks as if you pressed the power button" else "Needs Ferry control",
             Modifier.toggleable(lock && on, enabled = on, role = Role.Switch) { ScreenPrefs.setLockOnEnd(ctx, it) },
         ) { Switch(checked = lock && on, onCheckedChange = null, enabled = on) }
-        if (askWrite) AlertDialog(
-            onDismissRequest = { askWrite = false },
-            title = { Text("Allow Ferry to change brightness?") },
-            text = {
-                Text(
-                    "Android will open Modify system settings for Ferry. Turn on Allow modifying system settings. " +
-                        "Ferry uses it only to turn your screen's brightness down while your Mac mirrors it, and puts your own brightness back when mirroring ends.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    askWrite = false
-                    runCatching { ctx.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, "package:${ctx.packageName}".toUri())) }
-                        .onFailure { Ferry.toast(ctx, "Couldn't open Settings. Open Settings → Apps → Ferry → Modify system settings yourself.") }
-                }) { Text("Open settings") }
-            },
-            dismissButton = { TextButton(onClick = { askWrite = false }) { Text("Not now") } },
-        )
     }
 }
 

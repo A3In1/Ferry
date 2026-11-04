@@ -67,27 +67,17 @@ object Screen {
         if (current != null) ControlService.instance.value?.keepAwake(on)
     }
 
-    /** The dim setting changed: apply it to the open mirroring session, if any. */
-    fun dim(ctx: Context, on: Boolean) {
-        if (current?.mirroring != true) return
-        if (on) ScreenDim.dim(ctx) else ScreenDim.restore(ctx)
-    }
-
     fun done(s: Session) = synchronized(this) { if (current === s) current = null }
 }
 
 /** Phone-side screen settings. */
 object ScreenPrefs {
     private const val KEEP_AWAKE = "keepAwake"
-    private const val DIM = "dim"
     private const val LOCK_ON_END = "lockOnEnd"
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("screen", Context.MODE_PRIVATE)
 
     /** "Keep phone awake while mirroring" (default on); loaded by [load]. */
     val keepAwake = MutableStateFlow(true)
-
-    /** "Dim phone screen while mirroring" (default off; works once Modify system settings is allowed). */
-    val dim = MutableStateFlow(false)
 
     /** "Lock phone when mirroring ends" (default on; needs Ferry control). */
     val lockOnEnd = MutableStateFlow(true)
@@ -95,15 +85,9 @@ object ScreenPrefs {
     fun load(ctx: Context) {
         val p = prefs(ctx)
         keepAwake.value = p.getBoolean(KEEP_AWAKE, true)
-        dim.value = p.getBoolean(DIM, false)
         lockOnEnd.value = p.getBoolean(LOCK_ON_END, true)
     }
 
-    fun setDim(ctx: Context, on: Boolean) {
-        prefs(ctx).edit { putBoolean(DIM, on) }
-        dim.value = on
-        Screen.dim(ctx.applicationContext, on)
-    }
 
     fun setLockOnEnd(ctx: Context, on: Boolean) {
         prefs(ctx).edit { putBoolean(LOCK_ON_END, on) }
@@ -134,7 +118,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
     @Volatile private var capture: Capture? = null
     @Volatile private var projection: MediaProjection? = null
     @Volatile private var stopped: MediaProjection.Callback? = null
-    /** Video is being captured (the dim setting applies). */
+    /** Video is being captured. */
     @Volatile var mirroring = false
         private set
 
@@ -215,7 +199,6 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             }
             val wasMirroring = mirroring
             mirroring = false
-            ScreenDim.restore(ctx)
             ControlService.instance.value?.apply {
                 reset()
                 keepAwake(false)
@@ -265,7 +248,6 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         stopped = cb
         Notifs.screen(ctx, mac, if (control) "Screen sharing is on, and $mac can tap and type here" else "Screen sharing is on")
         mirroring = true
-        ScreenDim.dim(ctx)
         Capture(ctx, p, m).also { capture = it }.run(::send) { sendRaw(it) }
     }
 
