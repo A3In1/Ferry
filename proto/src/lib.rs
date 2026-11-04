@@ -122,6 +122,22 @@ mod frozen {
             6
         );
         assert_eq!(
+            one(&|| FileItem {
+                mtime_unix_ms: 1,
+                ..Default::default()
+            }
+            .encode_to_vec()),
+            3
+        );
+        assert_eq!(
+            one(&|| FileItem {
+                folder: "a".into(),
+                ..Default::default()
+            }
+            .encode_to_vec()),
+            4
+        );
+        assert_eq!(
             one(&|| DataHeader {
                 offset: 1,
                 ..Default::default()

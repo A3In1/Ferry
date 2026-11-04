@@ -30,6 +30,9 @@ message FileItem {
   string name = 1;
   uint64 size = 2;
   int64 mtime_unix_ms = 3;
+  // Folder the file sits in, relative and "/"-separated ("DCIM/Camera"); "" = top level.
+  // The receiver recreates it (sanitised); peers without this field save the file flat.
+  string folder = 4;
 }
 message Offer {
   bytes transfer_id = 1; // 16 random bytes

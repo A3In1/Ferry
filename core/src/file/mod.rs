@@ -5,6 +5,8 @@
 //!   S→R Offer · R→S OfferReply · per file S opens a uni stream (prefix CH_FILE,
 //!   DataHeader, raw bytes from `offset` to end) · S→R ItemDone · R→S ItemResult.
 //! Partial files survive in `<dest>/.ferry-partial/` so a retried offer resumes.
+//! An item with a `folder` lands in that folder; each transfer's top folder gets a fresh
+//! name in the destination (`DCIM`, else `DCIM (1)`), so a second download never mixes in.
 //!
 //! Cancel: either side resets every stream it writes and stops every stream it reads with
 //! [`ERR_CANCELLED`]; the other side reads that code as "cancelled on the other device".
@@ -223,6 +225,8 @@ struct Transfer {
     slots: Vec<Option<Slot>>, // None = declined
     parts_in_use: PartsInUse,
     cancel: Arc<Cancel>,
+    /// Top folder named by the sender → the folder created for it in the destination.
+    tops: Mutex<HashMap<String, String>>,
 }
 
 /// Held by the control handler and every data handler, so a partial is released only
@@ -299,11 +303,7 @@ impl Receiver {
         }
         (self.events)(FileEvent::Offered {
             transfer_id: id,
-            names: offer
-                .items
-                .iter()
-                .map(|i| sanitize::file_name(&i.name))
-                .collect(),
+            names: offer.items.iter().map(shown_name).collect(),
             total_bytes: offer
                 .items
                 .iter()
@@ -385,7 +385,7 @@ impl Receiver {
                 bail!("duplicate ItemDone for item {i}");
             }
             pending -= 1;
-            let result = match self.finish_item(slot, &done.blake3, send).await {
+            let result = match self.finish_item(transfer, slot, &done.blake3, send).await {
                 Ok(path) => {
                     let saved_as = path
                         .file_name()
@@ -502,6 +502,7 @@ impl Receiver {
             slots: Vec::with_capacity(items.len()),
             parts_in_use: self.parts_in_use.clone(),
             cancel,
+            tops: Mutex::default(),
         };
         // one wait for the whole offer: per item, a big retried offer could wait for hours
         let deadline = Instant::now() + PART_WAIT;
@@ -606,6 +607,7 @@ impl Receiver {
     /// Waits for the item's data, verifies it and moves it to its final name.
     async fn finish_item(
         &self,
+        transfer: &Transfer,
         slot: &Slot,
         expected: &[u8],
         send: &SendStream,
@@ -630,18 +632,53 @@ impl Receiver {
             let _ = fs::remove_file(&slot.part);
             bail!("BLAKE3 mismatch, partial data discarded");
         }
-        let (part, dir) = (slot.part.clone(), self.dest_dir.clone());
+        let dir = self.item_dir(transfer, &slot.item.folder)?;
+        let part = slot.part.clone();
         let (name, mtime) = (
             sanitize::file_name(&slot.item.name),
             slot.item.mtime_unix_ms,
         );
         tokio::task::spawn_blocking(move || place(&part, &dir, &name, mtime)).await?
     }
+
+    /// The folder an item goes in, created if needed (see the module docs on top folders).
+    fn item_dir(&self, transfer: &Transfer, folder: &str) -> Result<PathBuf> {
+        let parts = sanitize::folder(folder);
+        let Some((top, rest)) = parts.split_first() else {
+            return Ok(self.dest_dir.clone());
+        };
+        let mut tops = transfer.tops.lock().unwrap();
+        let mut dir = match tops.get(top) {
+            Some(made) => self.dest_dir.join(made),
+            None => {
+                let made = (0..10_000)
+                    .map(|n| {
+                        if n == 0 {
+                            top.clone()
+                        } else {
+                            sanitize::numbered(top, n)
+                        }
+                    })
+                    // create_dir fails if the name exists, so a folder is never shared
+                    .find(|name| fs::create_dir(self.dest_dir.join(name)).is_ok())
+                    .with_context(|| format!("no free folder name for {top}"))?;
+                tops.insert(top.clone(), made.clone());
+                self.dest_dir.join(made)
+            }
+        };
+        drop(tops);
+        for p in rest {
+            dir.push(p);
+        }
+        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        Ok(dir)
+    }
 }
 
 /// Send regular files over an established session connection, with an optional display
 /// name per file. Android passes shared `content://` files as `/proc/self/fd/N`, whose own
-/// name means nothing to the receiver. `id` is the transfer id (16 random bytes; the app
+/// name means nothing to the receiver. A name with slashes (`DCIM/Camera/x.jpg`) puts the
+/// file in that folder on the receiver. `id` is the transfer id (16 random bytes; the app
 /// may pick it, to cancel the send via [`cancel`] before any event arrives).
 pub async fn send_named(
     conn: &Connection,
@@ -654,8 +691,12 @@ pub async fn send_named(
     let mut items = Vec::with_capacity(files.len());
     for (p, name) in files {
         let mut item = file_item(p).await?;
+        // "DCIM/Camera/x.jpg": the part before the last slash is the item's folder
         if let Some(n) = name {
-            item.name.clone_from(n);
+            match n.rsplit_once('/') {
+                Some((folder, n)) => (item.folder, item.name) = (folder.into(), n.into()),
+                None => item.name.clone_from(n),
+            }
         }
         items.push(item);
     }
@@ -663,7 +704,7 @@ pub async fn send_named(
     let cancel = entry.2.clone();
     (events)(FileEvent::Sending {
         transfer_id: id,
-        names: items.iter().map(|i| sanitize::file_name(&i.name)).collect(),
+        names: items.iter().map(shown_name).collect(),
         total_bytes: items.iter().fold(0u64, |a, i| a.saturating_add(i.size)),
     });
     let (mut send, mut recv) = tokio::select! {
@@ -915,7 +956,15 @@ pub async fn file_item(path: &Path) -> Result<FileItem> {
         name,
         size: md.len(),
         mtime_unix_ms,
+        folder: String::new(),
     })
+}
+
+/// "Camera/x.jpg" for UI: the sanitised folder and name, as the receiver will save it.
+fn shown_name(item: &FileItem) -> String {
+    let mut parts = sanitize::folder(&item.folder);
+    parts.push(sanitize::file_name(&item.name));
+    parts.join("/")
 }
 
 /// Resume key: stable across retries (which get a new transfer id) of the same file version.
@@ -925,6 +974,11 @@ pub fn part_name(item: &FileItem) -> String {
     h.update(item.name.as_bytes());
     h.update(&item.size.to_le_bytes());
     h.update(&item.mtime_unix_ms.to_le_bytes());
+    if !item.folder.is_empty() {
+        // folderless keys stay as they were, so older partials still resume
+        h.update(&(item.folder.len() as u64).to_le_bytes());
+        h.update(item.folder.as_bytes());
+    }
     format!("{}.part", &h.finalize().to_hex()[..32])
 }
 

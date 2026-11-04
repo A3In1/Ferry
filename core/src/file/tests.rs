@@ -258,6 +258,7 @@ async fn hostile_sender_stays_inside_dest() {
         name: "../../etc/passwd".into(),
         size: body.len() as u64,
         mtime_unix_ms: 0,
+        folder: String::new(),
     };
     write_msg(
         &mut send,
@@ -350,4 +351,42 @@ async fn small_files_throughput() {
         100.0 * small_rate / bulk_rate
     );
     assert!(small_rate >= 0.6 * bulk_rate);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn folders_keep_their_structure_and_never_mix() {
+    let h = harness(accept_all()).await;
+    let (a, b, c) = (
+        h.write_src("a.bin", b"aa"),
+        h.write_src("b.bin", b"bb"),
+        h.write_src("c.bin", b"cc"),
+    );
+    let files = vec![
+        (a, Some("Pics/2024/x.jpg".to_owned())),
+        (b, Some("Pics/y.jpg".to_owned())),
+        (c, Some("../../escape/z.jpg".to_owned())),
+    ];
+    for _ in 0..2 {
+        send_named(&h.conn, &files, rand::random(), noop(), &Cancels::default())
+            .await
+            .unwrap();
+    }
+    let d = h.dest.path();
+    for top in ["Pics", "Pics (1)"] {
+        assert_eq!(fs::read(d.join(top).join("2024/x.jpg")).unwrap(), b"aa");
+        assert_eq!(fs::read(d.join(top).join("y.jpg")).unwrap(), b"bb");
+    }
+    // `..` parts are dropped: it stays inside the destination
+    assert_eq!(fs::read(d.join("escape/z.jpg")).unwrap(), b"cc");
+    assert_eq!(fs::read(d.join("escape (1)/z.jpg")).unwrap(), b"cc");
+    let offered: Vec<_> = (h.events.lock().unwrap().iter())
+        .filter_map(|e| match e {
+            FileEvent::Offered { names, .. } => Some(names.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        offered[0],
+        ["Pics/2024/x.jpg", "Pics/y.jpg", "escape/z.jpg"]
+    );
 }

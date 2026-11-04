@@ -41,6 +41,20 @@ pub fn file_name(name: &str) -> String {
     if out.is_empty() { "file".into() } else { out }
 }
 
+/// Most folder levels kept from a peer's relative folder; deeper ones are dropped.
+pub const MAX_FOLDER_DEPTH: usize = 32;
+
+/// A peer's relative folder (`"DCIM/Camera"`) as safe components: each one cleaned like
+/// [`file_name`], empty / `.` / `..` parts dropped, so the result can only go deeper.
+pub fn folder(path: &str) -> Vec<String> {
+    path.split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .map(file_name)
+        .filter(|c| c != "." && c != "..")
+        .take(MAX_FOLDER_DEPTH)
+        .collect()
+}
+
 /// `photo.jpg` + 2 → `photo (2).jpg`, shortening the stem so the result stays ≤255 bytes.
 pub fn numbered(name: &str, n: u32) -> String {
     fit(name, &format!(" ({n})"))
@@ -83,6 +97,15 @@ fn is_reserved(upper: &str) -> bool {
 mod tests {
     use super::*;
     use rand::RngExt;
+
+    #[test]
+    fn folders_only_go_deeper() {
+        assert_eq!(folder("DCIM/Camera"), ["DCIM", "Camera"]);
+        assert_eq!(folder("../../etc//./x\\y/"), ["etc", "x", "y"]);
+        assert_eq!(folder("a/<b>"), ["a", "_b_"]);
+        assert!(folder("").is_empty() && folder("/../..").is_empty());
+        assert_eq!(folder(&"d/".repeat(100)).len(), MAX_FOLDER_DEPTH);
+    }
 
     #[test]
     fn examples() {

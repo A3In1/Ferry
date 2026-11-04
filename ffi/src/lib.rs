@@ -1142,6 +1142,18 @@ impl FerryNode {
     }
 }
 
+/// The adb the USB bridge uses (same search as `usb_watch(None)`), for the Mac's `adb pull`
+/// fast path; `None` if there is none.
+#[uniffi::export]
+pub fn adb_path() -> Option<String> {
+    #[cfg(target_os = "android")]
+    return None;
+    #[cfg(not(target_os = "android"))]
+    ferry_core::adb::find_adb(None)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 #[uniffi::export]
 pub fn core_version() -> String {
     format!(
