@@ -75,13 +75,19 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   remembered 5 minutes, forgotten on sleep, screen lock or user switch.
 - Messages may grow trailing fields; a receiver ignores bytes past what it knows and treats missing
   optional fields as 0.
-- Video: H.264 High profile where offered (else the encoder's default), no B-frames, VBR, realtime
-  priority + operating rate, `KEY_LOW_LATENCY` where supported, at most 60 fps fed to the encoder (90/120 Hz
-  screens), SPS/PPS with every keyframe, repeat previous frame after 100 ms. Keyframes on demand (KEYFRAME,
-  catching up) plus one every 30 s: QUIC loses nothing, so periodic ones only cost bitrate spikes. Size: long
-  side ≤ max_size (0 = native), multiples of 16, stepping down 1920/1600/1280/1024/720 until the encoder
-  takes it at 60 fps (else at all; else 30 fps). Any key the encoder refuses → configured again with only
-  the basic keys. The encoder runs in async mode on its own thread and never waits for the network.
+- Video: H.264 High profile where offered (`Tuning.PROFILE`, logged; else the encoder's default), no B-frames,
+  VBR, realtime priority, at most 60 fps fed to the encoder (90/120 Hz screens), SPS/PPS with every keyframe,
+  repeat previous frame after 100 ms. Latency keys (tier TUNED): `KEY_LOW_LATENCY` and `KEY_LATENCY` 1 (Codec2
+  passes them to encoders even when FEATURE_LowLatency, a decoder feature, isn't advertised),
+  `vendor.qti-ext-enc-low-latency.enable` 1 when the encoder lists it (API 31+ vendor parameters), operating
+  rate 2x the frame rate (≤ 120 and ≤ what the encoder says it can do at that size: vendors clock the encoder
+  from it), `KEY_MAX_PTS_GAP_TO_ENCODER` one frame interval (rate control never sees a long still gap; output
+  pts are restored). Keyframes on demand (KEYFRAME, catching up) plus one every 30 s: QUIC loses nothing, so
+  periodic ones only cost bitrate spikes. Size: long side ≤ max_size (0 = native), multiples of 16, stepping
+  down 1920/1600/1280/1024/720 until the encoder takes it at 60 fps (else at all; else 30 fps). A format the
+  encoder refuses steps down: TUNED → LOW_LATENCY (no latency keys, operating rate = fps) → PLAIN (basic keys).
+  The requested format, the tier, and the encoder's own input/output formats are logged. The encoder runs in
+  async mode on its own thread and never waits for the network.
   Defaults: max_size 1920 (older Macs ask 1280), 8 Mbps.
 - Pacing and adaptive bitrate (phone side): START's bitrate is the ceiling. With ACKs (newer Macs): per 1 s
   window, mean write → ACK round trip above the best of the last 30 windows is the queueing on the link;
@@ -102,7 +108,8 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
 - Measurements: FRAME `pts_us` is the capture time (surface input: `System.nanoTime` µs on the phone). The
   clocks differ, so the Mac reports one-way delay as (received − pts) above the lowest seen this session
   (= queueing the link added), plus the phone's write → ACK round trip from STATS. Logs: phone
-  `adb logcat -s FerryScreen` (`stats: …` every 2 s), Mac os.Logger `dev.ferry.mac` (`screen: …` every 2 s).
+  `adb logcat -s FerryScreen` (`stats: …` every 2 s; capture → encoded with its min–max and any samples
+  off the clock), Mac os.Logger `dev.ferry.mac` (`screen: …` every 2 s).
 - Rotation: new INFO, encoder restarted at the new size, config + keyframe.
 - Bluetooth-only session: START with video → `END 4 "Bluetooth is too slow for video"`; control-only is allowed.
 - Either side may close at any time; EOF = END 0.

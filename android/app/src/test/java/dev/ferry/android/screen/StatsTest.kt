@@ -58,9 +58,12 @@ class StatsTest {
         assertEquals(10, r.writeTenthMs)
         assertEquals(200, r.rttTenthMs)
         assertEquals(100, r.rttMinTenthMs)
+        assertEquals(EncodeSpread(5_000, 5_000, 1), s.lastEncode)
+        assertTrue(r.line(0, s.lastEncode).contains("capture→encoded 5.0 ms (5.0–5.0, 1 off-clock)"))
         val empty = s.report(4_000, 8_000_000)!!
         assertEquals(0, empty.sent)
         assertEquals(Msg.Stats.UNKNOWN, empty.rttTenthMs)
         assertTrue(empty.line(0).startsWith("stats: encoded 0 fps"))
+        assertEquals(EncodeSpread(null, null, 0), s.lastEncode)
     }
 }

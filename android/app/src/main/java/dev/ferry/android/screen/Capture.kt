@@ -158,7 +158,7 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
                 if (!f.config) inFlight.sent(f.ptsUs, f.bytes.size, done)
                 stats.sent(f.bytes.size, done - t)
                 change = pacer.sent(done - t, done)
-                stats.report(done, pacer.bitrate)?.also { Log.w(SCREEN_TAG, it.line(inFlight.count)) }
+                stats.report(done, pacer.bitrate)?.also { Log.w(SCREEN_TAG, it.line(inFlight.count, stats.lastEncode)) }
             }
             change?.let { bitrate(it, send, "") }
             report?.let { send(it) }
@@ -188,7 +188,8 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
                 }
                 c.releaseOutputBuffer(i, false)
                 bytes ?: return
-                // Surface input: pts is the capture time on System.nanoTime's clock.
+                // Surface input: pts is the buffer timestamp SurfaceFlinger gave the VirtualDisplay frame
+                // (CLOCK_MONOTONIC, the same clock as System.nanoTime), so this is composition + encode time.
                 if (!config) synchronized(inFlight) { stats.encoded(System.nanoTime() / 1000 - info.presentationTimeUs) }
                 waiting.incrementAndGet()
                 if (frames.trySend(Out(bytes, info.presentationTimeUs, key, config)).isFailure) {
@@ -206,7 +207,9 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
             frames.close(e)
         }
 
-        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) {}
+        override fun onOutputFormatChanged(c: MediaCodec, format: MediaFormat) {
+            Log.w(SCREEN_TAG, "${c.name} output format: $format")
+        }
     }
 
     /** The best encode size the encoder takes at 60 fps (else at all), from [encodeSizes]. */
@@ -218,54 +221,84 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
             ?: encodeSizes(s.w, s.h, 1280).last()
     }
 
-    /** The low-latency format; if the encoder refuses it (some vendors reject keys they don't know), the plain one. */
+    /**
+     * The [Tier.TUNED] format; a tier the encoder refuses (some vendors reject keys they don't know) steps down
+     * to the next, down to [Tier.PLAIN]. Logs what was asked and what the encoder says it took.
+     */
     private fun configure(c: MediaCodec, w: Int, h: Int, frames: SendChannel<Out>, handler: Handler, s: ScreenSize) {
         val caps = c.codecInfo.getCapabilitiesForType(AVC)
-        val fps = if (runCatching { caps.videoCapabilities?.areSizeAndRateSupported(w, h, 60.0) }.getOrNull() != false) 60 else 30
-        c.setCallback(callback(frames), handler)
-        val full = format(w, h, fps, caps)
-        try {
-            c.configure(full, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            Log.w(SCREEN_TAG, "encoding ${w}x$h@$fps for screen ${s.w}x${s.h} with ${c.name}: $full")
+        val video = caps.videoCapabilities
+        val fps = if (runCatching { video?.areSizeAndRateSupported(w, h, 60.0) }.getOrNull() != false) 60 else 30
+        val maxFps = runCatching { video?.getSupportedFrameRatesFor(w, h)?.upper }.getOrNull()
+        val vendor = vendorParams(c)
+        val advertised = Build.VERSION.SDK_INT >= 30 && caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)
+        Log.w(SCREEN_TAG, "${c.name}: FEATURE_LowLatency=$advertised, max ${maxFps?.toInt()} fps at ${w}x$h, latency vendor parameters ${vendor?.let(Tuning::latencyParams) ?: "unknown"}")
+        for (tier in Tier.entries) {
+            val f = format(w, h, fps, caps, tier, maxFps, vendor)
+            try {
+                c.setCallback(callback(frames), handler)
+                c.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (e: Exception) {
+                if (tier == Tier.PLAIN) throw e
+                Log.w(SCREEN_TAG, "${c.name} refused the $tier format, trying the next", e)
+                c.reset()
+                continue
+            }
+            if (tier == Tier.TUNED && vendor == null) lateVendorKeys(c)
+            val profile = if (f.containsKey(MediaFormat.KEY_PROFILE)) Tuning.profileName(f.getInteger(MediaFormat.KEY_PROFILE)) else "encoder's default profile"
+            Log.w(SCREEN_TAG, "encoding ${w}x$h@$fps ($tier, $profile) for screen ${s.w}x${s.h} with ${c.name}: $f")
+            Log.w(SCREEN_TAG, "${c.name} took: input ${runCatching { c.inputFormat }.getOrNull()}, output ${runCatching { c.outputFormat }.getOrNull()}")
             return
-        } catch (e: Exception) {
-            Log.w(SCREEN_TAG, "${c.name} refused the low-latency format, using the plain one", e)
         }
-        c.reset()
-        c.setCallback(callback(frames), handler)
-        val plain = format(w, h, fps, null)
-        c.configure(plain, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        Log.w(SCREEN_TAG, "encoding ${w}x$h@$fps for screen ${s.w}x${s.h} with ${c.name}: $plain")
     }
 
-    /** [caps] null = only the keys every encoder takes. */
-    private fun format(w: Int, h: Int, fps: Int, caps: MediaCodecInfo.CodecCapabilities?) = MediaFormat.createVideoFormat(AVC, w, h).apply {
-        setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-        setInteger(MediaFormat.KEY_BIT_RATE, synchronized(inFlight) { pacer.bitrate }) // a rotation keeps what the link settled on
-        setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-        // Over QUIC nothing is lost, so periodic keyframes only cost spikes: they come on demand (KEYFRAME, catching up).
-        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_S)
-        setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000) // a still screen still sends 10 fps, so nothing looks stuck
-        if (caps == null) return@apply
-        setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
-        setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
-        setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat()) // 90/120 Hz screens: don't feed it more than it's set for
-        setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) // B-frames add a frame of delay each
-        setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1) // SPS/PPS with every keyframe: any keyframe restarts the Mac
-        // VBR: screens are mostly still, then burst on a scroll. CBR would spend the whole budget on still frames
-        // (keeping the link loaded) for no gain; the Pacer handles bursts the link can't take.
-        if (caps.encoderCapabilities?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) == true) {
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
-        }
-        // High profile (CABAC, 8x8 transform): ~10-20% fewer bits for the same picture, no B-frames (set above).
-        caps.profileLevels.filter { it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileHigh }.maxByOrNull { it.level }?.let {
-            setInteger(MediaFormat.KEY_PROFILE, it.profile)
-            setInteger(MediaFormat.KEY_LEVEL, it.level)
-        }
-        if (Build.VERSION.SDK_INT >= 30 && caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)) {
-            setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-        }
+    /** API 31+; null if unknown (older Android, or the encoder won't say before configure). */
+    private fun vendorParams(c: MediaCodec): List<String>? =
+        if (Build.VERSION.SDK_INT >= 31) runCatching { c.supportedVendorParameters }.getOrNull() else null
+
+    /** The vendor keys, for an encoder that only lists its vendor parameters once configured. */
+    private fun lateVendorKeys(c: MediaCodec) {
+        val keys = Tuning.vendorKeys(vendorParams(c)).takeIf { it.isNotEmpty() } ?: return
+        runCatching { c.setParameters(Bundle().apply { keys.forEach { (k, v) -> putInt(k, v) } }) }
+            .onSuccess { Log.w(SCREEN_TAG, "${c.name}: set $keys after configure") }
+            .onFailure { Log.w(SCREEN_TAG, "${c.name}: $keys refused after configure", it) }
     }
+
+    private fun format(w: Int, h: Int, fps: Int, caps: MediaCodecInfo.CodecCapabilities, tier: Tier, maxFps: Double?, vendor: List<String>?) =
+        MediaFormat.createVideoFormat(AVC, w, h).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, synchronized(inFlight) { pacer.bitrate }) // a rotation keeps what the link settled on
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            // Over QUIC nothing is lost, so periodic keyframes only cost spikes: they come on demand (KEYFRAME, catching up).
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_S)
+            // A still screen still sends 10 fps, so nothing looks stuck. Only fires after 100 ms without a new
+            // frame, so it never competes with a moving picture.
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
+            if (tier == Tier.PLAIN) return@apply
+            setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
+            setInteger(MediaFormat.KEY_OPERATING_RATE, Tuning.operatingRate(tier, fps, maxFps))
+            setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat()) // 90/120 Hz screens: don't feed it more than it's set for
+            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) // B-frames add a frame of delay each
+            setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1) // SPS/PPS with every keyframe: any keyframe restarts the Mac
+            // VBR: screens are mostly still, then burst on a scroll. CBR would spend the whole budget on still frames
+            // (keeping the link loaded) for no gain; the Pacer handles bursts the link can't take.
+            if (caps.encoderCapabilities?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) == true) {
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            }
+            Tuning.level(caps.profileLevels.map { it.profile to it.level })?.let {
+                setInteger(MediaFormat.KEY_PROFILE, Tuning.PROFILE)
+                setInteger(MediaFormat.KEY_LEVEL, it)
+            }
+            val lowLatency = Build.VERSION.SDK_INT >= 30 &&
+                (tier == Tier.TUNED || caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency))
+            if (lowLatency) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            if (tier != Tier.TUNED) return@apply
+            // FEATURE_LowLatency is documented for decoders and encoders rarely advertise it, but Codec2 passes
+            // KEY_LOW_LATENCY to encoders too; KEY_LATENCY 1 asks for an output for every input (no lookahead).
+            if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LATENCY, 1)
+            setLong(MediaFormat.KEY_MAX_PTS_GAP_TO_ENCODER, Tuning.maxPtsGapUs(fps))
+            Tuning.vendorKeys(vendor).forEach { (k, v) -> setInteger(k, v) }
+        }
 
     private companion object {
         const val AVC = MediaFormat.MIMETYPE_VIDEO_AVC

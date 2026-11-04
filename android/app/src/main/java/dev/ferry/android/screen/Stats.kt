@@ -68,17 +68,31 @@ class SendStats(private var windowStart: Long) {
     private var bytes = 0L
     private var encodeUs = 0L
     private var encodeN = 0
+    private var encodeMin = Long.MAX_VALUE
+    private var encodeMax = 0L
+    private var encodeBad = 0
     private var writeMs = 0L
     private var rttMs = 0L
     private var rttN = 0
     private var rttMin = Long.MAX_VALUE
 
-    /** One frame out of the encoder, [captureToOutputUs] after capture (null if the clock doesn't match). */
+    /** The last window's capture → encoded spread, for the phone's log line (not on the wire). */
+    var lastEncode = EncodeSpread(null, null, 0)
+        private set
+
+    /**
+     * One frame out of the encoder, [captureToOutputUs] after capture. Outside 0..1 s it's not averaged but
+     * counted as [EncodeSpread.bad]: a clock that doesn't match the pts shows up there instead of as a mean.
+     */
     fun encoded(captureToOutputUs: Long?) {
         encoded++
         if (captureToOutputUs != null && captureToOutputUs in 0..1_000_000) {
             encodeUs += captureToOutputUs
             encodeN++
+            encodeMin = minOf(encodeMin, captureToOutputUs)
+            encodeMax = maxOf(encodeMax, captureToOutputUs)
+        } else {
+            encodeBad++
         }
     }
 
@@ -115,7 +129,11 @@ class SendStats(private var windowStart: Long) {
             rttTenthMs = tenth(rttMs * 10, rttN),
             rttMinTenthMs = if (rttN == 0) Msg.Stats.UNKNOWN else (rttMin * 10).toInt(),
         )
+        lastEncode = EncodeSpread(encodeMin.takeIf { encodeN > 0 }, encodeMax.takeIf { encodeN > 0 }, encodeBad)
         windowStart = now
+        encodeMin = Long.MAX_VALUE
+        encodeMax = 0
+        encodeBad = 0
         encoded = 0
         sent = 0
         dropped = 0
@@ -134,10 +152,18 @@ class SendStats(private var windowStart: Long) {
     }
 }
 
+/** Capture → encoded in one window: min and max in µs (null = no sample), and samples outside 0..1 s. */
+data class EncodeSpread(val minUs: Long?, val maxUs: Long?, val bad: Int)
+
 /** The phone's `adb logcat -s FerryScreen` line for one STATS window. */
-fun Msg.Stats.line(inFlight: Int): String {
+fun Msg.Stats.line(inFlight: Int, e: EncodeSpread = EncodeSpread(null, null, 0)): String {
     val s = windowMs / 1000.0
     fun t(v: Int) = if (v == Msg.Stats.UNKNOWN) "-" else "%.1f".format(Locale.ROOT, v / 10.0)
-    return "stats: encoded %.0f fps, sent %.0f fps, dropped %d | %.2f of %.2f Mbps | capture→encoded %s ms, write %s ms, write→ack %s ms (min %s), in flight %d"
-        .format(Locale.ROOT, encoded / s, sent / s, dropped, outBps / 1e6, targetBps / 1e6, t(encodeTenthMs), t(writeTenthMs), t(rttTenthMs), t(rttMinTenthMs), inFlight)
+    fun us(v: Long?) = if (v == null) "-" else "%.1f".format(Locale.ROOT, v / 1000.0)
+    val bad = if (e.bad > 0) ", ${e.bad} off-clock" else ""
+    return "stats: encoded %.0f fps, sent %.0f fps, dropped %d | %.2f of %.2f Mbps | capture→encoded %s ms (%s–%s%s), write %s ms, write→ack %s ms (min %s), in flight %d"
+        .format(
+            Locale.ROOT, encoded / s, sent / s, dropped, outBps / 1e6, targetBps / 1e6, t(encodeTenthMs), us(e.minUs), us(e.maxUs), bad,
+            t(writeTenthMs), t(rttTenthMs), t(rttMinTenthMs), inFlight,
+        )
 }
