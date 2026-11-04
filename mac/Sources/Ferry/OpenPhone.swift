@@ -36,8 +36,9 @@ extension AppModel {
             var cabled = usbSerial(peer.id)
             if cabled == nil { cabled = await singleUsbSerial(adb: adb) }
             if let serial = cabled {
+                // Launch over the cable, and set wireless up only once the window closes (switching to
+                // wireless restarts adb and would kill a running session).
                 launchPhone(peer, serial: serial, adb: adb, over: "USB")
-                await rememberWireless(peer.id, usbSerial: serial, adb: adb)
                 return
             }
             // No cable: reconnect over the remembered Wi-Fi address.
@@ -93,7 +94,12 @@ extension AppModel {
                 self.phoneWindows[peer.id] = nil
                 self.onChange()
                 // Failed almost at once (not a window the user closed): say why.
-                if status != 0, Date.now.timeIntervalSince(started) < 3 { self.phoneFailed(peer, err) }
+                if status != 0, Date.now.timeIntervalSince(started) < 3 { return self.phoneFailed(peer, err) }
+                // Window closed after a real USB session: set wireless up for next time (it restarts adb,
+                // so it's safe only now that nothing is using the connection).
+                if over == "USB", self.usbSerial(peer.id) != nil || (await self.singleUsbSerial(adb: adb)) != nil {
+                    await self.rememberWireless(peer.id, usbSerial: serial, adb: adb)
+                }
             }
         }
         do {
