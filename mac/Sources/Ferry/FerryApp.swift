@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let menu = NSMenu()
     private var menuOpen = false
     private var liveItems: [NSMenuItem] = [] // the status block under the updates item, refreshed while the menu is open
+    private var transferItems: [String: NSMenuItem] = [:] // by transfer id; the row views update themselves
     private var updateItem: NSMenuItem?
     private var pairWindow: NSWindow?
 
@@ -237,14 +238,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             items.append(label("A phone on USB isn't paired yet").symbol("cable.connector")
                 .tip("Choose Pair over USB… to pair it"))
         }
-        if !model.lines.isEmpty {
+        let live = model.transferList.items
+        transferItems = transferItems.filter { id, _ in live.contains { $0.id == id } }
+        if !live.isEmpty {
+            items.append(.separator())
+            items.append(.sectionHeader(title: "Transfers"))
+            items += live.map(transferItem)
+        }
+        let recent = model.lines.filter { line in !live.contains { $0.id == line.id } }
+        if !recent.isEmpty {
             items.append(.separator())
             items.append(.sectionHeader(title: "Recent Transfers"))
-            items += model.lines.map { label(short($0.text)).symbol($0.symbol) }
+            items += recent.map { label(short($0.text)).symbol($0.symbol) }
         }
         let top = 3 // version, Check for Updates…, separator
         for (i, item) in items.enumerated() { menu.insertItem(item, at: top + i) }
         liveItems = items
+    }
+
+    /// A progress row (bar, bytes, speed, Cancel) that keeps updating while the menu is open.
+    private func transferItem(_ t: LiveTransfer) -> NSMenuItem {
+        if let item = transferItems[t.id] { return item }
+        let host = NSHostingView(rootView: TransferRow(transfer: t) { [weak self] in self?.model.cancel(t) }
+            .padding(.horizontal, 14).frame(width: 320, alignment: .leading))
+        host.frame.size = host.fittingSize
+        let item = NSMenuItem()
+        item.view = host
+        transferItems[t.id] = item
+        return item
     }
 
     private func label(_ text: String) -> NSMenuItem {

@@ -1,5 +1,6 @@
 import AppKit
 import FerryCore
+import FerryLogic
 import os
 import UserNotifications
 
@@ -27,16 +28,9 @@ final class AppModel {
     /// Called after anything shown in the menu changed.
     var onChange: () -> Void = {}
 
-    private struct Incoming {
-        var names: [String]
-        var totalBytes: UInt64
-        var finishedBytes: UInt64 = 0
-        var saved: [URL] = []
-        var failed = 0
-        var rateStart: (Date, UInt64)? // first progress seen, for MB/s (resumes start mid-way)
-        var lastEvent = Date.now // a dropped connection sends no more events (see dropStalled)
-    }
-    private var incoming: [String: Incoming] = [:]
+    /// Transfers with a progress bar (Transfers.swift): running ones, and ones that just ended.
+    let transferList = TransferList()
+    var transfersPanel: TransfersPanel?
     private var startTask: Task<Void, Never>?
     private var bluetooth: Bluetooth?
     /// "Bluetooth off" etc. while Bluetooth should run but can't.
@@ -202,17 +196,22 @@ final class AppModel {
     func send(_ urls: [URL], to peer: FfiPeer) {
         guard let node, !urls.isEmpty else { return }
         UserDefaults.standard.set(peer.id, forKey: "lastPeerId")
-        let id = "send-\(UUID().uuidString)"
-        let what = describe(urls.map(\.lastPathComponent))
-        put(id, "Sending \(what) to \(peer.name)…", "arrow.up.circle")
+        // Our own id, so the row's Cancel works before the core's first event for it.
+        let t = LiveTransfer(id: newTransferID(), outgoing: true, peerName: peer.name, names: urls.map(\.lastPathComponent))
+        let what = describe(t.progress.names)
+        begin(t)
         Task {
             do {
-                let r = try await node.sendFiles(peerId: peer.id, paths: urls.map(\.path))
-                put(id, "Sent \(what) to \(peer.name) · \(byteCount(r.bytesSent)), "
-                    + rate(Double(r.bytesSent), seconds: max(Double(r.elapsedMs) / 1000, 0.001)), "checkmark.circle")
+                let r = try await node.sendFiles(peerId: peer.id, paths: urls.map(\.path), transferId: t.id)
+                let line = "Sent \(what) to \(peer.name) · \(byteCount(r.bytesSent)), "
+                    + rate(Double(r.bytesSent), seconds: max(Double(r.elapsedMs) / 1000, 0.001))
+                end(t, .done("Sent"), line: line, symbol: "checkmark.circle")
+            } catch let FerryError.Cancelled(byPeer) {
+                end(t, .cancelled(byPeer ? "Cancelled on \(peer.name)" : "Cancelled"), line: cancelledLine(t, byPeer: byPeer),
+                    symbol: "xmark.circle")
             } catch {
                 logger.error("send to \(peer.name) failed: \(error, privacy: .public)")
-                put(id, "Couldn't send \(what) to \(peer.name)", "exclamationmark.triangle")
+                end(t, .failed("Couldn't send"), line: "Couldn't send \(what) to \(peer.name)", symbol: "exclamationmark.triangle")
                 showAlert("Couldn't send \(what) to \(peer.name)", reachHint(peer.name))
             }
         }
@@ -247,64 +246,73 @@ final class AppModel {
 
     func handle(_ event: FfiFileEvent) {
         switch event {
+        case let .sending(tid, names, totalBytes):
+            // Every send starts in send() (drops, Services, Browse Files uploads), which made the row already.
+            guard let t = transfer(tid) else { return }
+            t.raw.names = names
+            t.raw.totalBytes = totalBytes
+            t.publish(now: true)
         case let .offered(tid, names, totalBytes):
-            incoming[tid] = Incoming(names: names, totalBytes: totalBytes)
-            put(tid, "Receiving \(describe(names)) (\(byteCount(totalBytes)))", "arrow.down.circle")
-        case let .progress(tid, index, done, _):
-            guard var t = incoming[tid] else { return }
-            let bytes = t.finishedBytes + done
-            if t.rateStart == nil { t.rateStart = (.now, bytes) }
-            t.lastEvent = .now
-            incoming[tid] = t
-            let pct = t.totalBytes > 0 ? min(100, bytes * 100 / t.totalBytes) : 100
-            var text = "\(t.names.count > 1 ? "\(index + 1) of \(t.names.count): " : "")\(name(t, index)) — \(pct)%"
-            if case let (start, startBytes)? = t.rateStart {
-                let secs = Date.now.timeIntervalSince(start)
-                if secs > 0.5 { text += " · " + rate(Double(bytes) - Double(startBytes), seconds: secs) }
-            }
-            put(tid, text, "arrow.down.circle")
-        // The core also reports our own sends (path = the phone's file name); only offered transfers are
-        // incoming. A send's own line reports its result.
-        case let .saved(tid, _, path):
-            guard var t = incoming[tid] else { return }
+            begin(LiveTransfer(id: tid, outgoing: false, peerName: nil, names: names, totalBytes: totalBytes))
+        case let .progress(tid, index, done, total):
+            guard let t = transfer(tid), t.running else { return }
+            t.raw.progress(index: index, done: done, total: total)
+            t.publish()
+        case let .saved(tid, index, path):
+            guard let t = transfer(tid), t.running else { return }
+            t.raw.finish(index: index)
+            t.publish()
+            // Sender side: `path` is the name the phone saved it under; the send's own result reports it.
+            guard !t.outgoing else { return }
             let url = URL(filePath: path)
             quarantine(url)
             t.saved.append(url)
-            t.lastEvent = .now
-            t.finishedBytes += UInt64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-            incoming[tid] = t
-            finishIfDone(tid)
+            finishIfDone(t)
         case let .failed(tid, index, error):
-            guard var t = incoming[tid] else { return }
+            guard let t = transfer(tid), t.running else { return }
+            t.raw.finish(index: index)
             t.failed += 1
-            t.lastEvent = .now
-            incoming[tid] = t
+            t.publish()
+            guard !t.outgoing else { return }
             logger.error("receiving \(self.name(t, index), privacy: .private) failed: \(error, privacy: .public)")
-            put(tid, "Couldn't receive \(name(t, index))", "exclamationmark.triangle")
-            finishIfDone(tid)
+            finishIfDone(t)
+        case let .cancelled(tid, byPeer):
+            // A send's own result (FerryError.Cancelled) ends its row.
+            guard let t = transfer(tid), t.running, !t.outgoing else { return }
+            end(t, .cancelled(byPeer ? "Cancelled on the phone" : "Cancelled"), line: cancelledLine(t, byPeer: byPeer), symbol: "xmark.circle")
+            if !t.saved.isEmpty {
+                notifyReceived(t.saved, what: describe(t.saved.map(\.lastPathComponent)), failed: 0, id: tid)
+            }
         }
+    }
+
+    private func name(_ t: LiveTransfer, _ index: UInt32) -> String {
+        Int(index) < t.raw.names.count ? t.raw.names[Int(index)] : "File \(index + 1)"
     }
 
     /// `stalled`: no event for a while (the connection dropped), so the rest won't come.
-    private func finishIfDone(_ tid: String, stalled: Bool = false) {
-        guard var t = incoming[tid], stalled || t.saved.count + t.failed >= t.names.count else { return }
-        incoming[tid] = nil
-        t.failed = max(t.failed, t.names.count - t.saved.count)
+    private func finishIfDone(_ t: LiveTransfer, stalled: Bool = false) {
+        guard t.running, stalled || t.saved.count + t.failed >= t.raw.names.count else { return }
+        let failed = max(t.failed, t.raw.names.count - t.saved.count)
         if !t.saved.isEmpty {
             let what = describe(t.saved.map(\.lastPathComponent))
-            put(tid, t.failed == 0 ? "Received \(what)" : "Received \(what); \(t.failed) couldn't be received", "checkmark.circle")
-            notifyReceived(t.saved, what: what, failed: t.failed, id: tid)
-        } else if stalled {
-            put(tid, "Couldn't receive \(describe(t.names)): the connection was lost", "exclamationmark.triangle")
+            end(t, failed == 0 ? .done("Received") : .failed("\(failed) couldn't be received"),
+                line: failed == 0 ? "Received \(what)" : "Received \(what); \(failed) couldn't be received", symbol: "checkmark.circle")
+            notifyReceived(t.saved, what: what, failed: failed, id: t.id)
+        } else {
+            let what = describe(t.raw.names)
+            end(t, .failed(stalled ? "The connection was lost" : "Couldn't receive"),
+                line: stalled ? "Couldn't receive \(what): the connection was lost" : "Couldn't receive \(what)",
+                symbol: "exclamationmark.triangle")
         }
     }
 
-    /// The core sends nothing more for a transfer whose connection dropped; without this its line would
-    /// stay at "…45%" for good.
+    /// The core sends nothing more for a transfer whose connection dropped; without this its row would
+    /// stay at 45% for good.
     private func dropStalled() {
-        for (tid, t) in incoming where Date.now.timeIntervalSince(t.lastEvent) > 120 {
-            logger.notice("transfer \(tid.prefix(8), privacy: .public) stalled, giving up")
-            finishIfDone(tid, stalled: true)
+        for t in transferList.items where t.running && !t.outgoing && Date.now.timeIntervalSince(t.lastEvent) > 120 {
+            logger.notice("transfer \(t.id.prefix(8), privacy: .public) stalled, giving up")
+            finishIfDone(t, stalled: true)
         }
     }
 
@@ -328,11 +336,7 @@ final class AppModel {
         }
     }
 
-    private func name(_ t: Incoming, _ index: UInt32) -> String {
-        Int(index) < t.names.count ? t.names[Int(index)] : "File \(index + 1)"
-    }
-
-    private func put(_ id: String, _ text: String, _ symbol: String) {
+    func put(_ id: String, _ text: String, _ symbol: String) {
         if let i = lines.firstIndex(where: { $0.id == id }) {
             lines[i].text = text
             lines[i].symbol = symbol
