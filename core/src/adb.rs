@@ -95,6 +95,19 @@ pub fn parse_devices(out: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A phone adb reaches over Wi-Fi ("192.168.1.5:5555", "adb-…._adb-tls-connect._tcp"), not a cable:
+/// the USB bridge leaves those alone (the Mac's Use Phone connects them).
+pub fn is_wireless(serial: &str) -> bool {
+    serial.contains(':') || serial.contains("._adb-tls-connect.")
+}
+
+/// [`parse_devices`] without the Wi-Fi ones.
+fn usb_devices(out: &str) -> Vec<(String, String)> {
+    let mut d = parse_devices(out);
+    d.retain(|(s, _)| !is_wireless(s));
+    d
+}
+
 /// Quotes one literal argument for the Android POSIX shell: `adb shell` joins its
 /// arguments into one command line that the device shell re-parses.
 pub fn quote_shell_arg(value: &str) -> Result<String> {
@@ -193,7 +206,7 @@ async fn tick(
     states: &mut HashMap<String, String>,
 ) -> Result<()> {
     let adb = find_adb(explicit)?;
-    let now: HashMap<String, String> = parse_devices(&run(&adb, &["devices"]).await?)
+    let now: HashMap<String, String> = usb_devices(&run(&adb, &["devices"]).await?)
         .into_iter()
         .collect();
     for (s, state) in &now {
@@ -342,7 +355,7 @@ async fn pick_serial(node: &Node, adb: &Path) -> Result<String> {
     if let [l] = &node.usb_links()[..] {
         return Ok(l.serial.clone());
     }
-    let devices = parse_devices(&run(adb, &["devices"]).await?);
+    let devices = usb_devices(&run(adb, &["devices"]).await?);
     let ready: Vec<&String> = devices
         .iter()
         .filter(|d| d.1 == "device")
@@ -397,6 +410,9 @@ mod tests {
         );
         assert!(parse_devices("List of devices attached\n\n").is_empty());
         assert!(parse_devices("garbage-without-state\n").is_empty());
+        assert_eq!(usb_devices(out).len(), 3);
+        assert!(is_wireless("adb-10BD6T20PF000JM-Xy1._adb-tls-connect._tcp"));
+        assert!(!is_wireless("10BD6T20PF000JM"));
     }
 
     #[test]
