@@ -60,6 +60,9 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   first) and move the arrow by its translation in a full-screen untouchable overlay (no window relayout).
 - Keep awake (phone setting, default on, needs Ferry control): while a session is open, a 1 px accessibility
   overlay with `FLAG_KEEP_SCREEN_ON`; removed when the session ends. The keyguard is never touched.
+- Wi-Fi (phone): while any session is open, Wi-Fi locks `WIFI_MODE_FULL_LOW_LATENCY` (honored only with
+  Ferry in the foreground and the screen on) plus `WIFI_MODE_FULL_HIGH_PERF` as the fallback: Wi-Fi power
+  save is a classic +30–100 ms spike. Released when the session ends.
 - Cursor crossing (Mac): the pointer crosses after pushing 8 pt into the edge (pauses over 0.4 s start
   over) and comes back after 4 pt past the phone's Mac-side edge, at the proportional height. Moves
   are merged and sent at most at 120 Hz, latest-wins on the wire (a newer CURSOR move replaces one still

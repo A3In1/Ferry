@@ -10,6 +10,7 @@ import android.content.IntentFilter
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -143,6 +144,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         ScreenPrefs.load(ctx)
         // Needs Ferry control (the overlay window); without it the phone sleeps on its usual timeout.
         if (ScreenPrefs.keepAwake.value) ControlService.instance.value?.keepAwake(true)
+        val wifi = WifiLocks(ctx)
         try {
             Notifs.screen(ctx, mac, "Getting ready…")
             coroutineScope {
@@ -163,6 +165,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         } finally {
             ended = true // nothing more on the wire, incl. END from our own projection.stop() below
             ctx.unregisterReceiver(screenOff)
+            wifi.release()
             projection?.let {
                 stopped?.let(it::unregisterCallback) // our own stop isn't "stopped on the phone"
                 it.stop()
@@ -244,6 +247,34 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             Screen.ask = null
             Notifs.cancel(ctx, Notifs.ID_SCREEN_ASK)
         }
+    }
+}
+
+/**
+ * Wi-Fi power save off for a session: phone Wi-Fi dozes between beacons (+30–100 ms spikes on a stream that
+ * is idle for a moment). LOW_LATENCY is honored only while Ferry is in the foreground with the screen on,
+ * which during mirroring it usually isn't (the user is in other apps), so HIGH_PERF is held too as the
+ * fallback; Android applies the stronger one it allows at the moment. Both need WAKE_LOCK.
+ */
+private class WifiLocks(ctx: Context) {
+    private val locks = runCatching {
+        val wm = ctx.applicationContext.getSystemService(WifiManager::class.java)
+        @Suppress("DEPRECATION") // HIGH_PERF: deprecated for LOW_LATENCY, which doesn't cover background use
+        listOf(
+            wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Ferry:screen-low-latency"),
+            wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Ferry:screen-high-perf"),
+        ).onEach {
+            it.setReferenceCounted(false)
+            it.acquire()
+        }
+    }.onSuccess { Log.w(SCREEN_TAG, "wifi locks held (low-latency + high-perf)") }
+        .onFailure { Log.w(SCREEN_TAG, "wifi locks unavailable", it) }
+        .getOrDefault(emptyList())
+
+    fun release() {
+        if (locks.isEmpty()) return
+        locks.forEach { runCatching { it.release() } }
+        Log.w(SCREEN_TAG, "wifi locks released")
     }
 }
 
