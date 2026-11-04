@@ -30,20 +30,23 @@ extension AppModel {
         guard Self.scrcpyPaths.contains(where: FileManager.default.isExecutableFile) else {
             return installPhoneTool { [weak self] in self?.usePhoneAuthed(peer) }
         }
-        // Over the cable: launch now, and remember the Wi-Fi address in the background for next time.
-        if let serial = usbSerial(peer.id) {
-            launchPhone(peer, serial: serial, adb: adb, over: "USB")
-            Task { await rememberWireless(peer.id, usbSerial: serial, adb: adb) }
-            return
-        }
-        // No cable: reconnect over the remembered Wi-Fi address.
-        guard let endpoint = wirelessEndpoint(peer.id) else {
-            showAlert("Plug in \(peer.name) once",
-                      "Connect \(peer.name) with the USB cable the first time (and allow USB debugging). "
-                          + "After that, Use Phone works over Wi-Fi until the phone restarts.")
-            return
-        }
         Task {
+            // Over the cable: Ferry's own USB link if it knows one, else the only phone on adb. Then
+            // remember the Wi-Fi address for next time.
+            var cabled = usbSerial(peer.id)
+            if cabled == nil { cabled = await singleUsbSerial(adb: adb) }
+            if let serial = cabled {
+                launchPhone(peer, serial: serial, adb: adb, over: "USB")
+                await rememberWireless(peer.id, usbSerial: serial, adb: adb)
+                return
+            }
+            // No cable: reconnect over the remembered Wi-Fi address.
+            guard let endpoint = wirelessEndpoint(peer.id) else {
+                showAlert("Plug in \(peer.name) once",
+                          "Connect \(peer.name) with the USB cable the first time (and allow USB debugging). "
+                              + "After that, Use Phone works over Wi-Fi until the phone restarts.")
+                return
+            }
             guard await adbConnect(endpoint, adb: adb) else {
                 forgetWireless(peer.id)
                 showAlert("Can't reach \(peer.name) over Wi-Fi",
@@ -53,6 +56,19 @@ extension AppModel {
             }
             launchPhone(peer, serial: endpoint, adb: adb, over: "Wi-Fi")
         }
+    }
+
+    /// The one phone on adb over a cable (state "device", not Wi-Fi), when there's exactly one, so Use
+    /// Phone works even before Ferry's own USB bridge has attached it.
+    private func singleUsbSerial(adb: String) async -> String? {
+        guard let out = await adbRun(adb, ["devices"]) else { return nil }
+        let cabled = out.split(separator: "\n").dropFirst().compactMap { line -> String? in
+            let parts = line.split(whereSeparator: { $0 == "\t" || $0 == " " })
+            guard parts.count >= 2, parts[1] == "device" else { return nil }
+            let serial = String(parts[0])
+            return serial.contains(":") ? nil : serial // skip a Wi-Fi entry
+        }
+        return cabled.count == 1 ? cabled[0] : nil
     }
 
     private func launchPhone(_ peer: FfiPeer, serial: String, adb: String, over: String) {
