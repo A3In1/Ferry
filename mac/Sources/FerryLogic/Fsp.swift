@@ -14,6 +14,29 @@ public enum Fsp {
         case frame(pts: UInt64, flags: UInt8, data: Data) // flags bit0 keyframe, bit1 codec config
         case end(reason: UInt8, detail: String)
         case quality(bitrate: UInt32) // the phone adapted its encoder to the link
+        case stats(PhoneStats) // every ~2 s: what the phone's encoder and sender did
+    }
+
+    /// STATS (0x05): one window of the phone's encoder/sender numbers. Times in 0.1 ms; `unknown` = none.
+    public struct PhoneStats: Equatable, Sendable {
+        public static let unknown: UInt16 = 0xFFFF
+        public var windowMs, encoded, sent, dropped: UInt16
+        public var targetBps, outBps: UInt32
+        public var encodeTenthMs, writeTenthMs, rttTenthMs, rttMinTenthMs: UInt16
+
+        public init(windowMs: UInt16, encoded: UInt16, sent: UInt16, dropped: UInt16, targetBps: UInt32, outBps: UInt32,
+                    encodeTenthMs: UInt16, writeTenthMs: UInt16, rttTenthMs: UInt16, rttMinTenthMs: UInt16) {
+            self.windowMs = windowMs
+            self.encoded = encoded
+            self.sent = sent
+            self.dropped = dropped
+            self.targetBps = targetBps
+            self.outBps = outBps
+            self.encodeTenthMs = encodeTenthMs
+            self.writeTenthMs = writeTenthMs
+            self.rttTenthMs = rttTenthMs
+            self.rttMinTenthMs = rttMinTenthMs
+        }
     }
 
     public struct ProtocolError: Error, Equatable, Sendable { public let why: String }
@@ -38,6 +61,8 @@ public enum Fsp {
     public static func text(_ s: String) -> Data { message(0x13, Data(s.utf8)) }
     public static func nav(_ n: Nav) -> Data { message(0x14, [n.rawValue]) }
     public static let keyframe = message(0x15, Data())
+    /// ACK (0x17): the newest FRAME received, by its pts, so the phone can time the link.
+    public static func ack(pts: UInt64) -> Data { message(0x17, be(pts)) }
     public static func cursor(_ a: Pointer, _ x: Float, _ y: Float) -> Data { message(0x16, [a.rawValue] + be(x) + be(y)) }
 
     /// A Mac key press as KEY (editing and caret keys, as Android keycodes) or TEXT; nil for keys with
@@ -130,6 +155,11 @@ public struct FspParser {
         case 0x04:
             try need(4)
             return .quality(bitrate: u32(p, 0))
+        case 0x05:
+            try need(24)
+            return .stats(.init(windowMs: u16(p, 0), encoded: u16(p, 2), sent: u16(p, 4), dropped: u16(p, 6),
+                                targetBps: u32(p, 8), outBps: u32(p, 12), encodeTenthMs: u16(p, 16),
+                                writeTenthMs: u16(p, 18), rttTenthMs: u16(p, 20), rttMinTenthMs: u16(p, 22)))
         default:
             return nil
         }

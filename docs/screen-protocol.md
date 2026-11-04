@@ -29,6 +29,7 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
 | `0x14` | NAV | `u8` 1 back, 2 home, 3 recents, 4 notifications |
 | `0x15` | KEYFRAME | empty: send an IDR frame now |
 | `0x16` | CURSOR | `u8 action` (0 down, 1 up, 2 move, 3 hide), `f32 x`, `f32 y`: overlay cursor; down/up at the cursor = tap or drag |
+| `0x17` | ACK | `u64 pts_us`: the newest FRAME received (sent once per read chunk that held frames). Everything up to it has arrived |
 
 ### Phone → Mac
 | Type | Name | Payload |
@@ -37,6 +38,7 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
 | `0x02` | FRAME | `u64 pts_us`, `u8 flags` (bit0 keyframe, bit1 codec config), then H.264 Annex-B bytes as MediaCodec emits them. Config (SPS+PPS) precedes the first keyframe after each INFO |
 | `0x03` | END | `u8 reason` (0 normal, 1 stopped on the phone, 2 phone locked, 3 not allowed, 4 error), UTF-8 detail; then close |
 | `0x04` | QUALITY | `u32 bitrate` (bps): the encoder's new target after the phone adapted to the link (informational) |
+| `0x05` | STATS | every ~2 s while video runs: `u16 window_ms`, `u16 encoded`, `u16 sent`, `u16 dropped` (frames in the window), `u32 target_bps`, `u32 out_bps` (FRAME bytes actually written), `u16 encode`, `u16 write`, `u16 rtt`, `u16 rtt_min` (averages in 0.1 ms; `0xFFFF` = no sample). encode = capture → encoder output; write = time a FRAME write took; rtt = FRAME write → its ACK (needs a Mac that sends ACK). Informational |
 
 ## Rules
 - The phone sends nothing before START. START with video → MediaProjection consent on the phone
@@ -64,6 +66,10 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   ceiling); floor max(500 kbps, ceiling / 8). A single write blocked ≥ 400 ms means the queued frames
   are stale: bitrate halves, frames are dropped until a requested keyframe (at most every 2 s).
   Applied with `PARAMETER_KEY_VIDEO_BITRATE`, kept across rotations, and reported as QUALITY.
+- Measurements: FRAME `pts_us` is the capture time (surface input: `System.nanoTime` µs on the phone). The
+  clocks differ, so the Mac reports one-way delay as (received − pts) above the lowest seen this session
+  (= queueing the link added), plus the phone's write → ACK round trip from STATS. Logs: phone
+  `adb logcat -s FerryScreen` (`stats: …` every 2 s), Mac os.Logger `dev.ferry.mac` (`screen: …` every 2 s).
 - Rotation: new INFO, encoder restarted at the new size, config + keyframe.
 - Bluetooth-only session: START with video → `END 4 "Bluetooth is too slow for video"`; control-only is allowed.
 - Either side may close at any time; EOF = END 0.

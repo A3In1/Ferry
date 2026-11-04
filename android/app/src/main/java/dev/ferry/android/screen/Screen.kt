@@ -148,6 +148,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
                 launch { start(m) }
             }
             Msg.Keyframe -> capture?.keyframe()
+            is Msg.Ack -> capture?.acked(m.ptsUs)
             is Msg.Touch, is Msg.Scroll, is Msg.Text, is Msg.Key, is Msg.Nav, is Msg.Cursor ->
                 if (started) ControlService.instance.value?.input(m)
             else -> {} // phone → Mac kinds

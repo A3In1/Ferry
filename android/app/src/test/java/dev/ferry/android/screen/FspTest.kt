@@ -24,6 +24,9 @@ class FspTest {
         Msg.End(Fsp.END_NORMAL),
         Msg.Quality(2_500_000),
         Msg.Key(Keys.LEFT, Keys.SHIFT),
+        Msg.Ack(123_456_789_000L),
+        Msg.Stats(2000, 120, 118, 2, 8_000_000, 7_500_000, 62, 3, 124, 41),
+        Msg.Stats(2000, 0, 0, 0, 1, 0, Msg.Stats.UNKNOWN, Msg.Stats.UNKNOWN, Msg.Stats.UNKNOWN, Msg.Stats.UNKNOWN),
     )
 
     private fun stream(msgs: List<Msg>) = msgs.fold(Fsp.MAGIC) { acc, m -> acc + Fsp.encode(m) }
@@ -44,6 +47,14 @@ class FspTest {
     fun wireLayout() {
         assertArrayEquals(byteArrayOf(0x14, 0, 0, 0, 1, 2), Fsp.encode(Msg.Nav(2)))
         assertArrayEquals(byteArrayOf(0x01, 0, 0, 0, 5, 0x04, 0x38, 0x09, 0x60, 2), Fsp.encode(Msg.Info(1080, 2400, 2)))
+    }
+
+    @Test
+    fun ackAndStatsLayout() {
+        assertArrayEquals(byteArrayOf(0x17, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 1, 2), Fsp.encode(Msg.Ack(0x0102)))
+        val s = Fsp.encode(Msg.Stats(2000, 1, 2, 3, 4, 5, 6, 7, 8, 9))
+        assertArrayEquals(byteArrayOf(0x05, 0, 0, 0, 24, 0x07, 0xd0.toByte(), 0, 1, 0, 2, 0, 3), s.copyOf(13))
+        assertEquals(29, s.size)
     }
 
     @Test

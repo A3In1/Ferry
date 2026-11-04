@@ -53,18 +53,27 @@ import FerryLogic
             }
             await stream.finish()
         }
-        let video = video
+        let video = video, out = out
         let (reason, detail) = await Task.detached(priority: .userInitiated) { () async -> (UInt8, String) in
             var parser = FspParser()
             do {
                 while true {
                     let chunk = try await stream.read()
                     if chunk.isEmpty { return (0, "") }
+                    let at = monotonicMicros()
+                    var newest: UInt64?
                     for m in try parser.push(chunk) {
-                        if case let .frame(pts, flags, data) = m { video?.decode(pts: pts, flags: flags, data); continue }
-                        if case let .end(reason, detail) = m { return (reason, detail) }
-                        await self.deliver(m)
+                        switch m {
+                        case let .frame(pts, flags, data):
+                            video?.decode(pts: pts, flags: flags, data, at: at)
+                            newest = pts
+                        case let .stats(s): video?.phone(s)
+                        case let .end(reason, detail): return (reason, detail)
+                        default: await self.deliver(m)
+                        }
                     }
+                    // One ACK per chunk, for its newest frame: the phone times write → ACK and sees what's still on the way.
+                    if let newest { out.yield(Fsp.ack(pts: newest)) }
                 }
             } catch {
                 return (4, "\(error)")
@@ -91,6 +100,9 @@ import FerryLogic
 /// background queue: AVSampleBufferVideoRenderer may be fed from any thread. The format description is
 /// reused until SPS/PPS change. All sessions share the queue, so a reconnect's flush lands after the old
 /// session's last frame.
+/// Microseconds on a monotonic clock (stats and latency; not wall time).
+func monotonicMicros() -> UInt64 { DispatchTime.now().uptimeNanoseconds / 1000 }
+
 final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`; onShown is set before the first frame
     private static let queue = DispatchQueue(label: "ferry.screen.video", qos: .userInteractive)
     private let renderer: AVSampleBufferVideoRenderer
@@ -101,6 +113,7 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
     private var nals: [Range<Int>] = [], slices: [Range<Int>] = []
     private var needKeyframe = true, shown = false, stopped = false
     private var lastKeyframeAsk = DispatchTime(uptimeNanoseconds: 0)
+    private var stats = ScreenStats(now: monotonicMicros())
 
     /// `send` writes a Mac → phone message (KEYFRAME requests).
     init(renderer: AVSampleBufferVideoRenderer, send: @escaping @Sendable (Data) -> Void) {
@@ -109,14 +122,24 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
         Self.queue.async { [self] in self.renderer.flush(removingDisplayedImage: true, completionHandler: nil) }
     }
 
-    func decode(pts: UInt64, flags: UInt8, _ data: Data) {
-        Self.queue.async { [self] in if !stopped { enqueue(pts, flags, data) } }
+    /// `at`: when the FRAME arrived (monotonicMicros).
+    func decode(pts: UInt64, flags: UInt8, _ data: Data, at: UInt64) {
+        Self.queue.async { [self] in
+            guard !stopped else { return }
+            stats.received(pts: pts, bytes: data.count, config: flags & 2 != 0, at: at)
+            if enqueue(pts, flags, data) { stats.shown(after: monotonicMicros() - at) }
+            if let line = stats.report(at: monotonicMicros()) { logger.notice("\(line, privacy: .public)") }
+        }
     }
+
+    /// The phone's STATS, logged with the next window.
+    func phone(_ s: Fsp.PhoneStats) { Self.queue.async { [self] in stats.phone(s) } }
 
     /// No more frames from this session go to the renderer.
     func stop() { Self.queue.async { [self] in stopped = true } }
 
-    private func enqueue(_ pts: UInt64, _ flags: UInt8, _ data: Data) {
+    /// True if a picture went to the renderer.
+    private func enqueue(_ pts: UInt64, _ flags: UInt8, _ data: Data) -> Bool {
         data.withUnsafeBytes { raw in
             nals.removeAll(keepingCapacity: true)
             slices.removeAll(keepingCapacity: true)
@@ -135,19 +158,24 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
             if config, let sps, let pps {
                 format = try? CMVideoFormatDescription(h264ParameterSets: [sps, pps], nalUnitHeaderLength: 4)
             }
-            guard !slices.isEmpty else { return }
+            guard !slices.isEmpty else { return false }
             if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
                 renderer.flush()
                 needKeyframe = true
             }
             guard let format, key || !needKeyframe, let sample = sampleBuffer(raw, pts: pts, key: key, format: format)
-            else { return askKeyframe() }
+            else {
+                stats.dropped()
+                askKeyframe()
+                return false
+            }
             needKeyframe = false
             renderer.enqueue(sample)
             if !shown {
                 shown = true
                 onShown()
             }
+            return true
         }
     }
 
@@ -300,8 +328,8 @@ final class ScreenWindow: PeerWindow {
             let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? size
             let s = min(max(current.width, current.height) / long, visible.width * 0.9 / size.width, visible.height * 0.9 / size.height)
             window.setContentSize(NSSize(width: (size.width * s).rounded(), height: (size.height * s).rounded()))
-        case .frame:
-            break // the session hands frames to its VideoDecoder
+        case .frame, .stats:
+            break // the session hands these to its VideoDecoder
         case let .quality(bitrate):
             logger.debug("phone encoder at \(bitrate / 1000) kbps")
         case let .end(reason, detail):

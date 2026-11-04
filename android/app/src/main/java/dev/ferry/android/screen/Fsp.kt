@@ -12,6 +12,7 @@ object Fsp {
     const val FRAME = 0x02
     const val END = 0x03
     const val QUALITY = 0x04
+    const val STATS = 0x05
     const val TOUCH = 0x10
     const val SCROLL = 0x11
     const val KEY = 0x12
@@ -19,6 +20,7 @@ object Fsp {
     const val NAV = 0x14
     const val KEYFRAME = 0x15
     const val CURSOR = 0x16
+    const val ACK = 0x17
     const val START = 0x20
 
     const val SCROLL_CONTINUOUS = 1
@@ -47,6 +49,10 @@ object Fsp {
             is Msg.Frame -> buf(9 + m.data.size).putLong(m.ptsUs).put(m.flags.toByte()).put(m.data)
             is Msg.End -> m.detail.toByteArray().let { buf(1 + it.size).put(m.reason.toByte()).put(it) }
             is Msg.Quality -> buf(4).putInt(m.bitrate)
+            is Msg.Ack -> buf(8).putLong(m.ptsUs)
+            is Msg.Stats -> buf(24).putShort(m.windowMs.u16s()).putShort(m.encoded.u16s()).putShort(m.sent.u16s())
+                .putShort(m.dropped.u16s()).putInt(m.targetBps).putInt(m.outBps).putShort(m.encodeTenthMs.u16s())
+                .putShort(m.writeTenthMs.u16s()).putShort(m.rttTenthMs.u16s()).putShort(m.rttMinTenthMs.u16s())
         }
         return p.put(0, m.type.toByte()).putInt(1, p.capacity() - 5).array()
     }
@@ -71,6 +77,11 @@ object Fsp {
                 FRAME -> Msg.Frame(b.long, b.get().u8(), p.copyOfRange(9, p.size))
                 END -> Msg.End(b.get().u8(), String(p, 1, p.size - 1))
                 QUALITY -> Msg.Quality(b.int)
+                ACK -> Msg.Ack(b.long)
+                STATS -> Msg.Stats(
+                    b.short.u16(), b.short.u16(), b.short.u16(), b.short.u16(), b.int, b.int,
+                    b.short.u16(), b.short.u16(), b.short.u16(), b.short.u16(),
+                )
                 else -> null
             }
         } catch (_: BufferUnderflowException) {
@@ -83,6 +94,8 @@ object Fsp {
     private fun Byte.u8() = toInt() and 0xff
     private fun Short.u16() = toInt() and 0xffff
     private fun Int.u32() = toLong() and 0xffffffffL
+    /** A u16 field, saturated (0xffff also means "unknown" for times). */
+    private fun Int.u16s() = coerceIn(0, 0xffff).toShort()
 }
 
 class FspException(msg: String) : Exception(msg)
@@ -108,6 +121,25 @@ sealed class Msg(val type: Int) {
     data class End(val reason: Int, val detail: String = "") : Msg(Fsp.END)
     /** The encoder's bitrate (bps) after the phone adapted it to the link. */
     data class Quality(val bitrate: Int) : Msg(Fsp.QUALITY)
+    /** Mac → phone: the newest FRAME (by pts) the Mac has received, so the phone can time the link. */
+    data class Ack(val ptsUs: Long) : Msg(Fsp.ACK)
+    /** Phone → Mac, every ~2 s: what the encoder and sender did in the last window. Times in 0.1 ms, [UNKNOWN] if none. */
+    data class Stats(
+        val windowMs: Int,
+        val encoded: Int,
+        val sent: Int,
+        val dropped: Int,
+        val targetBps: Int,
+        val outBps: Int,
+        val encodeTenthMs: Int,
+        val writeTenthMs: Int,
+        val rttTenthMs: Int,
+        val rttMinTenthMs: Int,
+    ) : Msg(Fsp.STATS) {
+        companion object {
+            const val UNKNOWN = 0xffff
+        }
+    }
 }
 
 /** Incremental parser: feed it whatever chunks the stream returns. Throws [FspException] on a protocol error. */

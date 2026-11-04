@@ -122,6 +122,13 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
     @Volatile private var codec: MediaCodec? = null
     private val ceiling = start.bitrate.takeIf { it > 0 }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 8_000_000
     private val quality = BitrateControl(ceiling, SystemClock.elapsedRealtime())
+    private val inFlight = InFlight() // guarded by itself, with stats
+    private val stats = SendStats(SystemClock.elapsedRealtime())
+
+    /** The Mac has every FRAME up to [ptsUs]. Any thread. */
+    fun acked(ptsUs: Long) = synchronized(inFlight) {
+        inFlight.acked(ptsUs, SystemClock.elapsedRealtime())?.let(stats::rtt)
+    }
 
     fun keyframe() {
         runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
@@ -170,7 +177,12 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
             val key = if (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) 1 else 0
             val config = if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) 2 else 0
             if (key != 0) skipping = false
+            if (config == 0 && info.size > 0) {
+                // Surface input: pts is the capture time on System.nanoTime's clock.
+                synchronized(inFlight) { stats.encoded(System.nanoTime() / 1000 - info.presentationTimeUs) }
+            }
             if (skipping && config == 0 || info.size == 0) {
+                if (info.size > 0) synchronized(inFlight) { stats.dropped() }
                 c.releaseOutputBuffer(i, false)
                 if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
                 continue
@@ -182,6 +194,12 @@ class Capture(private val ctx: Context, private val projection: MediaProjection,
             val t = SystemClock.elapsedRealtime()
             send(Msg.Frame(info.presentationTimeUs, key or config, data))
             val now = SystemClock.elapsedRealtime()
+            val report = synchronized(inFlight) {
+                inFlight.sent(info.presentationTimeUs, data.size, now)
+                stats.sent(data.size, now - t)
+                stats.report(now, quality.bitrate)?.also { Log.w(SCREEN_TAG, it.line(inFlight.count)) }
+            }
+            report?.let { send(it) }
             val change = quality.sent(now - t, now)
             change.bitrate?.let {
                 Log.w(SCREEN_TAG, "bitrate ${it / 1000} kbps${if (change.catchUp) " (catching up)" else ""}")
