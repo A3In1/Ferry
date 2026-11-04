@@ -30,6 +30,7 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
 | `0x15` | KEYFRAME | empty: send an IDR frame now |
 | `0x16` | CURSOR | `u8 action` (0 down, 1 up, 2 move, 3 hide), `f32 x`, `f32 y`: overlay cursor; down/up at the cursor = tap or drag |
 | `0x17` | ACK | `u64 pts_us`: the newest FRAME received (sent once per read chunk that held frames). Everything up to it has arrived |
+| `0x18` | KEEPALIVE | empty, every 5 s on an idle control-only stream so the link isn't timed out; ignored |
 
 ### Phone → Mac
 | Type | Name | Payload |
@@ -61,7 +62,17 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   overlay with `FLAG_KEEP_SCREEN_ON`; removed when the session ends. The keyguard is never touched.
 - Cursor crossing (Mac): the pointer crosses after pushing 8 pt into the edge (pauses over 0.4 s start
   over) and comes back after 4 pt past the phone's Mac-side edge, at the proportional height. Moves
-  are merged and sent at most at 120 Hz; the phone moves its overlay once per frame to the latest spot.
+  are merged and sent at most at 120 Hz, latest-wins on the wire (a newer CURSOR move replaces one still
+  waiting for the writer; ACKs too; any other message takes a waiting one along first, so order holds).
+  The phone moves its overlay arrow at once to the latest spot. The first push opens a control-only
+  stream (after the Mac password check below); if the pointer is still at the edge when INFO arrives it
+  crosses then. The stream stays open with KEEPALIVE until 10 minutes without a crossing. Every cross,
+  return (with why) and refused push (with why: no Accessibility trust, control off, a display past the
+  edge, stream not ready) is logged (`cursor: …`); lasting problems show as "Share Cursor (not working)"
+  in the menu with the reason as its tooltip.
+- Mac password (setting "Require Mac Password to Mirror", default on): Touch ID or the Mac password
+  (`LAPolicy.deviceOwnerAuthentication`) before a mirror window or a cursor control stream opens;
+  remembered 5 minutes, forgotten on sleep, screen lock or user switch.
 - Messages may grow trailing fields; a receiver ignores bytes past what it knows and treats missing
   optional fields as 0.
 - Video: H.264 High profile where offered (else the encoder's default), no B-frames, VBR, realtime

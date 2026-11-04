@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import FerryCore
 import FerryLogic
 
 /// "Share Cursor": pushing the pointer past the chosen screen edge hides and freezes the
@@ -27,6 +29,14 @@ import FerryLogic
     private var pressed = false
     private var retryAfter = Date.distantPast
     private var previousApp: NSRunningApplication?
+    /// A push got through the dead zone while the control stream was still opening: cross once it's ready.
+    private var armedAt = Date.distantPast
+    private var lastRefusal: (why: String, at: Date) = ("", .distantPast)
+    private var lastUsed = Date.now
+    private var keepalive: Timer?
+    private var movesSent = 0, movesSince = Date.now
+    /// Why crossing can't work right now, for the menu (nil = fine).
+    private(set) var problem: String?
 
     /// nil when the tap can't be created (no Accessibility permission).
     init?(model: AppModel, peerId: String, edge: ScreenEdge) {
@@ -53,6 +63,7 @@ import FerryLogic
             return nil
         }
         self.watch = watch
+        checkPermission()
         // Anything that can strand the pointer on the phone brings it back.
         let ws = NSWorkspace.shared.notificationCenter
         for (center, name) in [(ws, NSWorkspace.willSleepNotification), (ws, NSWorkspace.screensDidSleepNotification),
@@ -60,7 +71,7 @@ import FerryLogic
                                (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification),
                                (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"))] {
             observers.append((center, center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.leave() }
+                MainActor.assumeIsolated { self?.leave("\(name.rawValue)") }
             }))
         }
     }
@@ -81,7 +92,9 @@ import FerryLogic
 
     /// Must run before the last reference goes (the taps hold an unretained pointer to self).
     func stop() {
-        leave()
+        leave("Share Cursor turned off")
+        keepalive?.invalidate()
+        keepalive = nil
         for t in [tap, watch].compactMap(\.self) { CFMachPortInvalidate(t) }
         for s in sources {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes)
@@ -115,13 +128,13 @@ import FerryLogic
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Bool {
         // Never leave the cursor hidden and frozen without a working tap. leave() keeps it off until the next crossing.
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput { leave(); return false }
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput { leave("event tap disabled by macOS"); return false }
         guard var c = cursor else { return false }
-        guard let s = session else { leave(); return false }
+        guard let s = session else { leave("the phone's stream closed"); return false }
         let dx = event.getDoubleValueField(.mouseEventDeltaX), dy = event.getDoubleValueField(.mouseEventDeltaY)
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            guard c.move(dx: dx, dy: dy) else { leave(); return true }
+            guard c.move(dx: dx, dy: dy) else { leave("moved back"); return true }
             cursor = c
             moved()
         case .leftMouseDown, .leftMouseUp:
@@ -134,7 +147,7 @@ import FerryLogic
             s.send(Fsp.scroll(c.normalized.x, c.normalized.y, dx: w.dx, dy: w.dy, flags: w.flags))
         case .keyDown:
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            if code == 53 { leave(); break } // Escape
+            if code == 53 { leave("Escape"); break }
             guard let e = NSEvent(cgEvent: event), let m = keyMessage(e) else { break }
             s.send(m)
         default: break // right/other buttons, key up: swallowed
@@ -146,12 +159,42 @@ import FerryLogic
         let p = event.location, dx = event.getDoubleValueField(.mouseEventDeltaX)
         guard edge == .right ? dx > 0 : dx < 0, // cheap test first: this sees every mouse move
               let bounds = display(at: p),
-              pushesEdge(edge, x: p.x, dx: dx, screenMinX: bounds.minX, screenMaxX: bounds.maxX),
-              display(at: CGPoint(x: edge == .right ? bounds.maxX + 1 : bounds.minX - 1, y: p.y)) == nil // another screen there
+              pushesEdge(edge, x: p.x, dx: dx, screenMinX: bounds.minX, screenMaxX: bounds.maxX)
         else { return push.reset() }
-        guard let s = session else { return Date.now >= retryAfter ? openControl() : () }
+        guard display(at: CGPoint(x: edge == .right ? bounds.maxX + 1 : bounds.minX - 1, y: p.y)) == nil else {
+            push.reset()
+            return refuse("another display is past the \(edge.rawValue) edge; choose the other edge in Settings → Cursor Crosses At",
+                          sticky: true)
+        }
         guard push.push(dx, at: ProcessInfo.processInfo.systemUptime) else { return } // the dead zone
-        guard let info = s.info, s.canControl else { return } // waiting for INFO, or control is off on the phone
+        guard let s = session else {
+            armedAt = .now
+            if Date.now < retryAfter { return refuse("the last stream to the phone failed; retrying in a few seconds") }
+            return openControl()
+        }
+        guard s.info != nil else {
+            armedAt = .now
+            return refuse("waiting for the phone to answer")
+        }
+        cross(at: p, bounds: bounds, s)
+    }
+
+    /// Logs why a push didn't cross (each reason at most every 3 s). `sticky`: shown in the menu until a crossing works.
+    private func refuse(_ why: String, sticky: Bool = false) {
+        if sticky { problem = why }
+        guard lastRefusal.why != why || Date.now.timeIntervalSince(lastRefusal.at) > 3 else { return }
+        lastRefusal = (why, .now)
+        logger.notice("cursor: not crossing: \(why, privacy: .public)")
+    }
+
+    private func cross(at p: CGPoint, bounds: CGRect, _ s: ScreenSession) {
+        guard cursor == nil, let info = s.info else { return }
+        guard s.canControl else {
+            return refuse("Ferry control is off on the phone (Settings → Accessibility → Ferry)", sticky: true)
+        }
+        guard AXIsProcessTrusted() else { return checkPermission() }
+        armedAt = .distantPast
+        problem = nil
         // shortcut: the size is fixed at entry, so a rotation while crossed keeps the old speed; re-init on INFO if it matters.
         let c = VirtualCursor(width: info.width, height: info.height, edge: edge, macScreenHeight: bounds.height,
                               entryY: (p.y - bounds.minY) / bounds.height)
@@ -164,17 +207,32 @@ import FerryLogic
         NSApp.activate()
         CGDisplayHideCursor(CGMainDisplayID())
         CGAssociateMouseAndMouseCursorPosition(0)
-        s.send(Fsp.cursor(.move, c.normalized.x, c.normalized.y))
+        s.sendLatest(Fsp.cursor(.move, c.normalized.x, c.normalized.y), slot: ScreenSession.cursorSlot)
         pacer.sent(at: ProcessInfo.processInfo.systemUptime)
+        movesSent = 0
+        movesSince = .now
+        logger.notice("cursor: crossed to the phone (\(info.width)x\(info.height)) at y \(String(format: "%.2f", c.normalized.y), privacy: .public)")
         // Catches what no event reports: the tap silently disabled, or the viewer's stream gone while the mouse rests.
         watchdog = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.check() }
         }
     }
 
+    /// Accessibility (for the event taps) is per build: after an update macOS may keep the switch on but
+    /// stop trusting the app. Say so in the menu and the log rather than fail silently.
+    private func checkPermission() {
+        if AXIsProcessTrusted() {
+            if problem?.hasPrefix("macOS") == true { problem = nil }
+            return
+        }
+        refuse("macOS isn't letting Ferry see the pointer: in System Settings → Privacy & Security → Accessibility, "
+            + "turn Ferry off and on again", sticky: true)
+    }
+
     private func check() {
         guard cursor != nil else { return }
-        if session == nil || !(tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false) { leave() }
+        if session == nil { return leave("the phone's stream closed") }
+        if !(tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false) { leave("event tap disabled") }
     }
 
     /// The cursor moved: send now, or once the pacer allows (merging the moves in between).
@@ -197,11 +255,19 @@ import FerryLogic
         guard unsent, let c = cursor, let s = session else { return }
         unsent = false
         pacer.sent(at: ProcessInfo.processInfo.systemUptime)
-        s.send(Fsp.cursor(.move, c.normalized.x, c.normalized.y))
+        // Latest wins: if the link is slow, a newer position replaces one still waiting instead of queueing.
+        s.sendLatest(Fsp.cursor(.move, c.normalized.x, c.normalized.y), slot: ScreenSession.cursorSlot)
+        movesSent += 1
+        let t = Date.now.timeIntervalSince(movesSince)
+        if t >= 2 {
+            logger.debug("cursor: \(Int(Double(self.movesSent) / t)) moves/s sent")
+            movesSent = 0
+            movesSince = .now
+        }
     }
 
     /// Back to the Mac: pointer to the edge at the same height, cursor shown, phone cursor hidden.
-    private func leave() {
+    private func leave(_ why: String) {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         watchdog?.invalidate()
         watchdog = nil
@@ -209,6 +275,8 @@ import FerryLogic
         guard let c = cursor else { return }
         flushMove()
         cursor = nil
+        lastUsed = .now
+        logger.notice("cursor: back on the Mac (\(why, privacy: .public))")
         unsent = false
         if pressed { session?.send(Fsp.cursor(.up, c.normalized.x, c.normalized.y)) }
         pressed = false
@@ -221,23 +289,75 @@ import FerryLogic
         previousApp = nil
     }
 
+    /// The control-only stream, after the Mac owner confirms (Touch ID / password, remembered a while).
+    /// Kept open (with a keepalive, so an idle link isn't timed out) until 10 minutes without a crossing.
     private func openControl() {
-        guard let node = model.node else { return }
+        guard let node = model.node, own == nil else { return }
+        retryAfter = .now + 2 // one attempt at a time, including the password prompt
+        let name = model.peer(peerId)?.name ?? "your phone"
+        let asked = Date.now
+        MacAuth.confirm("control \(name) with the cursor") { [weak self] ok in
+            guard let self, self.tap != nil else { return }
+            guard ok else {
+                self.retryAfter = .now + 10
+                return self.refuse("the Mac password wasn't confirmed")
+            }
+            // After a prompt the pointer has moved on (the dialog took focus): push again to cross.
+            if Date.now.timeIntervalSince(asked) > 0.5 { self.armedAt = .distantPast }
+            self.open(node)
+        }
+    }
+
+    private func open(_ node: FerryNode) {
+        logger.notice("cursor: opening the control stream to the phone")
         let s = ScreenSession(node: node, peerId: peerId)
         s.onMessage = { [weak self] m in
-            guard let self, case let .end(reason, detail) = m else { return }
-            if session == nil { leave() }
-            own = nil
-            if reason != 0 { retryAfter = .now + 10 }
-            logger.info("cursor stream ended (\(reason)) \(detail, privacy: .public)")
-            if reason == 3 {
-                model.cursorPeer = nil
-                model.showAlert("Turn on Ferry control on the phone",
-                                "To share the cursor, turn on Ferry control on the phone in Settings → Accessibility → Ferry, "
-                                    + "then choose Share Cursor again.")
+            guard let self else { return }
+            switch m {
+            case .info:
+                logger.notice("cursor: phone ready (control \(s.canControl ? "on" : "off", privacy: .public))")
+                // Still pushing at the edge from before the stream was ready: cross now.
+                if cursor == nil, Date.now.timeIntervalSince(armedAt) < 2, let p = CGEvent(source: nil)?.location,
+                   let bounds = display(at: p), pushesEdge(edge, x: p.x, dx: edge == .right ? 1 : -1, screenMinX: bounds.minX, screenMaxX: bounds.maxX) {
+                    cross(at: p, bounds: bounds, s)
+                }
+            case let .end(reason, detail):
+                if session == nil { leave("the phone's stream ended") }
+                own = nil
+                keepalive?.invalidate()
+                keepalive = nil
+                if reason != 0 { retryAfter = .now + 5 }
+                logger.notice("cursor: control stream ended (\(reason)) \(detail, privacy: .public)")
+                if reason == 3 {
+                    model.cursorPeer = nil
+                    model.showAlert("Turn on Ferry control on the phone",
+                                    "To share the cursor, turn on Ferry control on the phone in Settings → Accessibility → Ferry, "
+                                        + "then choose Share Cursor again.")
+                }
+            default: break
             }
         }
         own = s
+        retryAfter = .distantPast
+        lastUsed = .now
+        keepalive?.invalidate()
+        keepalive = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tickKeepalive() }
+        }
+    }
+
+    private func tickKeepalive() {
+        checkPermission()
+        guard let own, own.isOpen else { return }
+        if cursor == nil, Date.now.timeIntervalSince(lastUsed) > 600 {
+            logger.notice("cursor: closing the idle control stream")
+            own.finish()
+            self.own = nil
+            keepalive?.invalidate()
+            keepalive = nil
+            return
+        }
+        own.send(Fsp.keepalive)
     }
 
     private func display(at p: CGPoint) -> CGRect? {

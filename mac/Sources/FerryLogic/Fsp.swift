@@ -63,6 +63,8 @@ public enum Fsp {
     public static let keyframe = message(0x15, Data())
     /// ACK (0x17): the newest FRAME received, by its pts, so the phone can time the link.
     public static func ack(pts: UInt64) -> Data { message(0x17, be(pts)) }
+    /// KEEPALIVE (0x18): empty; keeps an idle control stream's link from timing out. Ignored by the phone.
+    public static let keepalive = message(0x18, Data())
     public static func cursor(_ a: Pointer, _ x: Float, _ y: Float) -> Data { message(0x16, [a.rawValue] + be(x) + be(y)) }
 
     /// A Mac key press as KEY (editing and caret keys, as Android keycodes) or TEXT; nil for keys with

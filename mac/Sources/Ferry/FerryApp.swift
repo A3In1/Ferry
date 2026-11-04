@@ -112,6 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }.symbol("cursorarrow.motionlines")
             .tip("Move the pointer past the \(model.cursorEdge.rawValue) edge of the screen to use it on \(peer.name). Press Escape to come back.")
         share.state = model.cursorPeer == peer.id ? .on : .off
+        if model.cursorPeer == peer.id, let problem = model.crossing?.problem {
+            share.title = "Share Cursor (not working)"
+            share.toolTip = problem
+        }
         let dnd = ClosureItem("Do Not Disturb") { [weak self] in
             guard let model = self?.model else { return }
             model.setPhoneDnd(!(model.phoneDnd[peer.id] ?? false), peer: peer.id)
@@ -161,7 +165,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .enabled(updates.feed != nil)
             .tip(updates.feed != nil ? "Look for a new version of Ferry once a day" : "Updates aren't set up for this build yet")
         autoUpdate.state = updates.automatic ? .on : .off
-        var items = [sync, bluetooth, edge,
+        let auth = ClosureItem("Require Mac Password to Mirror") { MacAuth.required.toggle() }
+            .tip("Ask for Touch ID or your Mac password before mirroring or Share Cursor starts (remembered for 5 minutes, until the Mac sleeps or locks)")
+        auth.state = MacAuth.required ? .on : .off
+        var items = [sync, bluetooth, edge, auth,
                      ClosureItem("Set Up Focus Sync…") { [weak self] in self?.model.showFocusSetup() }
                          .enabled(hasPhone).tip(hasPhone ? "Have your phone follow this Mac's Focus" : "Pair a phone first"),
                      .separator(), login, autoUpdate]

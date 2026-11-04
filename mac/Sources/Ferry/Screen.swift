@@ -4,6 +4,7 @@ import Synchronization
 import VideoToolbox
 import FerryCore
 import FerryLogic
+import LocalAuthentication
 
 /// One FSP1 stream to a phone (docs/screen-protocol.md). Writes go out in order. The stream is read
 /// off the main thread: FRAMEs go straight to `video` (if any), other messages arrive on the main actor,
@@ -15,23 +16,27 @@ import FerryLogic
     var onMessage: (Fsp.Message) -> Void = { _ in }
     /// Once, when the first picture is on screen.
     var onVideo: () -> Void = {}
-    private let out: AsyncStream<Data>.Continuation
+    private let out = Outbox()
     private let video: VideoDecoder?
+    /// Latest-wins slots in `out`.
+    nonisolated static let cursorSlot = 0, ackSlot = 1
 
     /// `renderer` nil = control only (cursor crossing).
     init(node: FerryNode, peerId: String, renderer: AVSampleBufferVideoRenderer? = nil) {
         self.peerId = peerId
-        let (queue, out) = AsyncStream.makeStream(of: Data.self)
-        self.out = out
-        video = renderer.map { VideoDecoder(renderer: $0, send: { out.yield($0) }) }
-        out.yield(Fsp.magic + Fsp.start(video: renderer != nil))
+        let out = out
+        video = renderer.map { VideoDecoder(renderer: $0, send: { out.send($0) }) }
+        out.send(Fsp.magic + Fsp.start(video: renderer != nil))
         video?.onShown = { [weak self] in Task { @MainActor in self?.shown() } }
-        Task { await run(node, queue) }
+        Task { await run(node) }
     }
 
     var canControl: Bool { (info?.caps ?? 0) & 2 != 0 }
 
-    func send(_ data: Data) { if isOpen { out.yield(data) } }
+    func send(_ data: Data) { if isOpen { out.send(data) } }
+
+    /// A message only the newest of which matters (cursor moves): replaces one still waiting to go out.
+    func sendLatest(_ data: Data, slot: Int) { if isOpen { out.sendLatest(data, slot: slot) } }
 
     /// Ends our side; the phone then closes its side. No messages after this.
     func finish() {
@@ -44,18 +49,25 @@ import FerryLogic
 
     private func shown() { if isOpen { onVideo() } }
 
-    private func run(_ node: FerryNode, _ queue: AsyncStream<Data>) async {
+    private func run(_ node: FerryNode) async {
         let stream: ScreenStream
         do { stream = try await node.openScreen(peerId: peerId) } catch { return end(4, "\(error)") }
         guard isOpen else { return await stream.finish() } // closed while connecting
         // Neither loop runs on the main actor, so a busy UI can't hold up the wire or the picture.
+        let out = out
         Task.detached(priority: .userInitiated) {
-            for await data in queue {
+            for await item in out.items {
+                let data: Data?
+                switch item {
+                case let .data(d): data = d
+                case let .latest(slot, gen): data = out.take(slot: slot, gen: gen)
+                }
+                guard let data else { continue }
                 do { try await stream.write(data: data) } catch { break }
             }
             await stream.finish()
         }
-        let video = video, out = out
+        let video = video
         let (reason, detail) = await Task.detached(priority: .userInitiated) { () async -> (UInt8, String) in
             var parser = FspParser()
             do {
@@ -75,7 +87,7 @@ import FerryLogic
                         }
                     }
                     // One ACK per chunk, for its newest frame: the phone times write → ACK and sees what's still on the way.
-                    if let newest { out.yield(Fsp.ack(pts: newest)) }
+                    if let newest { out.sendLatest(Fsp.ack(pts: newest), slot: Self.ackSlot) }
                 }
             } catch {
                 return (4, "\(error)")
@@ -298,6 +310,64 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
     }
 }
 
+/// "Require Mac Password to Mirror" (default on): Touch ID or the Mac password before mirroring or
+/// cursor control starts. Remembered for 5 minutes, forgotten when the Mac sleeps, locks or switches user.
+@MainActor enum MacAuth {
+    private static let key = "requireMacAuth"
+    static let remember: TimeInterval = 5 * 60
+    private static var until = Date.distantPast
+    private static var waiting: [@MainActor (Bool) -> Void] = []
+    private static var observers: [NSObjectProtocol] = []
+
+    static var required: Bool {
+        get { UserDefaults.standard.object(forKey: key) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: key)
+            until = .distantPast
+        }
+    }
+
+    /// `done(true)` at once when not required or confirmed recently; else after Touch ID / the password.
+    /// One prompt at a time: callers arriving meanwhile share its answer. `reason` completes "Ferry is trying to …".
+    static func confirm(_ reason: String, done: @escaping @MainActor (Bool) -> Void) {
+        observe()
+        guard required, Date.now >= until else { return done(true) }
+        waiting.append(done)
+        guard waiting.count == 1 else { return }
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+            // No way to ask (no password set on this Mac account): don't lock the owner out.
+            logger.notice("mac auth unavailable: \(error?.localizedDescription ?? "", privacy: .public); allowing")
+            return finish(true)
+        }
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, error in
+            let why = error?.localizedDescription ?? ""
+            Task { @MainActor in
+                logger.notice("mac auth \(ok ? "confirmed" : "refused", privacy: .public) \(why, privacy: .public)")
+                if ok { until = .now + remember }
+                finish(ok)
+            }
+        }
+    }
+
+    private static func finish(_ ok: Bool) {
+        let w = waiting
+        waiting = []
+        w.forEach { $0(ok) }
+    }
+
+    private static func observe() {
+        guard observers.isEmpty else { return }
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            observers.append(ws.addObserver(forName: name, object: nil, queue: .main) { _ in MainActor.assumeIsolated { until = .distantPast } })
+        }
+        observers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil,
+                                                                             queue: .main) { _ in MainActor.assumeIsolated { until = .distantPast } })
+    }
+}
+
 /// "<Phone> — Screen": the phone's screen in a window, with touch, scroll and typing back to it.
 final class ScreenWindow: PeerWindow {
     private(set) var session: ScreenSession?
@@ -307,6 +377,7 @@ final class ScreenWindow: PeerWindow {
     private let reconnect = NSButton(title: "Reconnect", target: nil, action: nil)
     private let overlay = NSBox()
     private let peerName: String
+    private var closed = false
 
     init(model: AppModel, peer: FfiPeer) {
         peerName = peer.name
@@ -378,9 +449,19 @@ final class ScreenWindow: PeerWindow {
 
     @objc private func connect() {
         session?.finish()
+        session = nil
         guard let node = model.node else {
             return show(model.startFailed ? "Ferry couldn't start. Quit Ferry and open it again." : "Ferry is still starting. Try again in a moment.")
         }
+        show("Confirm it's you to mirror \(peerName).", reconnect: false)
+        MacAuth.confirm("show \(peerName)'s screen") { [weak self] ok in
+            guard let self, !self.closed else { return }
+            guard ok else { return self.show("Mirroring needs your Mac password or Touch ID. Click Reconnect to try again.") }
+            self.open(node)
+        }
+    }
+
+    private func open(_ node: FerryNode) {
         show("Waiting for \(peerName)…\nOn the phone, tap Start now to share its screen.", reconnect: false)
         let s = ScreenSession(node: node, peerId: peerId, renderer: screen.display.sampleBufferRenderer)
         s.onMessage = { [weak self] in self?.handle($0) }
@@ -426,6 +507,7 @@ final class ScreenWindow: PeerWindow {
     }
 
     override func windowWillClose(_ notification: Notification) {
+        closed = true
         session?.finish()
         session = nil
         super.windowWillClose(notification)
