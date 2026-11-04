@@ -77,6 +77,11 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   ACKs (older Macs): write timing (blocked > 50% of two windows in a row → × 0.75, < 10% for three → × 1.15;
   one write ≥ 400 ms → behind). Floor max(500 kbps, ceiling / 8). Applied with
   `PARAMETER_KEY_VIDEO_BITRATE`, kept across rotations, and reported as QUALITY.
+- Mac display: VideoToolbox decodes each FRAME synchronously (hardware, real-time) on one background
+  queue; the picture goes to an AVSampleBufferDisplayLayer marked display-immediately (no timebase, no
+  reorder wait). Frames that pile up behind a slow decode are decoded (later P-frames need them) but only
+  the newest is shown. A decode error or dead session (sleep, GPU change) → new session + KEYFRAME (at
+  most 1/s); a failed or stuck layer is flushed. Nothing per frame touches the main thread.
 - Measurements: FRAME `pts_us` is the capture time (surface input: `System.nanoTime` µs on the phone). The
   clocks differ, so the Mac reports one-way delay as (received − pts) above the lowest seen this session
   (= queueing the link added), plus the phone's write → ACK round trip from STATS. Logs: phone

@@ -20,6 +20,7 @@ import Testing
         let pts = UInt64(1_000_000 + i * 16_667)
         let late: UInt64 = i % 10 == 9 ? 20_000 : 0
         st.received(pts: pts, bytes: 10_000, config: false, at: pts + 5_000 + late)
+        st.decoded(us: i == 0 ? 6_000 : 1_000)
         st.shown(after: 2_000)
     }
     st.received(pts: 0, bytes: 30, config: true, at: 10) // config: counted, no delay sample
@@ -28,7 +29,7 @@ import Testing
     #expect(st.report(at: 1_999_999) == nil)
     let line = st.report(at: 2_000_000)!
     #expect(line.contains("received 60.5 fps (4.80 Mbps), shown 60.0 fps, behind 1, dropped 2"))
-    #expect(line.contains("recv→shown 2.0 ms (max 2.0)"))
+    #expect(line.contains("decode 1.0 ms (max 6.0), recv→shown 2.0 ms (max 2.0)"))
     #expect(line.contains("delay +2.0 ms (max 20.0, jitter 3.9)")) // 12 of 120 frames 20 ms above best; 23 jumps of 20 ms over 119 gaps
     #expect(line.hasSuffix("| phone: no STATS"))
 

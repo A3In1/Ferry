@@ -1,5 +1,7 @@
 import AVFoundation
 import AppKit
+import Synchronization
+import VideoToolbox
 import FerryCore
 import FerryLogic
 
@@ -96,13 +98,15 @@ import FerryLogic
     }
 }
 
-/// Annex-B FRAMEs → AVCC sample buffers into a display layer's renderer (which decodes them), on one
-/// background queue: AVSampleBufferVideoRenderer may be fed from any thread. The format description is
-/// reused until SPS/PPS change. All sessions share the queue, so a reconnect's flush lands after the old
-/// session's last frame.
 /// Microseconds on a monotonic clock (stats and latency; not wall time).
 func monotonicMicros() -> UInt64 { DispatchTime.now().uptimeNanoseconds / 1000 }
 
+/// Annex-B FRAMEs → AVCC → VideoToolbox (hardware, real-time) → each decoded picture into the display
+/// layer's renderer, marked to show at once: no timebase, no reorder wait (the phone sends no B-frames),
+/// and we know when every picture is decoded and shown. On one background queue (the renderer may be fed
+/// from any thread; nothing per frame touches the main thread). When frames pile up behind a slow decode,
+/// the older ones are decoded but not shown. The format description is reused until SPS/PPS change. All
+/// sessions share the queue, so a reconnect's flush lands after the old session's last frame.
 final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`; onShown is set before the first frame
     private static let queue = DispatchQueue(label: "ferry.screen.video", qos: .userInteractive)
     private let renderer: AVSampleBufferVideoRenderer
@@ -110,10 +114,15 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
     var onShown: @Sendable () -> Void = {}
     private var sps: Data?, pps: Data?
     private var format: CMVideoFormatDescription?
+    private var session: VTDecompressionSession?
+    private var pictureFormat: CMVideoFormatDescription?
     private var nals: [Range<Int>] = [], slices: [Range<Int>] = []
     private var needKeyframe = true, shown = false, stopped = false
+    private var busy = 0 // frames in a row the layer wasn't ready for
     private var lastKeyframeAsk = DispatchTime(uptimeNanoseconds: 0)
     private var stats = ScreenStats(now: monotonicMicros())
+    /// FRAMEs handed over and not yet decoded.
+    private let waiting = Atomic<Int>(0)
 
     /// `send` writes a Mac → phone message (KEYFRAME requests).
     init(renderer: AVSampleBufferVideoRenderer, send: @escaping @Sendable (Data) -> Void) {
@@ -124,10 +133,12 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
 
     /// `at`: when the FRAME arrived (monotonicMicros).
     func decode(pts: UInt64, flags: UInt8, _ data: Data, at: UInt64) {
+        waiting.add(1, ordering: .relaxed)
         Self.queue.async { [self] in
+            let newer = waiting.subtract(1, ordering: .relaxed).newValue
             guard !stopped else { return }
             stats.received(pts: pts, bytes: data.count, config: flags & 2 != 0, at: at)
-            if enqueue(pts, flags, data) { stats.shown(after: monotonicMicros() - at) }
+            process(pts, flags, data, at: at, show: newer == 0)
             if let line = stats.report(at: monotonicMicros()) { logger.notice("\(line, privacy: .public)") }
         }
     }
@@ -136,11 +147,21 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
     func phone(_ s: Fsp.PhoneStats) { Self.queue.async { [self] in stats.phone(s) } }
 
     /// No more frames from this session go to the renderer.
-    func stop() { Self.queue.async { [self] in stopped = true } }
+    func stop() {
+        Self.queue.async { [self] in
+            stopped = true
+            reset()
+        }
+    }
 
-    /// True if a picture went to the renderer.
-    private func enqueue(_ pts: UInt64, _ flags: UInt8, _ data: Data) -> Bool {
-        data.withUnsafeBytes { raw in
+    private func reset() {
+        if let session { VTDecompressionSessionInvalidate(session) }
+        session = nil
+    }
+
+    /// `show` false: newer frames are already waiting, so decode this one (they need it) but don't display it.
+    private func process(_ pts: UInt64, _ flags: UInt8, _ data: Data, at: UInt64, show: Bool) {
+        let sample: CMSampleBuffer? = data.withUnsafeBytes { raw in
             nals.removeAll(keepingCapacity: true)
             slices.removeAll(keepingCapacity: true)
             H264.nalRanges(raw, into: &nals)
@@ -157,26 +178,91 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
             }
             if config, let sps, let pps {
                 format = try? CMVideoFormatDescription(h264ParameterSets: [sps, pps], nalUnitHeaderLength: 4)
+                if let session, let format, !VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: format) { reset() }
             }
-            guard !slices.isEmpty else { return false }
-            if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
-                renderer.flush()
-                needKeyframe = true
-            }
-            guard let format, key || !needKeyframe, let sample = sampleBuffer(raw, pts: pts, key: key, format: format)
-            else {
+            guard !slices.isEmpty else { return nil }
+            guard let format, key || !needKeyframe, let sample = sampleBuffer(raw, pts: pts, key: key, format: format) else {
                 stats.dropped()
                 askKeyframe()
-                return false
+                return nil
             }
-            needKeyframe = false
-            renderer.enqueue(sample)
-            if !shown {
-                shown = true
-                onShown()
-            }
-            return true
+            return sample
         }
+        guard let sample, let format else { return }
+        if session == nil { session = makeSession(format) }
+        guard let session else { return askKeyframe() }
+        let start = monotonicMicros()
+        let out = Decoded()
+        // Synchronous: the handler runs before DecodeFrame returns; WaitForAsynchronousFrames makes sure of it.
+        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [._1xRealTimePlayback], infoFlagsOut: nil) {
+            status, _, image, _, _ in
+            out.status = status
+            out.image = image
+        }
+        VTDecompressionSessionWaitForAsynchronousFrames(session)
+        guard status == noErr, out.status == noErr, let image = out.image else {
+            // Bad data, or the session died (sleep, GPU change): start over from a keyframe.
+            logger.notice("screen: decode failed (\(status), \(out.status)); asking for a keyframe")
+            reset()
+            stats.dropped()
+            askKeyframe()
+            return
+        }
+        needKeyframe = false
+        stats.decoded(us: monotonicMicros() - start)
+        // Behind: newer frames waiting, or the layer still busy with the last picture. Show only the newest.
+        guard show else { return stats.skippedBehind() }
+        if !renderer.isReadyForMoreMediaData {
+            busy += 1
+            guard busy >= 10 else { return stats.skippedBehind() }
+            renderer.flush() // stuck for 10 frames: start it over rather than freeze
+        }
+        busy = 0
+        if renderer.status == .failed {
+            logger.notice("screen: display layer failed (\(String(describing: self.renderer.error), privacy: .public)); flushing")
+            renderer.flush()
+        }
+        guard let picture = picture(image, pts: pts) else { return }
+        renderer.enqueue(picture)
+        stats.shown(after: monotonicMicros() - at)
+        if !shown {
+            shown = true
+            onShown()
+        }
+    }
+
+    private final class Decoded: @unchecked Sendable { // written by the synchronous decode callback, read right after
+        var status: OSStatus = noErr
+        var image: CVImageBuffer?
+    }
+
+    private func makeSession(_ format: CMVideoFormatDescription) -> VTDecompressionSession? {
+        let spec = [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true] as CFDictionary
+        let pixels = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                      kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                      kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
+        var s: VTDecompressionSession?
+        let status = VTDecompressionSessionCreate(allocator: nil, formatDescription: format, decoderSpecification: spec,
+                                                  imageBufferAttributes: pixels, outputCallback: nil, decompressionSessionOut: &s)
+        guard status == noErr, let s else {
+            logger.error("screen: no video decoder (\(status))")
+            return nil
+        }
+        VTSessionSetProperty(s, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        return s
+    }
+
+    /// A decoded picture as a sample the layer shows at once.
+    private func picture(_ image: CVImageBuffer, pts: UInt64) -> CMSampleBuffer? {
+        if pictureFormat.map({ !CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: image) }) ?? true {
+            pictureFormat = try? CMVideoFormatDescription(imageBuffer: image)
+        }
+        guard let pictureFormat else { return nil }
+        let timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMTime(value: CMTimeValue(pts), timescale: 1_000_000),
+                                        decodeTimeStamp: .invalid)
+        guard let sample = try? CMSampleBuffer(imageBuffer: image, formatDescription: pictureFormat, sampleTiming: timing) else { return nil }
+        sample.sampleAttachments[0][.displayImmediately] = true
+        return sample
     }
 
     private func askKeyframe() {
@@ -186,7 +272,7 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
         send(Fsp.keyframe)
     }
 
-    /// One sample in CoreMedia-owned memory, filled straight from the FRAME payload.
+    /// One compressed sample in CoreMedia-owned memory, filled straight from the FRAME payload.
     private func sampleBuffer(_ raw: UnsafeRawBufferPointer, pts: UInt64, key: Bool, format: CMVideoFormatDescription) -> CMSampleBuffer? {
         let size = H264.avccSize(slices)
         var block: CMBlockBuffer?
@@ -203,7 +289,6 @@ final class VideoDecoder: @unchecked Sendable { // mutable state only on `queue`
                                             decodeTimeStamp: .invalid)
             let sample = try CMSampleBuffer(dataBuffer: block, formatDescription: format, numSamples: 1,
                                             sampleTimings: [timing], sampleSizes: [size])
-            sample.sampleAttachments[0][.displayImmediately] = true
             if !key { sample.sampleAttachments[0][.notSync] = true }
             return sample
         } catch {
@@ -273,6 +358,8 @@ final class ScreenWindow: PeerWindow {
                 b.setAccessibilityLabel(name)
                 return b
             })
+        nav.spacing = 2
+        nav.frame = NSRect(origin: .zero, size: nav.fittingSize) // a zero frame's autoresizing constraints fight the stack's
         let bar = NSTitlebarAccessoryViewController()
         bar.view = nav
         bar.layoutAttribute = .trailing
@@ -357,11 +444,18 @@ final class ScreenView: NSView {
         super.init(frame: frame)
         display.videoGravity = .resizeAspect
         display.backgroundColor = NSColor.black.cgColor
+        // Layer-hosting: AppKit doesn't turn off implicit animations, so a live resize would ease every frame.
+        display.actions = ["bounds": NSNull(), "position": NSNull(), "frame": NSNull(), "contents": NSNull()]
         layer = display // layer-hosting: the overlay lives in a sibling view
         wantsLayer = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        display.contentsScale = window?.backingScaleFactor ?? 2
+    }
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }

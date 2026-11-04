@@ -43,7 +43,7 @@ public enum Fsp {
 
     // MARK: Mac → phone
 
-    public static func start(maxSize: UInt16 = 1280, bitrate: UInt32 = 8_000_000, video: Bool) -> Data {
+    public static func start(maxSize: UInt16 = 1920, bitrate: UInt32 = 8_000_000, video: Bool) -> Data {
         message(0x20, be(maxSize) + be(bitrate) + [video ? 1 : 0])
     }
     public static func touch(_ a: Pointer, _ x: Float, _ y: Float) -> Data { message(0x10, [a.rawValue] + be(x) + be(y)) }

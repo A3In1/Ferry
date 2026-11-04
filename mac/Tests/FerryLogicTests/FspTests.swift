@@ -22,7 +22,7 @@ private let expected: [Fsp.Message] = [
     let got = try p.push(phoneStream)
     #expect(got == expected)
     // Writer layout matches the spec byte for byte.
-    #expect(Fsp.start(video: true) == bytes([0x20, 0, 0, 0, 7, 0x05, 0x00, 0x00, 0x7A, 0x12, 0x00, 1]))
+    #expect(Fsp.start(video: true) == bytes([0x20, 0, 0, 0, 7, 0x07, 0x80, 0x00, 0x7A, 0x12, 0x00, 1]))
     #expect(Fsp.touch(.move, 0.5, 1) == bytes([0x10, 0, 0, 0, 9, 2, 0x3F, 0, 0, 0, 0x3F, 0x80, 0, 0]))
     #expect(Fsp.nav(.home) == bytes([0x14, 0, 0, 0, 1, 2]))
     #expect(Fsp.keyframe == bytes([0x15, 0, 0, 0, 0]))

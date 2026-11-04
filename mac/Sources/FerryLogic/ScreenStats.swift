@@ -10,6 +10,7 @@ public struct ScreenStats: Sendable {
     private var start: UInt64
     private var received = 0, bytes = 0, shown = 0, behind = 0, dropped = 0
     private var showSum: UInt64 = 0, showMax: UInt64 = 0
+    private var decodeSum: UInt64 = 0, decodeMax: UInt64 = 0, decodeN = 0
     private var best: Int64?
     private var delaySum: Int64 = 0, delayMax: Int64 = 0, delayN = 0
     private var jitterSum: Int64 = 0, jitterN = 0, prev: Int64?
@@ -35,11 +36,18 @@ public struct ScreenStats: Sendable {
         delayN += 1
     }
 
-    /// A picture went to the display layer `us` after its FRAME arrived (queue + decode).
+    /// A picture went to the display layer `us` after its FRAME arrived (our queue + decode).
     public mutating func shown(after us: UInt64) {
         shown += 1
         showSum += us
         showMax = max(showMax, us)
+    }
+
+    /// One frame took `us` to decode.
+    public mutating func decoded(us: UInt64) {
+        decodeN += 1
+        decodeSum += us
+        decodeMax = max(decodeMax, us)
     }
 
     /// Decoded but not displayed because newer frames were already waiting.
@@ -52,24 +60,26 @@ public struct ScreenStats: Sendable {
     public mutating func report(at now: UInt64) -> String? {
         guard now >= start + Self.window else { return nil }
         let line = Self.line(seconds: Double(now - start) / 1e6, received: received, bytes: bytes, shown: shown, behind: behind,
-                             dropped: dropped, showAvgMs: shown > 0 ? Double(showSum) / Double(shown) / 1000 : nil,
+                             dropped: dropped, decodeAvgMs: decodeN > 0 ? Double(decodeSum) / Double(decodeN) / 1000 : nil,
+                             decodeMaxMs: Double(decodeMax) / 1000, showAvgMs: shown > 0 ? Double(showSum) / Double(shown) / 1000 : nil,
                              showMaxMs: Double(showMax) / 1000,
                              delayAvgMs: delayN > 0 ? Double(delaySum) / Double(delayN) / 1000 : nil,
                              delayMaxMs: Double(delayMax) / 1000,
                              jitterMs: jitterN > 0 ? Double(jitterSum) / Double(jitterN) / 1000 : nil, phone: phone)
         start = now
         received = 0; bytes = 0; shown = 0; behind = 0; dropped = 0
-        showSum = 0; showMax = 0; delaySum = 0; delayMax = 0; delayN = 0; jitterSum = 0; jitterN = 0
+        showSum = 0; showMax = 0; decodeSum = 0; decodeMax = 0; decodeN = 0; delaySum = 0; delayMax = 0; delayN = 0; jitterSum = 0; jitterN = 0
         phone = nil
         return line
     }
 
-    static func line(seconds s: Double, received: Int, bytes: Int, shown: Int, behind: Int, dropped: Int, showAvgMs: Double?,
+    static func line(seconds s: Double, received: Int, bytes: Int, shown: Int, behind: Int, dropped: Int, decodeAvgMs: Double?,
+                     decodeMaxMs: Double, showAvgMs: Double?,
                      showMaxMs: Double, delayAvgMs: Double?, delayMaxMs: Double, jitterMs: Double?, phone: Fsp.PhoneStats?) -> String {
         func f(_ v: Double?, _ digits: Int = 1) -> String { v.map { String(format: "%.\(digits)f", $0) } ?? "-" }
         func t(_ v: UInt16) -> Double? { v == Fsp.PhoneStats.unknown ? nil : Double(v) / 10 }
         var out = "screen: received \(f(Double(received) / s)) fps (\(f(Double(bytes) * 8 / s / 1e6, 2)) Mbps), shown \(f(Double(shown) / s)) fps"
-            + ", behind \(behind), dropped \(dropped), recv→shown \(f(showAvgMs)) ms (max \(f(showMaxMs)))"
+            + ", behind \(behind), dropped \(dropped), decode \(f(decodeAvgMs)) ms (max \(f(decodeMaxMs))), recv→shown \(f(showAvgMs)) ms (max \(f(showMaxMs)))"
             + ", delay +\(f(delayAvgMs)) ms (max \(f(delayMaxMs)), jitter \(f(jitterMs)))"
         guard let p = phone else { return out + " | phone: no STATS" }
         let ps = Double(max(p.windowMs, 1)) / 1000
