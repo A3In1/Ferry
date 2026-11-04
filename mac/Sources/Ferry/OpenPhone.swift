@@ -97,8 +97,10 @@ extension AppModel {
                 if status != 0, Date.now.timeIntervalSince(started) < 3 { return self.phoneFailed(peer, err) }
                 // Window closed after a real USB session: set wireless up for next time (it restarts adb,
                 // so it's safe only now that nothing is using the connection).
-                if over == "USB", self.usbSerial(peer.id) != nil || (await self.singleUsbSerial(adb: adb)) != nil {
-                    await self.rememberWireless(peer.id, usbSerial: serial, adb: adb)
+                if over == "USB" {
+                    var cablePresent = self.usbSerial(peer.id) != nil
+                    if !cablePresent { cablePresent = await self.singleUsbSerial(adb: adb) != nil }
+                    if cablePresent { await self.rememberWireless(peer.id, usbSerial: serial, adb: adb) }
                 }
             }
         }
