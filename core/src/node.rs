@@ -363,25 +363,38 @@ impl Node {
     ) -> Result<SendReport> {
         let files: Vec<(PathBuf, Option<String>)> =
             paths.iter().map(|p| (p.clone(), None)).collect();
-        self.send_named(peer_id, &files).await
+        self.send_named(peer_id, &files, None).await
     }
 
-    /// [`Node::send_files`] with an optional display name per file (see [`file::send_named`]).
+    /// [`Node::send_files`] with an optional display name per file (see [`file::send_named`]),
+    /// and optionally the transfer id to use (random if `None`), for [`Node::cancel_transfer`].
     pub async fn send_named(
         self: &Arc<Self>,
         peer_id: &str,
         files: &[(PathBuf, Option<String>)],
+        transfer_id: Option<[u8; 16]>,
     ) -> Result<SendReport> {
         let id = self.trusted(peer_id)?;
+        let tid = transfer_id.unwrap_or_else(rand::random);
+        let cancels = self.receiver.cancels();
         let conn = self.session(id).await?;
-        match file::send_named(&conn, files, self.events.clone()).await {
+        match file::send_named(&conn, files, tid, self.events.clone(), cancels).await {
             // the cached session died under us (peer restarted): one retry on a fresh one
-            Err(_) if conn.close_reason().is_some() => {
+            Err(e)
+                if conn.close_reason().is_some()
+                    && e.downcast_ref::<file::Cancelled>().is_none() =>
+            {
                 let conn = self.session(id).await?;
-                file::send_named(&conn, files, self.events.clone()).await
+                file::send_named(&conn, files, tid, self.events.clone(), cancels).await
             }
             r => r,
         }
+    }
+
+    /// Cancels a live transfer in either direction (both sides then report it cancelled and
+    /// the receiver deletes its partial files). False if no transfer has this id.
+    pub fn cancel_transfer(&self, transfer_id: &[u8; 16]) -> bool {
+        file::cancel(self.receiver.cancels(), transfer_id)
     }
 
     /// Opens a fresh session to `peer_id`, replacing any current one, so the handshake tells

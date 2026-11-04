@@ -6,6 +6,10 @@
 //!   DataHeader, raw bytes from `offset` to end) · S→R ItemDone · R→S ItemResult.
 //! Partial files survive in `<dest>/.ferry-partial/` so a retried offer resumes.
 //!
+//! Cancel: either side resets every stream it writes and stops every stream it reads with
+//! [`ERR_CANCELLED`]; the other side reads that code as "cancelled on the other device".
+//! A cancelled transfer's partial files are deleted (a lost connection keeps them for resume).
+//!
 //! The receiver registers a transfer before sending OfferReply, so a data stream
 //! can never arrive for a transfer it does not know yet.
 
@@ -17,10 +21,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{
+    Connection, ReadError, ReadExactError, RecvStream, SendStream, StoppedError, VarInt, WriteError,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::channel::{CH_FILE, read_msg, write_msg, write_prefix};
 use crate::proto::{DataHeader, FileItem, ItemAccept, ItemDone, ItemResult, Offer, OfferReply};
@@ -29,6 +36,7 @@ use crate::sanitize;
 /// Progress and results, for CLI output and app UI.
 #[derive(Debug, Clone)]
 pub enum FileEvent {
+    /// Receiver: a peer offered files.
     Offered {
         transfer_id: [u8; 16],
         names: Vec<String>,
@@ -50,6 +58,121 @@ pub enum FileEvent {
         index: u32,
         error: String,
     },
+    /// Sender: we are about to offer these files (sizes as stat'ed).
+    Sending {
+        transfer_id: [u8; 16],
+        names: Vec<String>,
+        total_bytes: u64,
+    },
+    /// Either side: the transfer stopped because a user cancelled it, here or on the peer.
+    /// Last event of the transfer; items not yet saved won't be.
+    Cancelled {
+        transfer_id: [u8; 16],
+        by_peer: bool,
+    },
+}
+
+/// Stream reset / stop code (application level): the user cancelled the transfer.
+pub const ERR_CANCELLED: u32 = 0x07;
+
+/// Error of a send (or receive) that a user cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled {
+    pub by_peer: bool,
+}
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.by_peer {
+            "cancelled on the other device"
+        } else {
+            "cancelled"
+        })
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// One live transfer's cancel switch. The first trigger decides who cancelled.
+#[derive(Default)]
+pub struct Cancel {
+    token: CancellationToken,
+    by_peer: Mutex<Option<bool>>,
+}
+
+impl Cancel {
+    fn trigger(&self, by_peer: bool) {
+        let mut who = self.by_peer.lock().unwrap();
+        if who.is_none() {
+            *who = Some(by_peer);
+            self.token.cancel();
+        }
+    }
+
+    /// `Some(by_peer)` once cancelled.
+    fn who(&self) -> Option<bool> {
+        *self.by_peer.lock().unwrap()
+    }
+}
+
+/// Live transfers in both directions, by id, for [`cancel`].
+pub type Cancels = Arc<Mutex<HashMap<[u8; 16], Arc<Cancel>>>>;
+
+/// Cancels a live transfer (either direction); false if none has this id.
+pub fn cancel(cancels: &Cancels, id: &[u8; 16]) -> bool {
+    let c = cancels.lock().unwrap().get(id).cloned();
+    c.inspect(|c| c.trigger(false)).is_some()
+}
+
+/// Registers a transfer's cancel switch for as long as it lives.
+struct CancelEntry(Cancels, [u8; 16], Arc<Cancel>);
+
+impl CancelEntry {
+    fn new(cancels: &Cancels, id: [u8; 16]) -> Result<Self> {
+        let c = Arc::new(Cancel::default());
+        let mut map = cancels.lock().unwrap();
+        if map.contains_key(&id) {
+            bail!("transfer {} is already in progress", hex::encode(id));
+        }
+        map.insert(id, c.clone());
+        Ok(Self(cancels.clone(), id, c))
+    }
+}
+
+impl Drop for CancelEntry {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().remove(&self.1);
+    }
+}
+
+/// True if `e` came from the peer cancelling (a stream reset or stopped with [`ERR_CANCELLED`]).
+fn peer_cancelled(e: &anyhow::Error) -> bool {
+    fn coded(e: &(dyn std::error::Error + 'static)) -> bool {
+        let code = match (e.downcast_ref(), e.downcast_ref(), e.downcast_ref()) {
+            (Some(ReadError::Reset(c)), _, _)
+            | (_, Some(ReadExactError::ReadError(ReadError::Reset(c))), _)
+            | (_, _, Some(WriteError::Stopped(c))) => *c,
+            _ => return false,
+        };
+        code == VarInt::from_u32(ERR_CANCELLED)
+    }
+    e.chain().any(|c| {
+        c.downcast_ref::<Cancelled>().is_some_and(|c| c.by_peer)
+            || coded(c)
+            // tokio's AsyncRead/AsyncWrite wrap the stream errors in io::Error
+            || (c.downcast_ref::<std::io::Error>())
+                .and_then(|io| io.get_ref())
+                .is_some_and(|inner| coded(inner))
+    })
+}
+
+/// Resolves only if the peer stopped our stream with [`ERR_CANCELLED`].
+async fn stopped_by_cancel(
+    stopped: impl Future<Output = std::result::Result<Option<VarInt>, StoppedError>>,
+) {
+    if stopped.await.ok().flatten() != Some(VarInt::from_u32(ERR_CANCELLED)) {
+        std::future::pending::<()>().await;
+    }
 }
 
 pub type EventSink = Arc<dyn Fn(FileEvent) + Send + Sync>;
@@ -80,6 +203,7 @@ pub struct Receiver {
     events: EventSink,
     state: Mutex<State>,
     parts_in_use: PartsInUse,
+    cancels: Cancels,
 }
 
 #[derive(Default)]
@@ -98,14 +222,19 @@ struct Transfer {
     id: [u8; 16],
     slots: Vec<Option<Slot>>, // None = declined
     parts_in_use: PartsInUse,
+    cancel: Arc<Cancel>,
 }
 
 /// Held by the control handler and every data handler, so a partial is released only
-/// once nothing can still write to it.
+/// once nothing can still write to it. A cancelled transfer's partials go with it.
 impl Drop for Transfer {
     fn drop(&mut self) {
+        let cancelled = self.cancel.who().is_some();
         let mut parts = self.parts_in_use.lock().unwrap();
         for slot in self.slots.iter().flatten() {
+            if cancelled {
+                let _ = fs::remove_file(&slot.part); // gone already if the item was saved
+            }
             parts.remove(&slot.part);
         }
     }
@@ -142,7 +271,13 @@ impl Receiver {
             events,
             state: Mutex::default(),
             parts_in_use: PartsInUse::default(),
+            cancels: Cancels::default(),
         })
+    }
+
+    /// Live transfers in both directions; pass to [`send_named`] so [`cancel`] finds sends too.
+    pub fn cancels(&self) -> &Cancels {
+        &self.cancels
     }
 
     /// Handle a CH_FILE bi stream (prefix already consumed by the node).
@@ -175,15 +310,57 @@ impl Receiver {
                 .fold(0u64, |a, i| a.saturating_add(i.size)),
         });
 
+        let entry = CancelEntry::new(&self.cancels, id)?;
+        let cancel = entry.2.clone();
         // The accept callback may block on a UI prompt; preparing touches the disk.
         let this = self.clone();
+        let c = cancel.clone();
         let transfer = tokio::task::spawn_blocking(move || {
             let accepted = (this.accept)(&offer);
-            this.prepare(id, offer.items, &accepted)
+            this.prepare(id, offer.items, &accepted, c)
         })
         .await??;
         let _registered = Registered(self.clone(), transfer.clone());
 
+        let peer_stop = stopped_by_cancel(send.stopped());
+        let r = tokio::select! {
+            r = self.run_control(&transfer, &mut send, &mut recv) => r,
+            () = cancel.token.cancelled() => Err(anyhow!("cancelled")),
+            () = peer_stop => Err(Cancelled { by_peer: true }.into()),
+        };
+        if let Err(e) = &r
+            && peer_cancelled(e)
+        {
+            cancel.trigger(true);
+        }
+        match (r, cancel.who()) {
+            (Err(_), Some(by_peer)) => {
+                let _ = send.reset(ERR_CANCELLED.into());
+                let _ = recv.stop(ERR_CANCELLED.into());
+                drop(entry); // cancel_transfer is false once the event is out
+                (self.events)(FileEvent::Cancelled {
+                    transfer_id: id,
+                    by_peer,
+                });
+                tracing::info!(
+                    "transfer {} cancelled{}",
+                    hex::encode(&id[..4]),
+                    if by_peer { " by the sender" } else { "" }
+                );
+                Ok(())
+            }
+            (r, _) => r,
+        }
+    }
+
+    /// Reply to the offer, then verify and place each item as the sender reports it done.
+    async fn run_control(
+        &self,
+        transfer: &Transfer,
+        send: &mut SendStream,
+        recv: &mut RecvStream,
+    ) -> Result<()> {
+        let id = transfer.id;
         let reply = OfferReply {
             items: (transfer.slots.iter())
                 .map(|s| ItemAccept {
@@ -192,12 +369,12 @@ impl Receiver {
                 })
                 .collect(),
         };
-        write_msg(&mut send, &reply).await?;
+        write_msg(send, &reply).await?;
 
         let mut finished = vec![false; transfer.slots.len()];
         let mut pending = transfer.slots.iter().flatten().count();
         while pending > 0 {
-            let done: ItemDone = read_msg(&mut recv)
+            let done: ItemDone = read_msg(recv)
                 .await
                 .context("control stream ended with items unfinished")?;
             let i = done.index as usize;
@@ -208,7 +385,7 @@ impl Receiver {
                 bail!("duplicate ItemDone for item {i}");
             }
             pending -= 1;
-            let result = match self.finish_item(slot, &done.blake3, &send).await {
+            let result = match self.finish_item(slot, &done.blake3, send).await {
                 Ok(path) => {
                     let saved_as = path
                         .file_name()
@@ -228,6 +405,10 @@ impl Receiver {
                     }
                 }
                 Err(e) => {
+                    // a reset data stream, not a bad file
+                    if peer_cancelled(&e) || transfer.cancel.who().is_some() {
+                        return Err(e);
+                    }
                     let error = format!("{e:#}");
                     (self.events)(FileEvent::Failed {
                         transfer_id: id,
@@ -242,7 +423,7 @@ impl Receiver {
                     }
                 }
             };
-            write_msg(&mut send, &result).await?;
+            write_msg(send, &result).await?;
         }
         let _ = send.finish();
         Ok(())
@@ -281,7 +462,19 @@ impl Receiver {
         if !claimed {
             bail!("second data stream for item {}", h.index);
         }
-        let res = self.receive(id, h.index, slot, &mut recv).await;
+        let res = tokio::select! {
+            r = self.receive(id, h.index, slot, &mut recv) => r,
+            () = transfer.cancel.token.cancelled() => Err(anyhow!("cancelled")),
+        };
+        if let Err(e) = &res {
+            if peer_cancelled(e) {
+                // before Done, so the control handler sees a cancel rather than a failed item
+                transfer.cancel.trigger(true);
+            }
+            if transfer.cancel.who().is_some() {
+                let _ = recv.stop(ERR_CANCELLED.into());
+            }
+        }
         slot.data.send_replace(Data::Done(
             res.as_ref().map(|h| *h).map_err(|e| format!("{e:#}")),
         ));
@@ -294,6 +487,7 @@ impl Receiver {
         id: [u8; 16],
         items: Vec<FileItem>,
         accepted: &[bool],
+        cancel: Arc<Cancel>,
     ) -> Result<Arc<Transfer>> {
         let partial_dir = self.dest_dir.join(PARTIAL_DIR);
         if accepted.iter().any(|&a| a) {
@@ -307,6 +501,7 @@ impl Receiver {
             id,
             slots: Vec::with_capacity(items.len()),
             parts_in_use: self.parts_in_use.clone(),
+            cancel,
         };
         // one wait for the whole offer: per item, a big retried offer could wait for hours
         let deadline = Instant::now() + PART_WAIT;
@@ -419,7 +614,12 @@ impl Receiver {
         // The data stream may still be in flight; give up if the connection dies first.
         let data = tokio::select! {
             d = rx.wait_for(|d| matches!(d, Data::Done(_))) => d.map(|d| d.clone())?,
-            _ = send.stopped() => bail!("connection lost before data arrived"),
+            s = send.stopped() => {
+                if s.ok().flatten() == Some(VarInt::from_u32(ERR_CANCELLED)) {
+                    return Err(Cancelled { by_peer: true }.into());
+                }
+                bail!("connection lost before data arrived")
+            }
         };
         let Data::Done(hash) = data else {
             unreachable!()
@@ -441,11 +641,14 @@ impl Receiver {
 
 /// Send regular files over an established session connection, with an optional display
 /// name per file. Android passes shared `content://` files as `/proc/self/fd/N`, whose own
-/// name means nothing to the receiver.
+/// name means nothing to the receiver. `id` is the transfer id (16 random bytes; the app
+/// may pick it, to cancel the send via [`cancel`] before any event arrives).
 pub async fn send_named(
     conn: &Connection,
     files: &[(PathBuf, Option<String>)],
+    id: [u8; 16],
     events: EventSink,
+    cancels: &Cancels,
 ) -> Result<SendReport> {
     let start = Instant::now();
     let mut items = Vec::with_capacity(files.len());
@@ -456,102 +659,56 @@ pub async fn send_named(
         }
         items.push(item);
     }
-    let id: [u8; 16] = rand::random();
-    let (mut send, mut recv) = conn.open_bi().await?;
-    write_prefix(&mut send, CH_FILE).await?;
-    let offer = Offer {
-        transfer_id: id.to_vec(),
-        items,
-    };
-    write_msg(&mut send, &offer).await?;
-    let items = offer.items;
-    let reply: OfferReply = read_msg(&mut recv).await.context("read offer reply")?;
-    if reply.items.len() != items.len() {
-        bail!(
-            "peer replied for {} items, offered {}",
-            reply.items.len(),
-            items.len()
-        );
-    }
-    let mut accepted = Vec::new();
-    for (i, a) in reply.items.iter().enumerate().filter(|(_, a)| a.accepted) {
-        if a.offset > items[i].size {
-            bail!("peer asked to resume {} past its end", items[i].name);
+    let entry = CancelEntry::new(cancels, id)?;
+    let cancel = entry.2.clone();
+    (events)(FileEvent::Sending {
+        transfer_id: id,
+        names: items.iter().map(|i| sanitize::file_name(&i.name)).collect(),
+        total_bytes: items.iter().fold(0u64, |a, i| a.saturating_add(i.size)),
+    });
+    let (mut send, mut recv) = tokio::select! {
+        s = conn.open_bi() => s?,
+        () = cancel.token.cancelled() => {
+            drop(entry);
+            (events)(FileEvent::Cancelled { transfer_id: id, by_peer: false });
+            return Err(Cancelled { by_peer: false }.into());
         }
-        accepted.push((i, a.offset));
-    }
-
-    let data = async {
-        let mut queue = accepted.iter();
-        let mut tasks = JoinSet::new();
-        let mut bytes = 0;
-        loop {
-            while tasks.len() < PARALLEL_STREAMS {
-                let Some(&(i, offset)) = queue.next() else {
-                    break;
-                };
-                let job = (
-                    conn.clone(),
-                    files[i].0.clone(),
-                    id,
-                    i as u32,
-                    offset,
-                    items[i].size,
-                    events.clone(),
-                );
-                tasks.spawn(send_item(job));
-            }
-            let Some(joined) = tasks.join_next().await else {
-                break;
-            };
-            let (index, hash, n) = joined??;
-            bytes += n;
-            write_msg(
-                &mut send,
-                &ItemDone {
-                    index,
-                    blake3: hash.as_bytes().to_vec(),
-                },
-            )
-            .await?;
-        }
-        anyhow::Ok(bytes)
     };
-    let results = async {
-        let (mut ok, mut failed) = (0u32, Vec::new());
-        for _ in 0..accepted.len() {
-            let r: ItemResult = read_msg(&mut recv).await.context("read item result")?;
-            if r.index as usize >= items.len() {
-                bail!("result for unknown item {}", r.index);
-            }
-            if r.ok {
-                ok += 1;
-                (events)(FileEvent::Saved {
-                    transfer_id: id,
-                    index: r.index,
-                    path: r.saved_as.into(),
-                });
-            } else {
-                failed.push(format!("{}: {}", items[r.index as usize].name, r.error));
-                (events)(FileEvent::Failed {
-                    transfer_id: id,
-                    index: r.index,
-                    error: r.error,
-                });
-            }
-        }
-        anyhow::Ok((ok, failed))
+    let mut tasks = JoinSet::new();
+    let peer_stop = stopped_by_cancel(send.stopped());
+    let job = SendCtx {
+        conn,
+        files,
+        id,
+        events: &events,
+        cancel: &cancel,
     };
-    let (bytes_sent, (files_sent, failed)) = tokio::try_join!(data, results)?;
-    let _ = send.finish();
-    if !failed.is_empty() {
-        bail!(
-            "{} of {} files failed: {}",
-            failed.len(),
-            accepted.len(),
-            failed.join("; ")
-        );
+    let r = tokio::select! {
+        r = job.run(items, &mut send, &mut recv, &mut tasks) => r,
+        () = cancel.token.cancelled() => Err(anyhow!("cancelled")),
+        () = peer_stop => Err(Cancelled { by_peer: true }.into()),
+    };
+    if let Err(e) = &r
+        && peer_cancelled(e)
+    {
+        cancel.trigger(true);
     }
+    let r = match (r, cancel.who()) {
+        (Err(_), Some(by_peer)) => {
+            let _ = send.reset(ERR_CANCELLED.into());
+            let _ = recv.stop(ERR_CANCELLED.into());
+            // data tasks see the token and reset their streams (dropping one would finish it)
+            while tasks.join_next().await.is_some() {}
+            drop(entry);
+            (events)(FileEvent::Cancelled {
+                transfer_id: id,
+                by_peer,
+            });
+            return Err(Cancelled { by_peer }.into());
+        }
+        (r, _) => r?,
+    };
+    let (files_sent, bytes_sent) = r;
     Ok(SendReport {
         files_sent,
         bytes_sent,
@@ -559,11 +716,136 @@ pub async fn send_named(
     })
 }
 
-type SendJob = (Connection, PathBuf, [u8; 16], u32, u64, u64, EventSink);
+struct SendCtx<'a> {
+    conn: &'a Connection,
+    files: &'a [(PathBuf, Option<String>)],
+    id: [u8; 16],
+    events: &'a EventSink,
+    cancel: &'a Arc<Cancel>,
+}
+
+impl SendCtx<'_> {
+    /// Offer, stream the accepted items, collect results; returns (files sent, bytes sent).
+    async fn run(
+        &self,
+        items: Vec<FileItem>,
+        send: &mut SendStream,
+        recv: &mut RecvStream,
+        tasks: &mut JoinSet<Result<(u32, blake3::Hash, u64)>>,
+    ) -> Result<(u32, u64)> {
+        let (id, events, files) = (self.id, self.events, self.files);
+        write_prefix(send, CH_FILE).await?;
+        let offer = Offer {
+            transfer_id: id.to_vec(),
+            items,
+        };
+        write_msg(send, &offer).await?;
+        let items = offer.items;
+        let reply: OfferReply = read_msg(recv).await.context("read offer reply")?;
+        if reply.items.len() != items.len() {
+            bail!(
+                "peer replied for {} items, offered {}",
+                reply.items.len(),
+                items.len()
+            );
+        }
+        let mut accepted = Vec::new();
+        for (i, a) in reply.items.iter().enumerate().filter(|(_, a)| a.accepted) {
+            if a.offset > items[i].size {
+                bail!("peer asked to resume {} past its end", items[i].name);
+            }
+            accepted.push((i, a.offset));
+        }
+
+        let data = async {
+            let mut queue = accepted.iter();
+            let mut bytes = 0;
+            loop {
+                while tasks.len() < PARALLEL_STREAMS {
+                    let Some(&(i, offset)) = queue.next() else {
+                        break;
+                    };
+                    let job = (
+                        self.conn.clone(),
+                        files[i].0.clone(),
+                        id,
+                        i as u32,
+                        offset,
+                        items[i].size,
+                        events.clone(),
+                        self.cancel.token.clone(),
+                    );
+                    tasks.spawn(send_item(job));
+                }
+                let Some(joined) = tasks.join_next().await else {
+                    break;
+                };
+                let (index, hash, n) = joined??;
+                bytes += n;
+                write_msg(
+                    send,
+                    &ItemDone {
+                        index,
+                        blake3: hash.as_bytes().to_vec(),
+                    },
+                )
+                .await?;
+            }
+            anyhow::Ok(bytes)
+        };
+        let results = async {
+            let (mut ok, mut failed) = (0u32, Vec::new());
+            for _ in 0..accepted.len() {
+                let r: ItemResult = read_msg(recv).await.context("read item result")?;
+                if r.index as usize >= items.len() {
+                    bail!("result for unknown item {}", r.index);
+                }
+                if r.ok {
+                    ok += 1;
+                    (events)(FileEvent::Saved {
+                        transfer_id: id,
+                        index: r.index,
+                        path: r.saved_as.into(),
+                    });
+                } else {
+                    failed.push(format!("{}: {}", items[r.index as usize].name, r.error));
+                    (events)(FileEvent::Failed {
+                        transfer_id: id,
+                        index: r.index,
+                        error: r.error,
+                    });
+                }
+            }
+            anyhow::Ok((ok, failed))
+        };
+        let (bytes_sent, (files_sent, failed)) = tokio::try_join!(data, results)?;
+        let _ = send.finish();
+        if !failed.is_empty() {
+            bail!(
+                "{} of {} files failed: {}",
+                failed.len(),
+                accepted.len(),
+                failed.join("; ")
+            );
+        }
+        Ok((files_sent, bytes_sent))
+    }
+}
+
+type SendJob = (
+    Connection,
+    PathBuf,
+    [u8; 16],
+    u32,
+    u64,
+    u64,
+    EventSink,
+    CancellationToken,
+);
 
 /// Streams one file from `offset`; returns (index, whole-file hash, bytes sent).
 async fn send_item(
-    (conn, path, id, index, offset, size, events): SendJob,
+    (conn, path, id, index, offset, size, events, cancel): SendJob,
 ) -> Result<(u32, blake3::Hash, u64)> {
     let mut file = tokio::fs::File::open(&path)
         .await
@@ -583,18 +865,28 @@ async fn send_item(
         },
     )
     .await?;
-    let mut progress = Progress::new(&events, id, index, size);
-    let mut done = offset;
-    while done < size {
-        let want = (size - done).min(buf.len() as u64) as usize;
-        let n = file.read(&mut buf[..want]).await?;
-        if n == 0 {
-            bail!("{} shrank while sending", path.display());
+    let stream = async {
+        let mut progress = Progress::new(&events, id, index, size);
+        let mut done = offset;
+        while done < size {
+            let want = (size - done).min(buf.len() as u64) as usize;
+            let n = file.read(&mut buf[..want]).await?;
+            if n == 0 {
+                bail!("{} shrank while sending", path.display());
+            }
+            hasher.update(&buf[..n]);
+            s.write_all(&buf[..n]).await?;
+            done += n as u64;
+            progress.update(done);
         }
-        hasher.update(&buf[..n]);
-        s.write_all(&buf[..n]).await?;
-        done += n as u64;
-        progress.update(done);
+        anyhow::Ok(())
+    };
+    tokio::select! {
+        r = stream => r?,
+        () = cancel.cancelled() => {
+            let _ = s.reset(ERR_CANCELLED.into());
+            bail!("cancelled");
+        }
     }
     s.finish()?;
     Ok((index, hasher.finalize(), size - offset))

@@ -13,13 +13,23 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, uniffi::Error)]
 pub enum FerryError {
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
+    /// A transfer stopped because a user cancelled it (here, or on the peer if `by_peer`).
+    Cancelled {
+        by_peer: bool,
+    },
 }
 
 impl std::fmt::Display for FerryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Failed { reason } = self;
-        f.write_str(reason)
+        match self {
+            Self::Failed { reason } => f.write_str(reason),
+            Self::Cancelled { by_peer } => {
+                write!(f, "{}", ferry_core::file::Cancelled { by_peer: *by_peer })
+            }
+        }
     }
 }
 
@@ -27,6 +37,9 @@ impl std::error::Error for FerryError {}
 
 impl From<anyhow::Error> for FerryError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(c) = e.downcast_ref::<ferry_core::file::Cancelled>() {
+            return Self::Cancelled { by_peer: c.by_peer };
+        }
         Self::Failed {
             reason: format!("{e:#}"),
         }
@@ -689,6 +702,14 @@ pub enum FfiFileEvent {
         index: u32,
         error: String,
     },
+    /// Our own send is starting (the receiver gets `Offered`).
+    Sending {
+        transfer_id: String,
+        names: Vec<String>,
+        total_bytes: u64,
+    },
+    /// Last event of a transfer a user cancelled, on either device.
+    Cancelled { transfer_id: String, by_peer: bool },
 }
 
 impl From<FileEvent> for FfiFileEvent {
@@ -731,6 +752,22 @@ impl From<FileEvent> for FfiFileEvent {
                 transfer_id: hex::encode(transfer_id),
                 index,
                 error,
+            },
+            FileEvent::Sending {
+                transfer_id,
+                names,
+                total_bytes,
+            } => Self::Sending {
+                transfer_id: hex::encode(transfer_id),
+                names,
+                total_bytes,
+            },
+            FileEvent::Cancelled {
+                transfer_id,
+                by_peer,
+            } => Self::Cancelled {
+                transfer_id: hex::encode(transfer_id),
+                by_peer,
             },
         }
     }
@@ -833,6 +870,15 @@ pub struct FfiSendReport {
     pub files_sent: u32,
     pub bytes_sent: u64,
     pub elapsed_ms: u64,
+}
+
+/// A transfer id as the app sees it: 32 hex chars (dashes ignored, so a UUID string works).
+fn parse_tid(s: &str) -> Result<[u8; 16]> {
+    let hex: String = s.chars().filter(|&c| c != '-').collect();
+    hex::decode(&hex)
+        .ok()
+        .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        .ok_or_else(|| FerryError::msg(format!("bad transfer id {s:?}")))
 }
 
 fn confirm_fn(delegate: Arc<dyn FerryDelegate>) -> ConfirmFn {
@@ -960,7 +1006,14 @@ impl FerryNode {
         self.node.match_presence(&txt)
     }
 
-    pub async fn send_files(&self, peer_id: String, paths: Vec<String>) -> Result<FfiSendReport> {
+    /// `transfer_id`: 32 hex chars chosen by the app (e.g. a UUID without dashes), so it can
+    /// match events and `cancel_transfer` to this send; `None` = random.
+    pub async fn send_files(
+        &self,
+        peer_id: String,
+        paths: Vec<String>,
+        transfer_id: Option<String>,
+    ) -> Result<FfiSendReport> {
         let files = paths
             .into_iter()
             .map(|p| FfiSource {
@@ -968,7 +1021,13 @@ impl FerryNode {
                 name: None,
             })
             .collect();
-        self.send_named(peer_id, files).await
+        self.send_named(peer_id, files, transfer_id).await
+    }
+
+    /// Cancel a live transfer (either direction) by its hex id; false if none has it. Both
+    /// devices then get a `Cancelled` event, and the receiver deletes the partial files.
+    pub fn cancel_transfer(&self, transfer_id: String) -> bool {
+        parse_tid(&transfer_id).is_ok_and(|id| self.node.cancel_transfer(&id))
     }
 
     /// Send with display names (Android: path `/proc/self/fd/N` + the document's name).
@@ -1036,12 +1095,14 @@ impl FerryNode {
         &self,
         peer_id: String,
         files: Vec<FfiSource>,
+        transfer_id: Option<String>,
     ) -> Result<FfiSendReport> {
         let files: Vec<(PathBuf, Option<String>)> = files
             .into_iter()
             .map(|f| (PathBuf::from(f.path), f.name))
             .collect();
-        let r = self.node.send_named(&peer_id, &files).await?;
+        let tid = transfer_id.as_deref().map(parse_tid).transpose()?;
+        let r = self.node.send_named(&peer_id, &files, tid).await?;
         Ok(FfiSendReport {
             files_sent: r.files_sent,
             bytes_sent: r.bytes_sent,

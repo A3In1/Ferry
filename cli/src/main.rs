@@ -454,6 +454,17 @@ fn event_printer() -> ferry_core::file::EventSink {
         }
         FileEvent::Saved { index, path, .. } => println!("\r  #{index}: saved {}", path.display()),
         FileEvent::Failed { index, error, .. } => eprintln!("\r  #{index}: failed: {error}"),
+        FileEvent::Sending {
+            names, total_bytes, ..
+        } => println!(
+            "sending: {} file(s), {:.1} MiB",
+            names.len(),
+            total_bytes as f64 / MIB
+        ),
+        FileEvent::Cancelled { by_peer, .. } => eprintln!(
+            "\r  cancelled{}",
+            if by_peer { " on the other device" } else { "" }
+        ),
     })
 }
 

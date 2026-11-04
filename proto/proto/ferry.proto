@@ -23,6 +23,9 @@ message PairConfirm {
 }
 
 // --- File channel ---
+// Cancel (no message): the cancelling side resets the streams it writes and stops the ones it
+// reads with application error code 0x07 (ERR_CANCELLED); the other side reports "cancelled",
+// not "failed", and the receiver deletes its partial files. Older peers just see a failure.
 message FileItem {
   string name = 1;
   uint64 size = 2;
