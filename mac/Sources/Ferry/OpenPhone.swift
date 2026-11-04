@@ -76,7 +76,7 @@ extension AppModel {
         let p = Process()
         p.executableURL = URL(filePath: tool)
         p.arguments = ["-s", serial, "--window-title", peer.name, "--turn-screen-off", "--power-off-on-close",
-                       "--stay-awake", "--shortcut-mod=lcmd,rcmd"]
+                       "--stay-awake", "--shortcut-mod=lsuper,rsuper"]
         var env = ProcessInfo.processInfo.environment
         env["ADB"] = adb // the adb Ferry already uses
         p.environment = env
