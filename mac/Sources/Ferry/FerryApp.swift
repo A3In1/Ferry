@@ -104,6 +104,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func menuWillOpen(_ menu: NSMenu) { menuOpen = true }
     func menuDidClose(_ menu: NSMenu) { menuOpen = false }
 
+    /// "Use Phone": the phone's screen in a window (scrcpy), over USB or remembered Wi-Fi. Reads "Close
+    /// Phone Window" while one is open.
+    private func usePhoneItem(_ peer: FfiPeer, key: String) -> NSMenuItem {
+        let open = model.phoneWindows[peer.id]?.isRunning == true
+        let ready = model.usbSerial(peer.id) != nil || model.wirelessEndpoint(peer.id) != nil
+        return ClosureItem(open ? "Close Phone Window" : "Use Phone", key: key) { [weak self] in self?.model.usePhone(peer) }
+            .symbol(open ? "xmark.rectangle" : "iphone.gen3")
+            .tip(ready
+                ? "See and use \(peer.name) in a window on this Mac. Close the window to lock the phone again."
+                : "Plug \(peer.name) in with the USB cable the first time. After that it works over Wi-Fi.")
+    }
+
     /// What you can do with one phone: at the top level with one phone, in its submenu with several.
     /// `keys`: give the main items keyboard equivalents (only one phone, so they're unambiguous).
     private func phoneActions(_ peer: FfiPeer, keys: Bool) -> [NSMenuItem] {
@@ -124,13 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         dnd.state = model.phoneDnd[peer.id] == true ? .on : .off
         let clip = model.clipboardHasText
         return [
-            ClosureItem("Mirror Screen", key: keys ? "1" : "") { [weak self] in self?.model.mirror(peer) }.symbol("iphone")
-                .tip("See and control \(peer.name)'s screen in a window"),
-            ClosureItem("Open Phone") { [weak self] in self?.model.openPhone(peer) }.symbol("lock.iphone")
-                .enabled(model.usbSerial(peer.id) != nil)
-                .tip(model.usbSerial(peer.id) != nil
-                    ? "Use \(peer.name) from the Mac, even when it's locked. Its screen stays dark and locks again when you close the window."
-                    : "Plug \(peer.name) in with the USB cable to use it from the Mac, even when it's locked"),
+            usePhoneItem(peer, key: keys ? "1" : ""),
             ClosureItem("Messages", key: keys ? "2" : "") { [weak self] in self?.model.openMessages(peer) }.symbol("message")
                 .unreadBadge(model.phoneTexts[peer.id]?.unread ?? 0),
             ClosureItem("Browse Files", key: keys ? "3" : "") { [weak self] in self?.model.openFiles(peer) }.symbol("folder"),
