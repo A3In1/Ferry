@@ -86,8 +86,8 @@ object ScreenPrefs {
     /** "Keep phone awake while mirroring" (default on); loaded by [load]. */
     val keepAwake = MutableStateFlow(true)
 
-    /** "Dim phone screen while mirroring" (default on; works once Modify system settings is allowed). */
-    val dim = MutableStateFlow(true)
+    /** "Dim phone screen while mirroring" (default off; works once Modify system settings is allowed). */
+    val dim = MutableStateFlow(false)
 
     /** "Lock phone when mirroring ends" (default on; needs Ferry control). */
     val lockOnEnd = MutableStateFlow(true)
@@ -95,7 +95,7 @@ object ScreenPrefs {
     fun load(ctx: Context) {
         val p = prefs(ctx)
         keepAwake.value = p.getBoolean(KEEP_AWAKE, true)
-        dim.value = p.getBoolean(DIM, true)
+        dim.value = p.getBoolean(DIM, false)
         lockOnEnd.value = p.getBoolean(LOCK_ON_END, true)
     }
 
