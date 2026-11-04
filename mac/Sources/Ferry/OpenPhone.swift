@@ -76,7 +76,9 @@ extension AppModel {
         guard let tool = Self.scrcpyPaths.first(where: FileManager.default.isExecutableFile) else { return }
         let p = Process()
         p.executableURL = URL(filePath: tool)
-        p.arguments = ["-s", serial, "--window-title", peer.name, "--turn-screen-off", "--power-off-on-close",
+        // No --turn-screen-off: on some phones (vivo) forcing the screen off blanks the mirror too,
+        // especially on the lock screen.
+        p.arguments = ["-s", serial, "--window-title", peer.name, "--power-off-on-close",
                        "--stay-awake", "--shortcut-mod=lsuper,rsuper"]
         var env = ProcessInfo.processInfo.environment
         env["ADB"] = adb // the adb Ferry already uses
