@@ -48,13 +48,28 @@ extension AppModel {
         listFiles(prev, peer: peer, remember: false)
     }
 
+    /// Files and folders (folders keep their structure, in Downloads/<folder>). With the phone on USB and
+    /// adb at hand, each item comes over `adb pull` (much faster); whatever that can't read comes over Ferry.
     func downloadFiles(_ names: Set<String>, peer: String) {
         let f = files(peer)
-        let picked = f.entries.filter { names.contains($0.name) && !$0.dir }
-            .compactMap { e in phonePath(f.path, e.name).map { (name: e.name, path: $0) } }
+        let picked = f.entries.filter { names.contains($0.name) }
+            .compactMap { e in phonePath(f.path, e.name).map { (entry: e, path: $0) } }
         guard !picked.isEmpty else { return }
-        broadcast(.fsGet(paths: picked.map(\.path)), to: [peer], failure: "The download didn't start.")
-        f.note = "Downloading \(describe(picked.map(\.name))) to your Downloads folder…"
+        let what = describe(picked.map(\.entry.name))
+        guard let serial = usbSerial(peer), let adb = adbPath() else {
+            f.note = "Downloading \(what) to your Downloads folder…"
+            return broadcast(.fsGet(paths: picked.map(\.path)), to: [peer], failure: "The download didn't start.")
+        }
+        f.note = "Downloading \(what) over USB to your Downloads folder…"
+        Task {
+            var viaFerry: [String] = []
+            for item in picked where !(await pullOverUsb(item.entry, path: item.path, adb: adb, serial: serial, peer: peer)) {
+                viaFerry.append(item.path)
+            }
+            if !viaFerry.isEmpty {
+                broadcast(.fsGet(paths: viaFerry), to: [peer], failure: "The download didn't start.")
+            }
+        }
     }
 
     func uploadFiles(_ urls: [URL], to peer: FfiPeer) {
@@ -133,7 +148,8 @@ struct FilesView: View {
                 }
                 Button("Download") { model.downloadFiles(selection, peer: peer.id) }
                     .keyboardShortcut("d", modifiers: .command)
-                    .disabled(!files.entries.contains { selection.contains($0.name) && !$0.dir })
+                    .help("Download the selected files and folders to your Downloads folder")
+                    .disabled(!files.entries.contains { selection.contains($0.name) })
             }
             .padding(10)
         }

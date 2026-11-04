@@ -327,7 +327,7 @@ final class AppModel {
         do { try url.setResourceValues(values) } catch { logger.error("couldn't quarantine \(url.path): \(error, privacy: .public)") }
     }
 
-    private func notifyReceived(_ urls: [URL], what: String, failed: Int, id: String) {
+    func notifyReceived(_ urls: [URL], what: String, failed: Int, id: String) {
         let folder = urls[0].deletingLastPathComponent().lastPathComponent
         notify("Received \(what)", "In your \(folder) folder" + (failed > 0 ? ". \(failed) couldn't be received." : ""), id: "f|\(id)") {
             $0.threadIdentifier = Notifications.received

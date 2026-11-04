@@ -12,23 +12,30 @@ import SwiftUI
     let outgoing: Bool
     let peerName: String?
     private(set) var progress: TransferProgress
+    /// A Browse Files download over USB (`adb pull`) shows this instead of `progress`.
+    private(set) var usb: UsbPullState?
     var state = State.running
     let started = Date.now
 
     @ObservationIgnored var raw: TransferProgress
+    @ObservationIgnored var rawUsb: UsbPullState?
+    /// Set for transfers the core doesn't run (USB downloads); else Cancel goes to the core.
+    @ObservationIgnored var onCancel: (() -> Void)?
     @ObservationIgnored var lastEvent = Date.now // a dropped connection sends no more events (see dropStalled)
     @ObservationIgnored var saved: [URL] = []
     @ObservationIgnored var failed = 0
     @ObservationIgnored private var lastPublish = Date.distantPast
     @ObservationIgnored private var publishPending = false
 
-    init(id: String, outgoing: Bool, peerName: String?, names: [String], totalBytes: UInt64 = 0) {
+    init(id: String, outgoing: Bool, peerName: String?, names: [String], totalBytes: UInt64 = 0, usb: UsbPullState? = nil) {
         self.id = id
         self.outgoing = outgoing
         self.peerName = peerName
         let p = TransferProgress(names: names, totalBytes: totalBytes)
         progress = p
         raw = p
+        self.usb = usb
+        rawUsb = usb
     }
 
     var running: Bool { state == .running }
@@ -39,6 +46,7 @@ import SwiftUI
         let wait = 0.1 - Date.now.timeIntervalSince(lastPublish)
         if now || wait <= 0 {
             progress = raw
+            usb = rawUsb
             lastPublish = .now
             return
         }
@@ -49,14 +57,36 @@ import SwiftUI
             guard let self else { return }
             publishPending = false
             progress = raw
+            usb = rawUsb
             lastPublish = .now
         }
     }
 
     var title: String {
         let what = describe(progress.names)
+        if usb != nil { return "Downloading \(what)" + (peerName.map { " from \($0)" } ?? "") }
         if outgoing { return "Sending \(what)" + (peerName.map { " to \($0)" } ?? "") }
         return "Receiving \(what)" + (peerName.map { " from \($0)" } ?? "")
+    }
+
+    /// 0...1, or nil for an indeterminate bar.
+    var fraction: Double? { usb.map(\.fraction) ?? progress.fraction }
+
+    /// "File 2 of 3: name"
+    var fileLine: String? {
+        if let usb { return usb.fileLine }
+        let p = progress
+        guard p.fileCount > 1 else { return nil }
+        return "File \(p.fileNumber) of \(p.fileCount)" + (p.currentName.map { ": \($0)" } ?? "")
+    }
+
+    func status(at now: Date) -> String {
+        switch state {
+        case .running:
+            if let usb { return usb.detail(at: now) }
+            return progress.totalBytes == 0 ? "Connecting…" : progress.detail(at: now)
+        case let .done(s), let .failed(s), let .cancelled(s): return s
+        }
     }
 }
 
@@ -66,22 +96,21 @@ struct TransferRow: View {
     let cancel: () -> Void
 
     var body: some View {
-        let p = transfer.progress, running = transfer.running
+        let running = transfer.running
         // Fixed layout (hidden, not removed), so a menu row keeps its height when the transfer ends.
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: symbol).font(.title2).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 3) {
                 Text(transfer.title).lineLimit(1).truncationMode(.middle)
-                if p.fileCount > 1 {
-                    Text("File \(p.fileNumber) of \(p.fileCount)" + (p.currentName.map { ": \($0)" } ?? ""))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                if let line = transfer.fileLine {
+                    Text(line).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 Group {
-                    if let f = p.fraction { ProgressView(value: f) } else { ProgressView().progressViewStyle(.linear) }
+                    if let f = transfer.fraction { ProgressView(value: f) } else { ProgressView().progressViewStyle(.linear) }
                 }
                 .controlSize(.small).opacity(running ? 1 : 0)
                 TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    Text(status(p, ctx.date)).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                    Text(transfer.status(at: ctx.date)).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
                 }
             }
             Button(action: cancel) { Image(systemName: "xmark.circle.fill").font(.title3) }
@@ -99,13 +128,6 @@ struct TransferRow: View {
         case .done: "checkmark.circle"
         case .failed: "exclamationmark.triangle"
         case .cancelled: "xmark.circle"
-        }
-    }
-
-    private func status(_ p: TransferProgress, _ now: Date) -> String {
-        switch transfer.state {
-        case .running: p.totalBytes == 0 ? "Connecting…" : p.detail(at: now)
-        case let .done(s), let .failed(s), let .cancelled(s): s
         }
     }
 }
@@ -202,7 +224,9 @@ extension AppModel {
 
     /// Cancel button (menu row or panel). Both devices then report the transfer cancelled.
     func cancel(_ t: LiveTransfer) {
-        guard t.running, let node else { return }
+        guard t.running else { return }
+        if let cancel = t.onCancel { return cancel() }
+        guard let node else { return }
         if !node.cancelTransfer(transferId: t.id) {
             logger.notice("transfer \(t.id.prefix(8), privacy: .public) already over, nothing to cancel")
         }
