@@ -85,4 +85,34 @@ class Phase6Test {
         assertEquals(listOf(File(root, "Docs/a.pdf").canonicalFile), ok)
         assertEquals(listOf("Docs", "", "../outside", "nope.txt"), bad)
     }
+
+    @Test
+    fun treeKeepsFoldersSkipsHiddenAndLinks() {
+        File(root, "DCIM/Camera").mkdirs()
+        File(root, "DCIM/Camera/a.jpg").writeText("a")
+        File(root, "DCIM/b.jpg").writeText("b")
+        File(root, "DCIM/.thumbnails").mkdirs()
+        File(root, "DCIM/.thumbnails/t.jpg").writeText("t")
+        File(root, "top.txt").writeText("x")
+        File(outside, "secret.txt").writeText("s")
+        try {
+            Files.createSymbolicLink(File(root, "DCIM/loop").toPath(), File(root, "DCIM").toPath())
+            Files.createSymbolicLink(File(root, "DCIM/out").toPath(), outside.toPath())
+        } catch (e: Exception) {
+            // no symlinks here: the rest still holds
+        }
+        val t = PhoneFiles.tree(root, listOf("DCIM", "top.txt", "", "../outside", "missing"))
+        assertEquals(listOf("DCIM/Camera/a.jpg", "DCIM/b.jpg", "top.txt"), t.files.map { it.second })
+        assertEquals(listOf("", "../outside", "missing"), t.refused)
+        assertEquals(false, t.capped)
+    }
+
+    @Test
+    fun treeIsCapped() {
+        File(root, "many").mkdirs()
+        repeat(5) { File(root, "many/$it.txt").writeText("$it") }
+        val t = PhoneFiles.tree(root, listOf("many"), max = 3)
+        assertEquals(3, t.files.size)
+        assertTrue(t.capped)
+    }
 }

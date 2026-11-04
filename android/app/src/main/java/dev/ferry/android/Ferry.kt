@@ -42,7 +42,8 @@ class PairPrompt(val peerName: String, val code: String) {
     val answer = CompletableDeferred<Boolean>()
 }
 
-class Source(val pfd: ParcelFileDescriptor, val name: String?)
+/** A file to send: an open fd (pins what was validated), or a [path] the core opens (folder downloads: one fd per file won't scale). */
+class Source(val pfd: ParcelFileDescriptor?, val name: String?, val path: String? = null)
 
 /**
  * Process-wide state shared by [FerryService] (which owns the node) and the UI.
@@ -163,7 +164,7 @@ object Ferry {
             try {
                 val node = awaitNode() ?: error(NOT_RUNNING)
                 // The core opens the path itself; /proc/self/fd/N reopens our fd.
-                val r = node.sendNamed(peer.id, files.map { FfiSource("/proc/self/fd/${it.pfd.fd}", it.name) }, tid)
+                val r = node.sendNamed(peer.id, files.map { FfiSource(it.path ?: "/proc/self/fd/${it.pfd!!.fd}", it.name) }, tid)
                 val size = Formatter.formatShortFileSize(app, r.bytesSent.toLong())
                 Transfers.sent(app, tid, "Sent ${count(r.filesSent.toInt(), "file")} to ${peer.name}", "$size in ${"%.1f".format(r.elapsedMs.toLong() / 1000.0)} s")
             } catch (e: CancellationException) {
@@ -174,7 +175,7 @@ object Ferry {
                 Log.w(TAG, "send to ${peer.name} failed: ${e.text()}")
                 Transfers.sendFailed(app, tid, "Couldn't send to ${peer.name}", e.friendly())
             } finally {
-                files.forEach { runCatching { it.pfd.close() } }
+                files.forEach { runCatching { it.pfd?.close() } }
             }
         }
     }

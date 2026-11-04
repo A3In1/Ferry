@@ -21,6 +21,9 @@ const val FILES_TAG = "FerryFiles"
 /** The Files grant: a paired Mac lists folders under shared storage and asks for files (FsListRequest / FsGet). */
 object PhoneFiles {
     const val MAX_ENTRIES = 2000
+    /** Most files one folder download sends; past this the rest is left out (and the user told). */
+    const val MAX_TREE_FILES = 10_000
+    const val MAX_DEPTH = 32
 
     /** Why this build/phone can't browse at all, or null. */
     fun unavailable(): String? = when {
@@ -76,6 +79,47 @@ object PhoneFiles {
         return ok.values.filterNotNull() to ok.filterValues { it == null }.keys.toList()
     }
 
+    /**
+     * FsGet paths (files or folders) → files to send, each named relative to the requested item's
+     * parent ("DCIM/Camera/x.jpg" for "DCIM"), so the Mac rebuilds the folder. Hidden entries are
+     * skipped inside folders, symlinked folders aren't followed (no loops, no escapes), and at most
+     * [max] files are taken ([Tree.capped] says some were left out).
+     */
+    fun tree(root: File, paths: List<String>, max: Int = MAX_TREE_FILES): Tree {
+        val base = root.canonicalFile
+        val out = ArrayList<Pair<File, String>>()
+        val refused = ArrayList<String>()
+        var capped = false
+        fun inside(f: File) = f.path.startsWith(base.path + File.separator)
+        fun walk(dir: File, rel: String, depth: Int) {
+            if (depth > MAX_DEPTH) return
+            val kids = dir.listFiles() ?: return Unit.also { Log.w(FILES_TAG, "can't read $rel") }
+            for (k in kids.sortedBy { it.name }) {
+                if (k.name.startsWith(".")) continue
+                if (out.size >= max) { capped = true; return }
+                val c = k.canonicalFile
+                // a symlink resolves elsewhere: skip it (loops, or a way out of shared storage)
+                if (c.path != File(dir, k.name).path || !inside(c)) continue
+                when {
+                    c.isDirectory -> walk(c, "$rel/${k.name}", depth + 1)
+                    c.isFile -> out += c to "$rel/${k.name}"
+                }
+            }
+        }
+        for (p in paths) {
+            val f = resolve(root, p)
+            when {
+                f == null || f == base -> refused += p
+                f.isFile -> if (out.size < max) out += f to f.name else capped = true
+                f.isDirectory -> walk(f, f.name, 1)
+                else -> refused += p
+            }
+        }
+        return Tree(out, refused, capped)
+    }
+
+    class Tree(val files: List<Pair<File, String>>, val refused: List<String>, val capped: Boolean)
+
     /** Why a Mac's request is refused right now, or null. */
     private fun refused(): String? = unavailable() ?: when {
         Grant.FILES !in Grants -> "Turn on Files in Ferry on the phone"
@@ -94,15 +138,21 @@ object PhoneFiles {
     fun onGet(ctx: Context, peerId: String, paths: List<String>) = Ferry.scope.launch(Dispatchers.IO) {
         refused()?.let { Log.w(FILES_TAG, "get refused: $it"); return@launch }
         val peer = Ferry.peers.value.firstOrNull { it.id == peerId } ?: return@launch
-        val (ok, bad) = files(root(), paths)
-        // Open now: the fd pins the file we validated (a later symlink swap can't redirect the send).
-        val sources = ok.mapNotNull { f ->
+        val root = root()
+        val singles = paths.filter { resolve(root, it)?.isFile == true }
+        val (ok, _) = files(root, singles)
+        // Single files: open now, the fd pins the file we validated (a later symlink swap can't redirect the send).
+        val opened = ok.mapNotNull { f ->
             runCatching { Source(ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY), f.name) }
                 .onFailure { Log.w(FILES_TAG, "can't open ${f.name}: ${it.text()}") }.getOrNull()
         }
-        val failed = bad.size + ok.size - sources.size
-        Log.w(FILES_TAG, "get ${paths.size} path(s): sending ${sources.size}, refused $failed")
-        if (failed > 0) Ferry.toast(ctx, "Couldn't send ${count(failed, "file")} to ${peer.name}" + (bad.firstOrNull()?.let { ": $it" } ?: ""))
+        // Folders (and anything else, refused there): canonical paths the core opens itself, named with their folder.
+        val tree = tree(root, paths - singles.toSet())
+        val sources = opened + tree.files.map { (f, rel) -> Source(null, rel, f.path) }
+        val failed = tree.refused.size + ok.size - opened.size
+        Log.w(FILES_TAG, "get ${paths.size} path(s): sending ${sources.size} file(s), refused $failed, capped ${tree.capped}")
+        if (failed > 0) Ferry.toast(ctx, "Couldn't send ${count(failed, "item")} to ${peer.name}" + (tree.refused.firstOrNull()?.let { ": $it" } ?: ""))
+        if (tree.capped) Ferry.toast(ctx, "That folder is very big: sending the first ${"%,d".format(MAX_TREE_FILES)} files to ${peer.name}")
         if (sources.isNotEmpty()) Ferry.send(ctx, peer, sources)
     }
 }
