@@ -67,19 +67,47 @@ object Screen {
         if (current != null) ControlService.instance.value?.keepAwake(on)
     }
 
+    /** The dim setting changed: apply it to the open mirroring session, if any. */
+    fun dim(ctx: Context, on: Boolean) {
+        if (current?.mirroring != true) return
+        if (on) ScreenDim.dim(ctx) else ScreenDim.restore(ctx)
+    }
+
     fun done(s: Session) = synchronized(this) { if (current === s) current = null }
 }
 
 /** Phone-side screen settings. */
 object ScreenPrefs {
     private const val KEEP_AWAKE = "keepAwake"
+    private const val DIM = "dim"
+    private const val LOCK_ON_END = "lockOnEnd"
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("screen", Context.MODE_PRIVATE)
 
     /** "Keep phone awake while mirroring" (default on); loaded by [load]. */
     val keepAwake = MutableStateFlow(true)
 
+    /** "Dim phone screen while mirroring" (default on; works once Modify system settings is allowed). */
+    val dim = MutableStateFlow(true)
+
+    /** "Lock phone when mirroring ends" (default on; needs Ferry control). */
+    val lockOnEnd = MutableStateFlow(true)
+
     fun load(ctx: Context) {
-        keepAwake.value = prefs(ctx).getBoolean(KEEP_AWAKE, true)
+        val p = prefs(ctx)
+        keepAwake.value = p.getBoolean(KEEP_AWAKE, true)
+        dim.value = p.getBoolean(DIM, true)
+        lockOnEnd.value = p.getBoolean(LOCK_ON_END, true)
+    }
+
+    fun setDim(ctx: Context, on: Boolean) {
+        prefs(ctx).edit { putBoolean(DIM, on) }
+        dim.value = on
+        Screen.dim(ctx.applicationContext, on)
+    }
+
+    fun setLockOnEnd(ctx: Context, on: Boolean) {
+        prefs(ctx).edit { putBoolean(LOCK_ON_END, on) }
+        lockOnEnd.value = on
     }
 
     fun setKeepAwake(ctx: Context, on: Boolean) {
@@ -100,10 +128,15 @@ class Session(private val ctx: Context, private val peerId: String, private val 
     private val lock = Mutex()
     private var opened = false
     @Volatile private var ended = false
+    /** The phone ended the session (Stop, projection stopped, locked, replaced): the Mac's close that follows isn't its own. */
+    @Volatile private var endedHere = false
     private var started = false
     @Volatile private var capture: Capture? = null
     @Volatile private var projection: MediaProjection? = null
     @Volatile private var stopped: MediaProjection.Callback? = null
+    /** Video is being captured (the dim setting applies). */
+    @Volatile var mirroring = false
+        private set
 
     // ATOMIC: runs (and finishes the stream) even if ended before it was dispatched.
     @OptIn(DelicateCoroutinesApi::class)
@@ -118,6 +151,7 @@ class Session(private val ctx: Context, private val peerId: String, private val 
 
     /** Sends END (once, if the stream still works) and tears the session down. Any thread. */
     fun end(reason: Int, detail: String = "") {
+        endedHere = true
         Log.w(SCREEN_TAG, "end $reason $detail")
         Ferry.scope.launch {
             runCatching { send(Msg.End(reason, detail), last = true) }
@@ -145,15 +179,23 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         // Needs Ferry control (the overlay window); without it the phone sleeps on its usual timeout.
         if (ScreenPrefs.keepAwake.value) ControlService.instance.value?.keepAwake(true)
         val wifi = WifiLocks(ctx)
+        var macClosed = false
         try {
             Notifs.screen(ctx, mac, "Getting ready…")
             coroutineScope {
                 val parser = FspParser()
                 while (true) {
-                    val chunk = stream.read()
+                    val chunk = try {
+                        stream.read()
+                    } catch (e: Exception) {
+                        // The Mac went away (lid closed, out of range): for the phone, the same as it closing.
+                        if (e !is CancellationException) macClosed = true
+                        throw e
+                    }
                     if (chunk.isEmpty()) break
                     parser.feed(chunk).forEach { handle(it) }
                 }
+                macClosed = true
                 Log.w(SCREEN_TAG, "$mac closed the screen stream")
                 coroutineContext.cancelChildren()
             }
@@ -171,9 +213,15 @@ class Session(private val ctx: Context, private val peerId: String, private val 
                 it.stop()
                 FerryService.instance?.projecting(false)
             }
+            val wasMirroring = mirroring
+            mirroring = false
+            ScreenDim.restore(ctx)
             ControlService.instance.value?.apply {
                 reset()
                 keepAwake(false)
+                // Mirroring ended from the Mac: don't leave the phone open on the desk. Not when the phone ended
+                // it (it's in someone's hand) or is already locked. Only locks; the keyguard is never dismissed.
+                if (wasMirroring && macClosed && !endedHere && ScreenPrefs.lockOnEnd.value && !locked()) lockScreen()
             }
             Notifs.cancel(ctx, Notifs.ID_SCREEN)
         }
@@ -216,6 +264,8 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         p.registerCallback(cb, Handler(Looper.getMainLooper()))
         stopped = cb
         Notifs.screen(ctx, mac, if (control) "Screen sharing is on, and $mac can tap and type here" else "Screen sharing is on")
+        mirroring = true
+        ScreenDim.dim(ctx)
         Capture(ctx, p, m).also { capture = it }.run(::send) { sendRaw(it) }
     }
 

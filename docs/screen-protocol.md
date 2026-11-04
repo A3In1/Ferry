@@ -60,6 +60,13 @@ then `len` payload bytes. Integers are big-endian, `f32` is IEEE-754 big-endian.
   first) and move the arrow by its translation in a full-screen untouchable overlay (no window relayout).
 - Keep awake (phone setting, default on, needs Ferry control): while a session is open, a 1 px accessibility
   overlay with `FLAG_KEEP_SCREEN_ON`; removed when the session ends. The keyguard is never touched.
+- Privacy (phone settings, default on): Android stops capture when the phone locks, so it stays unlocked
+  while mirroring. "Dim phone screen while mirroring" (needs Modify system settings): once video starts, the
+  user's SCREEN_BRIGHTNESS + mode are saved (persisted first) and set to 0, manual; restored exactly when
+  the session ends, when the setting is turned off, and on the next service start after a crash. No overlay
+  (it would be captured). "Lock phone when mirroring ends" (needs Ferry control): when a mirroring session
+  ends because the Mac closed the stream or went away (not when the phone ended it, and not if it's
+  already locked), `GLOBAL_ACTION_LOCK_SCREEN`. The keyguard is never dismissed.
 - Wi-Fi (phone): while any session is open, Wi-Fi locks `WIFI_MODE_FULL_LOW_LATENCY` (honored only with
   Ferry in the foreground and the screen on) plus `WIFI_MODE_FULL_HIGH_PERF` as the fallback: Wi-Fi power
   save is a classic +30–100 ms spike. Released when the session ends.

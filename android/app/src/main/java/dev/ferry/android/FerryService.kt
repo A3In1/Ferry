@@ -24,6 +24,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import dev.ferry.android.screen.Fsp
 import dev.ferry.android.screen.Screen
+import dev.ferry.android.screen.ScreenDim
 import dev.ferry.core.FerryNode
 import dev.ferry.core.FfiEvent
 import dev.ferry.core.FfiPeer
@@ -106,6 +107,7 @@ class FerryService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        ScreenDim.restore(this) // a mirroring session that died while the screen was dimmed
         goForeground(ongoing("Starting Ferry…", ""))
         // System broadcast: NOT_EXPORTED is fine (and required for runtime receivers on 34+).
         ContextCompat.registerReceiver(this, batteryChanged, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)

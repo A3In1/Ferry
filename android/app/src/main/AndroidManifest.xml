@@ -7,6 +7,10 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- Wi-Fi locks while mirroring (power save off). -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- "Dim phone screen while mirroring": the user allows it in Modify system settings. -->
+    <uses-permission
+        android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <!-- MulticastLock while NsdManager discovers (needed on pre-14 devices). -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Also the prerequisite permission for the connectedDevice FGS type on Android 14+. -->

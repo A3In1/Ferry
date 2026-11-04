@@ -320,6 +320,12 @@ class ControlService : AccessibilityService() {
      * (the supported way; wake locks that turn the screen on are deprecated). It never touches the keyguard:
      * the phone still locks if the user presses power, and that ends the session. Any thread.
      */
+    /** Locks the phone like the power button (API 28+). Never unlocks anything. Any thread. */
+    fun lockScreen() = main.post {
+        val ok = performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+        Log.w(SCREEN_TAG, if (ok) "locked the phone (mirroring ended on the Mac)" else "couldn't lock the phone")
+    }
+
     fun keepAwake(on: Boolean) = main.post {
         val wm = getSystemService(WindowManager::class.java)
         if (on && awake == null) {
