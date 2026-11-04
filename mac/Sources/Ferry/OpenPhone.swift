@@ -81,10 +81,20 @@ extension AppModel {
         env["ADB"] = adb // the adb Ferry already uses
         p.environment = env
         p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        p.terminationHandler = { p in
+        let errPipe = Pipe()
+        p.standardError = errPipe
+        let started = Date.now
+        p.terminationHandler = { [weak self] p in
             let status = p.terminationStatus
-            Task { @MainActor in logger.notice("use phone: window closed (\(status, privacy: .public))") }
+            let err = String(decoding: errPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            Task { @MainActor in
+                guard let self else { return }
+                logger.notice("use phone: window closed (\(status, privacy: .public))")
+                self.phoneWindows[peer.id] = nil
+                self.onChange()
+                // Failed almost at once (not a window the user closed): say why.
+                if status != 0, Date.now.timeIntervalSince(started) < 3 { self.phoneFailed(peer, err) }
+            }
         }
         do {
             try p.run()
@@ -93,6 +103,21 @@ extension AppModel {
             onChange() // the menu item becomes "Close"
         } catch {
             showAlert("Couldn't open \(peer.name)", error.localizedDescription)
+        }
+    }
+
+    /// Turns scrcpy's failure into a message that says what to do.
+    private func phoneFailed(_ peer: FfiPeer, _ err: String) {
+        if err.contains("unauthorized") {
+            showAlert("Allow USB debugging on \(peer.name)",
+                      "Unlock \(peer.name) and tap Allow on the “Allow USB debugging?” popup (tick “Always allow from this computer”). "
+                          + "If there's no popup, unplug and replug the cable, then try Use Phone again.")
+        } else if err.contains("no devices") || err.contains("not found") {
+            showAlert("Can't reach \(peer.name)",
+                      "Plug \(peer.name) in with the USB cable, or make sure it's on the same Wi-Fi, then try Use Phone again.")
+        } else {
+            let detail = err.split(separator: "\n").first { $0.contains("ERROR") }.map(String.init) ?? "It closed right after opening."
+            showAlert("Couldn't open \(peer.name)", detail)
         }
     }
 
