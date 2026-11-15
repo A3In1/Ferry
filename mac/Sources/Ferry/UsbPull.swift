@@ -143,18 +143,22 @@ nonisolated func diskSize(_ url: URL) -> UInt64 {
     return total
 }
 
-/// Marks everything adb wrote like a browser download, so Gatekeeper checks it on first open.
+/// Marks a file like a browser download, so Gatekeeper checks it on first open.
+nonisolated func quarantine(_ url: URL) {
+    var url = url
+    var values = URLResourceValues()
+    values.quarantineProperties = [
+        kLSQuarantineAgentNameKey as String: "Ferry",
+        kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+    ]
+    do { try url.setResourceValues(values) } catch { logger.error("couldn't quarantine \(url.path): \(error, privacy: .public)") }
+}
+
+/// Everything adb wrote.
 nonisolated func quarantineTree(_ url: URL) {
     var urls = [url]
     if let walk = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil) {
         while let f = walk.nextObject() as? URL { urls.append(f) }
     }
-    for var u in urls {
-        var values = URLResourceValues()
-        values.quarantineProperties = [
-            kLSQuarantineAgentNameKey as String: "Ferry",
-            kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
-        ]
-        try? u.setResourceValues(values)
-    }
+    urls.forEach(quarantine)
 }

@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Wi-Fi locks while mirroring (power save off). -->
+    <!-- Wi-Fi locks during Share Cursor (power save off). -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- MulticastLock while NsdManager discovers (needed on pre-14 devices). -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
@@ -13,7 +13,6 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Find my phone. -->
@@ -37,6 +36,7 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
     <!-- Do Not Disturb sync: lists Ferry under Do Not Disturb access, so a Mac can set the filter once allowed. -->
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
@@ -157,14 +157,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- Screen mirroring consent ("Start now"); transparent, closes itself. -->
-        <activity
-            android:name=".screen.ProjectionActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-
         <receiver
             android:name=".screen.ScreenStop"
             android:exported="false" />
@@ -183,10 +175,9 @@
                 android:resource="@xml/control_service" />
         </service>
 
-        <!-- mediaProjection is added (startForeground) only while the screen is being captured. -->
         <service
             android:name=".FerryService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|mediaProjection" />
+            android:foregroundServiceType="connectedDevice" />
     </application>
 </manifest>

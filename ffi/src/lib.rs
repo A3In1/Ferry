@@ -139,7 +139,6 @@ pub enum FfiEvent {
         package: String,
         title: String,
         text: String,
-        posted_unix_ms: i64,
         buttons: Vec<FfiNotifButton>,
     },
     NotificationRemoved {
@@ -162,8 +161,6 @@ pub enum FfiEvent {
         title: String,
         artist: String,
         playing: bool,
-        duration_ms: i64,
-        position_ms: i64,
     },
     MediaCommand {
         cmd: FfiMediaCmd,
@@ -211,6 +208,14 @@ pub enum FfiEvent {
     /// phone → Mac: this conversation has no unread texts any more
     SmsRead {
         thread_id: i64,
+    },
+    /// phone → Mac: Ferry was stopped on the phone, or is back
+    PhoneRunning {
+        running: bool,
+    },
+    /// Mac → phone: place a call to this number
+    CallDial {
+        number: String,
     },
     Call {
         state: FfiCallState,
@@ -406,7 +411,6 @@ impl FfiEvent {
                 package: n.package,
                 title: n.title,
                 text: n.text,
-                posted_unix_ms: n.posted_unix_ms,
                 buttons: (n.buttons.into_iter())
                     .map(|b| FfiNotifButton {
                         id: b.id,
@@ -429,8 +433,6 @@ impl FfiEvent {
                 title: n.title,
                 artist: n.artist,
                 playing: n.playing,
-                duration_ms: n.duration_ms,
-                position_ms: n.position_ms,
             },
             Kind::MediaCommand(m) => Self::MediaCommand {
                 cmd: match proto::media_command::Cmd::try_from(m.cmd).ok()? {
@@ -520,6 +522,8 @@ impl FfiEvent {
             Kind::SmsRead(r) => Self::SmsRead {
                 thread_id: r.thread_id,
             },
+            Kind::PhoneRunning(r) => Self::PhoneRunning { running: r.running },
+            Kind::CallDial(c) => Self::CallDial { number: c.number },
         })
     }
 
@@ -532,7 +536,6 @@ impl FfiEvent {
                 package,
                 title,
                 text,
-                posted_unix_ms,
                 buttons,
             } => Kind::Notification(proto::Notification {
                 key,
@@ -540,7 +543,6 @@ impl FfiEvent {
                 package,
                 title,
                 text,
-                posted_unix_ms,
                 buttons: (buttons.into_iter())
                     .map(|b| proto::NotifButton {
                         id: b.id,
@@ -570,16 +572,12 @@ impl FfiEvent {
                 title,
                 artist,
                 playing,
-                duration_ms,
-                position_ms,
             } => Kind::NowPlaying(proto::NowPlaying {
                 active,
                 app_name,
                 title,
                 artist,
                 playing,
-                duration_ms,
-                position_ms,
             }),
             Self::MediaCommand { cmd } => Kind::MediaCommand(proto::MediaCommand {
                 cmd: match cmd {
@@ -674,6 +672,8 @@ impl FfiEvent {
             Self::Dnd { on } => Kind::Dnd(proto::Dnd { on }),
             Self::SmsMarkRead { thread_id } => Kind::SmsMarkRead(proto::SmsMarkRead { thread_id }),
             Self::SmsRead { thread_id } => Kind::SmsRead(proto::SmsRead { thread_id }),
+            Self::PhoneRunning { running } => Kind::PhoneRunning(proto::PhoneRunning { running }),
+            Self::CallDial { number } => Kind::CallDial(proto::CallDial { number }),
         };
         proto::Event { kind: Some(kind) }
     }
@@ -931,10 +931,6 @@ impl FerryNode {
         Ok(Arc::new(Self { node, delegate }))
     }
 
-    pub fn device_id(&self) -> String {
-        self.node.device_id()
-    }
-
     pub fn device_name(&self) -> String {
         self.node.device_name()
     }
@@ -1079,7 +1075,7 @@ impl FerryNode {
         Ok(self.node.check_in(&peer_id).await?)
     }
 
-    /// Mac: open a screen stream (mirroring / control) to a paired phone.
+    /// Mac: open a screen stream (Share Cursor control) to a paired phone.
     pub async fn open_screen(&self, peer_id: String) -> Result<Arc<ScreenStream>> {
         Ok(Arc::new(self.node.open_screen(&peer_id).await?.into()))
     }
@@ -1185,7 +1181,6 @@ mod event_tests {
                 package: "com.chat".into(),
                 title: "Ann".into(),
                 text: "hi".into(),
-                posted_unix_ms: 7,
                 buttons: vec![FfiNotifButton {
                     id: "r".into(),
                     title: "Reply".into(),
@@ -1206,8 +1201,6 @@ mod event_tests {
                 title: "Song".into(),
                 artist: "Band".into(),
                 playing: true,
-                duration_ms: 1000,
-                position_ms: 10,
             },
             FfiEvent::MediaCommand {
                 cmd: FfiMediaCmd::Next,
@@ -1285,6 +1278,10 @@ mod event_tests {
             FfiEvent::Dnd { on: true },
             FfiEvent::SmsMarkRead { thread_id: 3 },
             FfiEvent::SmsRead { thread_id: 3 },
+            FfiEvent::PhoneRunning { running: true },
+            FfiEvent::CallDial {
+                number: "+15551234".into(),
+            },
         ];
         for e in all {
             assert_eq!(FfiEvent::from_proto(e.clone().into_proto()), Some(e));

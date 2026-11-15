@@ -25,8 +25,8 @@ enum class Grant(val key: String, val label: String, val short: String, val why:
         listOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS, Manifest.permission.READ_CONTACTS),
     ),
     CALLS(
-        "calls", "Calls", "Calls", "See incoming calls on your Mac, answer or decline there, and see recent calls",
-        listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CONTACTS),
+        "calls", "Calls", "Calls", "See incoming calls on your Mac, answer, decline or place calls there, and see recent calls",
+        listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.CALL_PHONE, Manifest.permission.READ_CONTACTS),
     ),
     /** Needs All files access (a special access, not a runtime permission; see [PhoneFiles]). */
     FILES("files", "Files", "Files", "Let your Mac browse this phone's storage and copy files from it"),

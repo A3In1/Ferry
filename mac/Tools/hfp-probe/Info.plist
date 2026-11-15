@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.ferry.hfp-probe</string>
+  <key>CFBundleName</key><string>hfp-probe</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>hfp-probe connects to your paired phone as a hands-free unit.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>hfp-probe sends your voice to the call while its audio is on this Mac.</string>
+</dict>
+</plist>

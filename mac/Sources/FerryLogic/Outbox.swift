@@ -1,7 +1,7 @@
 import Foundation
 import Synchronization
 
-/// An ordered outgoing queue where some messages are "latest wins" (cursor moves, ACKs): while one is
+/// An ordered outgoing queue where some messages are "latest wins" (cursor moves): while one is
 /// waiting for the writer, a newer one replaces it instead of queueing behind it, so a slow link never
 /// leaves a backlog of stale moves to replay. Any ordinary message sent after a latest-wins one takes it
 /// along first, so order between kinds holds. Any thread.

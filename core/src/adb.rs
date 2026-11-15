@@ -96,7 +96,7 @@ pub fn parse_devices(out: &str) -> Vec<(String, String)> {
 }
 
 /// A phone adb reaches over Wi-Fi ("192.168.1.5:5555", "adb-…._adb-tls-connect._tcp"), not a cable:
-/// the USB bridge leaves those alone (the Mac's Use Phone connects them).
+/// the USB bridge leaves those alone.
 pub fn is_wireless(serial: &str) -> bool {
     serial.contains(':') || serial.contains("._adb-tls-connect.")
 }

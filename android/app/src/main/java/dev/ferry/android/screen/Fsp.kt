@@ -8,25 +8,17 @@ object Fsp {
     val MAGIC = "FSP1".toByteArray()
     const val MAX_LEN = 8L shl 20
 
-    const val INFO = 0x01
-    const val FRAME = 0x02
-    const val END = 0x03
-    const val QUALITY = 0x04
-    const val STATS = 0x05
-    const val TOUCH = 0x10
-    const val SCROLL = 0x11
-    const val KEY = 0x12
-    const val TEXT = 0x13
-    const val NAV = 0x14
-    const val KEYFRAME = 0x15
-    const val CURSOR = 0x16
-    const val ACK = 0x17
-    const val START = 0x20
+    private const val INFO = 0x01
+    private const val END = 0x03
+    private const val SCROLL = 0x11
+    private const val KEY = 0x12
+    private const val TEXT = 0x13
+    private const val CURSOR = 0x16
+    private const val START = 0x20
 
     const val SCROLL_CONTINUOUS = 1
     const val SCROLL_END = 2
 
-    const val CAP_VIDEO = 1
     const val CAP_CONTROL = 2
 
     const val END_NORMAL = 0
@@ -35,59 +27,24 @@ object Fsp {
     const val END_NOT_ALLOWED = 3
     const val END_ERROR = 4
 
-    fun encode(m: Msg): ByteArray {
-        val p = when (m) {
-            is Msg.Start -> buf(7).putShort(m.maxSize.toShort()).putInt(m.bitrate.toInt()).put(m.flags.toByte())
-            is Msg.Touch -> buf(9).put(m.action.toByte()).putFloat(m.x).putFloat(m.y)
-            is Msg.Scroll -> buf(17).putFloat(m.x).putFloat(m.y).putFloat(m.dx).putFloat(m.dy).put(m.flags.toByte())
-            is Msg.Text -> m.text.toByteArray().let { buf(it.size).put(it) }
-            is Msg.Key -> buf(5).putInt(m.code.toInt()).put(m.meta.toByte())
-            is Msg.Nav -> buf(1).put(m.action.toByte())
-            Msg.Keyframe -> buf(0)
-            is Msg.Cursor -> buf(9).put(m.action.toByte()).putFloat(m.x).putFloat(m.y)
-            is Msg.Info -> buf(5).putShort(m.width.toShort()).putShort(m.height.toShort()).put(m.caps.toByte())
-            is Msg.Frame -> buf(9 + m.data.size).putLong(m.ptsUs).put(m.flags.toByte()).put(m.data)
-            is Msg.End -> m.detail.toByteArray().let { buf(1 + it.size).put(m.reason.toByte()).put(it) }
-            is Msg.Quality -> buf(4).putInt(m.bitrate)
-            is Msg.Ack -> buf(8).putLong(m.ptsUs)
-            is Msg.Stats -> buf(24).putShort(m.windowMs.u16s()).putShort(m.encoded.u16s()).putShort(m.sent.u16s())
-                .putShort(m.dropped.u16s()).putInt(m.targetBps).putInt(m.outBps).putShort(m.encodeTenthMs.u16s())
-                .putShort(m.writeTenthMs.u16s()).putShort(m.rttTenthMs.u16s()).putShort(m.rttMinTenthMs.u16s())
-        }
-        return p.put(0, m.type.toByte()).putInt(1, p.capacity() - 5).array()
-    }
+    fun info(width: Int, height: Int, caps: Int): ByteArray =
+        message(INFO, ByteBuffer.allocate(5).putShort(width.toShort()).putShort(height.toShort()).put(caps.toByte()).array())
 
-    /** A whole FRAME message with [data]'s remaining bytes, copied once (from the encoder's buffer). */
-    fun frame(ptsUs: Long, flags: Int, data: ByteBuffer): ByteArray {
-        val n = data.remaining()
-        return ByteBuffer.allocate(5 + 9 + n).put(FRAME.toByte()).putInt(9 + n).putLong(ptsUs).put(flags.toByte()).put(data).array()
-    }
+    fun end(reason: Int, detail: String = ""): ByteArray = message(END, byteArrayOf(reason.toByte()) + detail.toByteArray())
 
-    /** A whole message with room for [n] payload bytes, written past the 5-byte header (filled in last), so a FRAME is copied once. */
-    private fun buf(n: Int): ByteBuffer = ByteBuffer.allocate(5 + n).put(0.toByte()).putInt(0)
+    private fun message(type: Int, payload: ByteArray): ByteArray =
+        ByteBuffer.allocate(5 + payload.size).put(type.toByte()).putInt(payload.size).put(payload).array()
 
-    /** null = unknown type (skipped). Extra trailing bytes are ignored; a short payload is an error. */
+    /** A Mac → phone message; null = unknown type (skipped). Extra trailing bytes are ignored; a short payload is an error. */
     fun decode(type: Int, p: ByteArray): Msg? {
         val b = ByteBuffer.wrap(p)
         try {
             return when (type) {
-                START -> Msg.Start(b.short.u16(), b.int.u32(), b.get().u8())
-                TOUCH -> Msg.Touch(b.get().u8(), b.float, b.float)
-                SCROLL -> Msg.Scroll(b.float, b.float, b.float, b.float, b.opt())
+                START -> Msg.Start
+                SCROLL -> Msg.Scroll(b.float, b.float, b.float, b.float, b.get().u8())
                 TEXT -> Msg.Text(String(p))
-                KEY -> Msg.Key(b.int.u32(), b.opt())
-                NAV -> Msg.Nav(b.get().u8())
-                KEYFRAME -> Msg.Keyframe
+                KEY -> Msg.Key(b.int.toLong() and 0xffffffffL, b.get().u8())
                 CURSOR -> Msg.Cursor(b.get().u8(), b.float, b.float)
-                INFO -> Msg.Info(b.short.u16(), b.short.u16(), b.get().u8())
-                FRAME -> Msg.Frame(b.long, b.get().u8(), p.copyOfRange(9, p.size))
-                END -> Msg.End(b.get().u8(), String(p, 1, p.size - 1))
-                QUALITY -> Msg.Quality(b.int)
-                ACK -> Msg.Ack(b.long)
-                STATS -> Msg.Stats(
-                    b.short.u16(), b.short.u16(), b.short.u16(), b.short.u16(), b.int, b.int,
-                    b.short.u16(), b.short.u16(), b.short.u16(), b.short.u16(),
-                )
                 else -> null
             }
         } catch (_: BufferUnderflowException) {
@@ -95,57 +52,23 @@ object Fsp {
         }
     }
 
-    /** A trailing byte added later to a message: 0 from older peers that don't send it. */
-    private fun ByteBuffer.opt() = if (hasRemaining()) get().u8() else 0
     private fun Byte.u8() = toInt() and 0xff
-    private fun Short.u16() = toInt() and 0xffff
-    private fun Int.u32() = toLong() and 0xffffffffL
-    /** A u16 field, saturated (0xffff also means "unknown" for times). */
-    private fun Int.u16s() = coerceIn(0, 0xffff).toShort()
 }
 
 class FspException(msg: String) : Exception(msg)
 
-sealed class Msg(val type: Int) {
-    data class Start(val maxSize: Int, val bitrate: Long, val flags: Int) : Msg(Fsp.START) {
-        val video get() = flags and 1 != 0
-    }
-    data class Touch(val action: Int, val x: Float, val y: Float) : Msg(Fsp.TOUCH)
+/** Mac → phone. */
+sealed class Msg {
+    data object Start : Msg()
     /** [flags]: [Fsp.SCROLL_CONTINUOUS] trackpad deltas (incl. momentum), [Fsp.SCROLL_END] lift the finger; 0 = a wheel step. */
-    data class Scroll(val x: Float, val y: Float, val dx: Float, val dy: Float, val flags: Int = 0) : Msg(Fsp.SCROLL) {
+    data class Scroll(val x: Float, val y: Float, val dx: Float, val dy: Float, val flags: Int) : Msg() {
         val continuous get() = flags and Fsp.SCROLL_CONTINUOUS != 0
         val end get() = flags and Fsp.SCROLL_END != 0
     }
-    data class Text(val text: String) : Msg(Fsp.TEXT)
+    data class Text(val text: String) : Msg()
     /** [code]: an Android keycode ([Keys]); [meta]: [Keys.SHIFT], [Keys.ALT]. */
-    data class Key(val code: Long, val meta: Int = 0) : Msg(Fsp.KEY)
-    data class Nav(val action: Int) : Msg(Fsp.NAV)
-    data object Keyframe : Msg(Fsp.KEYFRAME)
-    data class Cursor(val action: Int, val x: Float, val y: Float) : Msg(Fsp.CURSOR)
-    data class Info(val width: Int, val height: Int, val caps: Int) : Msg(Fsp.INFO)
-    class Frame(val ptsUs: Long, val flags: Int, val data: ByteArray) : Msg(Fsp.FRAME)
-    data class End(val reason: Int, val detail: String = "") : Msg(Fsp.END)
-    /** The encoder's bitrate (bps) after the phone adapted it to the link. */
-    data class Quality(val bitrate: Int) : Msg(Fsp.QUALITY)
-    /** Mac → phone: the newest FRAME (by pts) the Mac has received, so the phone can time the link. */
-    data class Ack(val ptsUs: Long) : Msg(Fsp.ACK)
-    /** Phone → Mac, every ~2 s: what the encoder and sender did in the last window. Times in 0.1 ms, [UNKNOWN] if none. */
-    data class Stats(
-        val windowMs: Int,
-        val encoded: Int,
-        val sent: Int,
-        val dropped: Int,
-        val targetBps: Int,
-        val outBps: Int,
-        val encodeTenthMs: Int,
-        val writeTenthMs: Int,
-        val rttTenthMs: Int,
-        val rttMinTenthMs: Int,
-    ) : Msg(Fsp.STATS) {
-        companion object {
-            const val UNKNOWN = 0xffff
-        }
-    }
+    data class Key(val code: Long, val meta: Int) : Msg()
+    data class Cursor(val action: Int, val x: Float, val y: Float) : Msg()
 }
 
 /** Incremental parser: feed it whatever chunks the stream returns. Throws [FspException] on a protocol error. */

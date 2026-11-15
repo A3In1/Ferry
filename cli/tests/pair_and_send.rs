@@ -1,6 +1,8 @@
 //! Two in-process nodes on loopback: pair via ticket (auto-confirm), then send files.
 //! No mDNS reliance: the ticket and trust record carry 127.0.0.1 addresses.
 
+mod common;
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,14 +16,8 @@ fn yes() -> ConfirmFn {
 
 async fn node(root: &Path, name: &str) -> Arc<Node> {
     Node::start(NodeConfig {
-        data_dir: root.join(name).join("data"),
-        device_name: name.into(),
-        download_dir: root.join(name).join("dl"),
-        accept: Arc::new(|o| vec![true; o.items.len()]),
-        events: Arc::new(|_| {}),
         confirm_pairing: yes(),
-        on_screen: Arc::new(|_, _| {}),
-        on_event: Arc::new(|_, _| {}),
+        ..common::config(root, name)
     })
     .await
     .unwrap()

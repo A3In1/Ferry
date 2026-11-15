@@ -1,6 +1,8 @@
 //! Bluetooth-style bridge: two nodes joined only by an in-memory byte stream (standing in
 //! for an L2CAP channel) pair and exchange events with no network addresses at all.
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,16 +15,10 @@ use tokio::sync::mpsc;
 async fn node(root: &Path, name: &str) -> (Arc<Node>, mpsc::UnboundedReceiver<Event>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let n = Node::start(NodeConfig {
-        data_dir: root.join(name),
-        device_name: name.into(),
-        download_dir: root.join(name).join("dl"),
-        accept: Arc::new(|o| vec![true; o.items.len()]),
-        events: Arc::new(|_| {}),
-        confirm_pairing: Arc::new(|_| Box::pin(async { true })),
-        on_screen: Arc::new(|_, _| {}),
         on_event: Arc::new(move |_, ev| {
             let _ = tx.send(ev);
         }),
+        ..common::config(root, name)
     })
     .await
     .unwrap();

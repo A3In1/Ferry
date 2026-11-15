@@ -57,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         updates.onChange = { [weak self] in self?.refreshUpdateItem() }
         model.onPaired = { [weak self] name in
             self?.pairWindow?.close()
-            self?.model.notify("Paired with \(name)", "Open the Ferry menu to mirror its screen, read messages and send files.") {
+            self?.model.notify("Paired with \(name)", "Open the Ferry menu to read messages and send files.") {
                 $0.threadIdentifier = "pairing"
             }
         }
@@ -104,18 +104,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func menuWillOpen(_ menu: NSMenu) { menuOpen = true }
     func menuDidClose(_ menu: NSMenu) { menuOpen = false }
 
-    /// "Use Phone": the phone's screen in a window (scrcpy), over USB or remembered Wi-Fi. Reads "Close
-    /// Phone Window" while one is open.
-    private func usePhoneItem(_ peer: FfiPeer, key: String) -> NSMenuItem {
-        let open = model.phoneWindows[peer.id]?.isRunning == true
-        let ready = model.usbSerial(peer.id) != nil || model.wirelessEndpoint(peer.id) != nil
-        return ClosureItem(open ? "Close Phone Window" : "Use Phone", key: key) { [weak self] in self?.model.usePhone(peer) }
-            .symbol(open ? "xmark.rectangle" : "iphone.gen3")
-            .tip(ready
-                ? "See and use \(peer.name) in a window on this Mac. Close the window to lock the phone again."
-                : "Plug \(peer.name) in with the USB cable the first time. After that it works over Wi-Fi.")
-    }
-
     /// What you can do with one phone: at the top level with one phone, in its submenu with several.
     /// `keys`: give the main items keyboard equivalents (only one phone, so they're unambiguous).
     private func phoneActions(_ peer: FfiPeer, keys: Bool) -> [NSMenuItem] {
@@ -136,7 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         dnd.state = model.phoneDnd[peer.id] == true ? .on : .off
         let clip = model.clipboardHasText
         return [
-            usePhoneItem(peer, key: keys ? "1" : ""),
             ClosureItem("Messages", key: keys ? "2" : "") { [weak self] in self?.model.openMessages(peer) }.symbol("message")
                 .unreadBadge(model.phoneTexts[peer.id]?.unread ?? 0),
             ClosureItem("Browse Files", key: keys ? "3" : "") { [weak self] in self?.model.openFiles(peer) }.symbol("folder"),
@@ -166,6 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let bluetooth = ClosureItem("Use Bluetooth") { [weak self] in self?.model.bluetoothEnabled.toggle() }
             .tip("Reach your phone over Bluetooth when it isn't on the same Wi-Fi")
         bluetooth.state = model.bluetoothEnabled ? .on : .off
+        let talk = ClosureItem("Talk on the Mac (trial)") { [weak self] in self?.model.talkOnMac.toggle() }
+            .enabled(hasPhone)
+            .tip(hasPhone ? "Answer calls on this Mac and talk with its microphone and speakers, or the earphones connected to it. Pair the phone "
+                + "with this Mac in System Settings → Bluetooth first. While it's on, the phone may send every call's audio here." : "Pair a phone first")
+        talk.state = model.talkOnMac ? .on : .off
         let edge = submenu("Cursor Crosses At", ScreenEdge.allCases.map { edge in
             let item = ClosureItem(edge == .left ? "Left Edge" : "Right Edge") { [weak self] in self?.model.cursorEdge = edge }
             item.state = model.cursorEdge == edge ? .on : .off
@@ -177,10 +169,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             .enabled(updates.feed != nil)
             .tip(updates.feed != nil ? "Look for a new version of Ferry once a day" : "Updates aren't set up for this build yet")
         autoUpdate.state = updates.automatic ? .on : .off
-        let auth = ClosureItem("Require Mac Password to Mirror") { MacAuth.required.toggle() }
-            .tip("Ask for Touch ID or your Mac password before mirroring or Share Cursor starts (remembered for 5 minutes, until the Mac sleeps or locks)")
+        let auth = ClosureItem("Require Mac Password for Share Cursor") { MacAuth.required.toggle() }
+            .tip("Ask for Touch ID or your Mac password before Share Cursor starts (remembered for 5 minutes, until the Mac sleeps or locks)")
         auth.state = MacAuth.required ? .on : .off
-        var items = [sync, bluetooth, edge, auth,
+        var items = [sync, bluetooth, talk, edge, auth,
                      ClosureItem("Set Up Focus Sync…") { [weak self] in self?.model.showFocusSetup() }
                          .enabled(hasPhone).tip(hasPhone ? "Have your phone follow this Mac's Focus" : "Pair a phone first"),
                      .separator(), login, autoUpdate]
@@ -231,6 +223,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 items.append(label("On a call with \(who)").symbol("phone.fill"))
                 items.append(ClosureItem("Hang Up") { [weak self] in self?.model.callCommand(.decline, peer: peer.id) }
                     .symbol("phone.down.fill").indented())
+                if model.talkOnMac, model.talk.ready {
+                    let toMac = !model.talk.audioOnMac
+                    items.append(ClosureItem(toMac ? "Move Audio to Mac" : "Move Audio to Phone") { [weak self] in
+                        self?.model.moveCallAudio(toMac: toMac)
+                    }.symbol(toMac ? "laptopcomputer" : "iphone").indented())
+                }
             }
             if let np = model.nowPlaying[peer.id] {
                 let playing = label(short(np.artist.isEmpty ? np.title : "\(np.title) — \(np.artist)")).symbol(np.playing ? "music.note" : "pause")
@@ -245,6 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
         }
         if let note = model.bluetoothNote, model.bluetoothEnabled { items.append(label(note).symbol("exclamationmark.triangle")) }
+        if model.talkOnMac, let problem = model.talk.problem { items.append(note(problem)) }
         if model.usbLinks.contains(where: { !$0.serial.hasPrefix("ble:") && model.peer($0.peerId) == nil }) {
             items.append(label("A phone on USB isn't paired yet").symbol("cable.connector")
                 .tip("Choose Pair over USB… to pair it"))
@@ -312,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     private func showAbout() {
         NSApp.activate()
-        let credits = NSAttributedString(string: "Core \(coreVersion())\nOpen Phone uses scrcpy by Genymobile (Apache-2.0)", attributes: [
+        let credits = NSAttributedString(string: "Core \(coreVersion())", attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.secondaryLabelColor,
         ])
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])

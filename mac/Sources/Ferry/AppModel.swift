@@ -51,20 +51,22 @@ final class AppModel {
     /// Phones with a synced copy in flight, and the newest copy waiting behind each (Sync.swift).
     var clipboardSending: Set<String> = []
     var clipboardNext: [String: String] = [:]
-    // Phase 4 (Screen.swift, Crossing.swift): open viewer windows by peer id, and cursor sharing.
-    var viewers: [String: ScreenWindow] = [:]
-    var phoneWindows: [String: Process] = [:] // Open Phone, per phone
+    // Phase 4 (Screen.swift, Crossing.swift): cursor sharing.
     var crossing: Crossing?
     // Phase 5 (Messages.swift), by peer id: texts and calls, open Messages windows, who an active call is with.
     var phoneTexts: [String: PhoneTexts] = [:]
     var messageWindows: [String: MessagesWindow] = [:]
     var activeCalls: [String: String] = [:]
+    /// Trial "Talk on the Mac" (TalkOnMac.swift): the hands-free connection to the phone.
+    lazy var talk = TalkOnMac { [weak self] in self?.onChange() }
     // Phase 6: phone file browsing (Files.swift) by peer id, and the phone's last reported Do Not Disturb (WifiFocus.swift).
     var phoneFiles: [String: PhoneFiles] = [:]
     var fileWindows: [String: FilesWindow] = [:]
     var phoneDnd: [String: Bool] = [:]
     /// When each phone last sent us anything (a hint that it's reachable over the network).
     var lastHeard: [String: Date] = [:]
+    /// Phones that said Ferry was stopped on them, until they say anything again.
+    var stoppedPhones: Set<String> = []
     /// After the user confirms a pairing code (closes the Pair window).
     var onPaired: (String) -> Void = { _ in }
 
@@ -119,6 +121,7 @@ final class AppModel {
         bluetooth?.setWanted(bluetoothEnabled && !peers.isEmpty)
         dropStalled()
         updateCrossing()
+        updateTalkOnMac()
         onChange()
     }
 
@@ -142,6 +145,7 @@ final class AppModel {
     /// How the phone is reached, for the menu: (line, SF Symbol). USB and Bluetooth links are known; Wi-Fi is
     /// inferred from the phone having sent something lately (the core doesn't expose live connection state).
     func connection(_ id: String) -> (String, String) {
+        if stoppedPhones.contains(id) { return ("Not connected: Ferry is stopped on the phone", "iphone.slash") }
         if let link = usbLinks.first(where: { $0.peerId == id }) {
             return link.serial.hasPrefix("ble:") ? ("Connected over Bluetooth", "dot.radiowaves.left.and.right")
                 : ("Connected over USB", "cable.connector")
@@ -168,10 +172,11 @@ final class AppModel {
             nowPlaying[peer.id] = nil
             activeCalls[peer.id] = nil
             lastHeard[peer.id] = nil
+            stoppedPhones.remove(peer.id)
             phoneDnd[peer.id] = nil
             phoneTexts[peer.id] = nil // its cached threads and messages
             phoneFiles[peer.id] = nil
-            for w in [viewers[peer.id], messageWindows[peer.id], fileWindows[peer.id]] as [PeerWindow?] { w?.window.close() }
+            for w in [messageWindows[peer.id], fileWindows[peer.id]] as [PeerWindow?] { w?.window.close() }
             removeNotifications { $0.request.content.userInfo[Notifications.peerKey] as? String == peer.id }
         } catch {
             logger.error("forget failed: \(error, privacy: .public)")
@@ -317,17 +322,6 @@ final class AppModel {
         }
     }
 
-    /// Mark like a browser download so Gatekeeper checks it on first open.
-    private func quarantine(_ url: URL) {
-        var url = url
-        var values = URLResourceValues()
-        values.quarantineProperties = [
-            kLSQuarantineAgentNameKey as String: "Ferry",
-            kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
-        ]
-        do { try url.setResourceValues(values) } catch { logger.error("couldn't quarantine \(url.path): \(error, privacy: .public)") }
-    }
-
     func notifyReceived(_ urls: [URL], what: String, failed: Int, id: String) {
         let folder = urls[0].deletingLastPathComponent().lastPathComponent
         notify("Received \(what)", "In your \(folder) folder" + (failed > 0 ? ". \(failed) couldn't be received." : ""), id: "f|\(id)") {
@@ -453,8 +447,9 @@ enum Notifications {
     static let buttonPrefix = "b|"
     /// Phase 5: texts are "s|<peerId>|<messageId>", the ringing call "c|<peerId>".
     static let smsPrefix = "s|", callPrefix = "c|"
-    static let sms = "sms", smsCode = "sms-code", call = "call"
+    static let sms = "sms", smsCode = "sms-code", call = "call", callMac = "call-mac"
     static let replyAction = "reply", copyAction = "copy", answerAction = "answer", declineAction = "decline"
+    static let answerMacAction = "answer-mac", answerPhoneAction = "answer-phone"
     static let addressKey = "address", threadKey = "thread", codeKey = "code"
     /// "A new Ferry is available" from a background update check (Updates.swift).
     static let update = "update"

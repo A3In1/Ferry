@@ -1,29 +1,23 @@
 //! Phase 2 events flow both ways over one long-lived session: the dialed side pushes
 //! events back on the connection the other side opened.
 
-use std::net::SocketAddr;
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ferry_core::node::{Node, NodeConfig};
-use ferry_core::pairing::Ticket;
 use ferry_core::proto::{Clipboard, Event, Ring, event::Kind};
 use tokio::sync::mpsc;
 
 async fn node(root: &Path, name: &str) -> (Arc<Node>, mpsc::UnboundedReceiver<(String, Event)>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let node = Node::start(NodeConfig {
-        data_dir: root.join(name).join("data"),
-        device_name: name.into(),
-        download_dir: root.join(name).join("dl"),
-        accept: Arc::new(|o| vec![true; o.items.len()]),
-        events: Arc::new(|_| {}),
-        confirm_pairing: Arc::new(|_| Box::pin(async { true })),
-        on_screen: Arc::new(|_, _| {}),
         on_event: Arc::new(move |peer, ev| {
             let _ = tx.send((peer, ev));
         }),
+        ..common::config(root, name)
     })
     .await
     .unwrap();
@@ -45,15 +39,7 @@ async fn events_both_ways_on_one_session() {
         node(root.path(), "phone").await,
     );
 
-    let mut t: Ticket = mac.new_pairing_ticket().unwrap().parse().unwrap();
-    t.addrs = vec![SocketAddr::from(([127, 0, 0, 1], mac.port()))];
-    phone
-        .pair_with_ticket(&t.to_string(), Arc::new(|_| Box::pin(async { true })))
-        .await
-        .unwrap();
-    while mac.peers().is_empty() {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    common::pair(&mac, &phone).await;
 
     // phone dials; the mac never learned a dialable phone address except via this session
     let clip = Event {

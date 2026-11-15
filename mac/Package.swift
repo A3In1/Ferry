@@ -28,7 +28,19 @@ let package = Package(
         ),
         .executableTarget(
             name: "Ferry",
-            dependencies: ["FerryCore", "FerryLogic", .product(name: "Sparkle", package: "Sparkle")]
+            dependencies: ["FerryCore", "FerryLogic", "FerryHandsFree", .product(name: "Sparkle", package: "Sparkle")]
+        ),
+        // Trial "Talk on the Mac" (Bluetooth hands-free over IOBluetooth), shared by the app and hfp-probe.
+        .target(name: "FerryHandsFree", linkerSettings: [.linkedFramework("IOBluetooth")]),
+        // `swift run hfp-probe`: tries hands-free against a paired phone from Terminal (see README).
+        .executableTarget(
+            name: "hfp-probe",
+            dependencies: ["FerryHandsFree"],
+            path: "Tools/hfp-probe",
+            exclude: ["Info.plist"],
+            // Bluetooth privacy needs a usage string; a command-line tool carries it in its __info_plist section.
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
+                                           "-Xlinker", "Tools/hfp-probe/Info.plist"])]
         ),
         // Pure helpers (no Rust), so tests build fast.
         .target(name: "FerryLogic"),

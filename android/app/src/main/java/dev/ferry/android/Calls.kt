@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import android.os.Build
 import android.provider.CallLog
 import android.telecom.TelecomManager
@@ -111,6 +112,16 @@ object Calls {
             FfiCallCmd.ANSWER -> tm.acceptRingingCall()
             FfiCallCmd.DECLINE -> tm.endCall()
         }
+    }
+
+    /** Placed by Android's own phone app, which shows the call as usual. */
+    @SuppressLint("MissingPermission") // Grants.allowed(CALLS) checked CALL_PHONE
+    fun dial(ctx: Context, number: String) {
+        val to = number.trim()
+        if (to.isEmpty()) return
+        Log.w(PHONE_TAG, "placing a call for a Mac")
+        runCatching { ctx.getSystemService(TelecomManager::class.java).placeCall(Uri.fromParts("tel", to, null), null) }
+            .onFailure { Log.w(PHONE_TAG, "couldn't place the call", it) }
     }
 
     /** Newest first. */

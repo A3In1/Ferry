@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 /**
@@ -47,7 +48,6 @@ class FerryService : Service() {
     private var presence: NsdPresence? = null
     private var notification: Notification? = null
     private var battery: FfiEvent.Battery? = null
-    private var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
 
     private val batteryChanged = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, i: Intent) {
@@ -91,7 +91,7 @@ class FerryService : Service() {
             val onWifi = cm.getNetworkCapabilities(cm.activeNetwork)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             Ferry.peers.value.forEach { p ->
                 if (onWifi && Ferry.ble.value == p.id) return@forEach Ble.tryWifi(this@FerryService, node, p.id)
-                catching { node.checkIn(p.id) }.onFailure { Log.w(TAG, "check-in with ${p.name}: ${it.message}") }
+                catching { node.checkIn(p.id); node.sendEvent(p.id, FfiEvent.PhoneRunning(true)) }.onFailure { Log.w(TAG, "check-in with ${p.name}: ${it.message}") }
             }
         }
     }
@@ -120,7 +120,7 @@ class FerryService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stopSelf()
+            tellMacsAndStop()
         } else {
             // Every startForegroundService() call must be answered with startForeground().
             notification?.let(::goForeground)
@@ -128,6 +128,17 @@ class FerryService : Service() {
         // Not sticky: a killed process stays stopped until the app is opened again or (with a
         // CDM association) a Bluetooth scan hit restarts it.
         return START_NOT_STICKY
+    }
+
+    /** Tells each Mac first, while every link is still up, so it stops showing this phone as connected. Stop can't wait long. */
+    private fun tellMacsAndStop() {
+        Ferry.scope.launch {
+            val node = Ferry.node.value
+            if (node != null) withTimeoutOrNull(2_000) {
+                Ferry.peers.value.forEach { p -> launch { catching { node.sendEvent(p.id, FfiEvent.PhoneRunning(false)) } } }
+            }
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {
@@ -178,6 +189,19 @@ class FerryService : Service() {
             .isSuccess
         // Re-send now and then so a Mac that just connected learns the level.
         coroutineScope {
+            // A Mac may be showing "stopped" and may take a moment to reach. It also dropped the battery and media lines.
+            node.peers().forEach { p ->
+                launch {
+                    repeat(12) {
+                        if (catching { node.sendEvent(p.id, FfiEvent.PhoneRunning(true)) }.isSuccess) {
+                            sendBattery()
+                            FerryListener.instance?.refreshMedia()
+                            return@launch
+                        }
+                        delay(5_000)
+                    }
+                }
+            }
             launch {
                 while (true) {
                     delay(5 * 60_000)
@@ -219,13 +243,7 @@ class FerryService : Service() {
 
     private fun goForeground(n: Notification) {
         notification = n
-        ServiceCompat.startForeground(this, Notifs.ID_ONGOING, n, types)
-    }
-
-    /** Adds/drops the mediaProjection type; add it after consent and before getMediaProjection (Android 14+). */
-    fun projecting(on: Boolean) {
-        types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or (if (on) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0)
-        notification?.let(::goForeground)
+        ServiceCompat.startForeground(this, Notifs.ID_ONGOING, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
     }
 
     /** The visible indicator of what's shared: the active grants are always listed here. */
@@ -260,5 +278,7 @@ class FerryService : Service() {
         const val FAILED = "Couldn't start: "
 
         fun start(ctx: Context) = ContextCompat.startForegroundService(ctx, Intent(ctx, FerryService::class.java))
+
+        fun stop(ctx: Context) = ctx.startService(Intent(ctx, FerryService::class.java).setAction(ACTION_STOP))
     }
 }

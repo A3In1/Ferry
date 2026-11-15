@@ -149,6 +149,7 @@ object SmsReads {
     private var observer: ContentObserver? = null // main only, as is [pending]
     private var pending: Runnable? = null
     private var last: Map<Long, Int>? = null // exec only: the provider's unread per thread at the last look
+    private var newest: Long? = null // exec only: the provider's newest text at the last look
 
     /** Watches the provider while the service runs; call on the main thread. */
     fun start(svc: Context) {
@@ -177,14 +178,19 @@ object SmsReads {
         observer = null
         pending?.let(main::removeCallbacks)
         pending = null
-        exec.execute { last = null }
+        exec.execute {
+            last = null
+            newest = null
+        }
     }
 
     private fun look(ctx: Context) {
         if (!Grants.allowed(ctx, Grant.MESSAGES)) {
             last = null
+            newest = null
             return
         }
+        pushIfChanged(ctx)
         val now = counts(unreadRows(ctx))
         val read = last?.let { readSince(it, now) }.orEmpty()
         last = now
@@ -192,6 +198,20 @@ object SmsReads {
         forget(ctx, read)
         Log.w(PHONE_TAG, "${read.size} sms thread(s) read on the phone")
         read.forEach { Outbox.broadcast(FfiEvent.SmsRead(it)) }
+    }
+
+    /** A text came or went (here, on a Mac, or in the phone's own messaging app): every Mac gets the new list. */
+    private fun pushIfChanged(ctx: Context) {
+        var latest = 0L
+        ctx.eachRow(Telephony.Sms.CONTENT_URI, arrayOf(BaseColumns._ID), sort = "${BaseColumns._ID} DESC") { c ->
+            latest = c.getLong(0)
+            false
+        }
+        val changed = newest != null && newest != latest
+        newest = latest
+        if (!changed) return
+        Log.w(PHONE_TAG, "sms changed, pushing the list")
+        Outbox.broadcast(Sms.threads(ctx, 0))
     }
 
     /** From a Mac: the user read [threadId] there. */

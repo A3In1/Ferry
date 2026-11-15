@@ -84,16 +84,3 @@ public struct VirtualCursor: Equatable, Sendable {
 
     public var normalized: (x: Float, y: Float) { (Float(min(max(x, 0), width) / width), Float(y / height)) }
 }
-
-/// A point in a view as 0...1 of the video drawn aspect-fit inside `bounds`, y down (phone order).
-/// nil when outside the video unless `clamp`.
-public func videoPoint(_ p: CGPoint, video: CGSize, bounds: CGRect, flipped: Bool, clamp: Bool = false) -> CGPoint? {
-    guard video.width > 0, video.height > 0, bounds.width > 0, bounds.height > 0 else { return nil }
-    let s = min(bounds.width / video.width, bounds.height / video.height)
-    let w = video.width * s, h = video.height * s
-    let r = CGRect(x: bounds.midX - w / 2, y: bounds.midY - h / 2, width: w, height: h)
-    var x = (p.x - r.minX) / w, y = (p.y - r.minY) / h
-    if !flipped { y = 1 - y }
-    if clamp { return CGPoint(x: min(max(x, 0), 1), y: min(max(y, 0), 1)) }
-    return (0...1).contains(x) && (0...1).contains(y) ? CGPoint(x: x, y: y) : nil
-}

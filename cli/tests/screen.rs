@@ -1,29 +1,23 @@
 //! Phase 4: the Mac opens a CH_SCREEN bi stream; the phone gets it via `on_screen` and
 //! bytes flow both ways (the FSP1 payload itself is the apps' business).
 
-use std::net::SocketAddr;
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ferry_core::node::{Node, NodeConfig, Screen};
-use ferry_core::pairing::Ticket;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 async fn node(root: &Path, name: &str) -> (Arc<Node>, mpsc::UnboundedReceiver<(String, Screen)>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let node = Node::start(NodeConfig {
-        data_dir: root.join(name).join("data"),
-        device_name: name.into(),
-        download_dir: root.join(name).join("dl"),
-        accept: Arc::new(|o| vec![true; o.items.len()]),
-        events: Arc::new(|_| {}),
-        confirm_pairing: Arc::new(|_| Box::pin(async { true })),
         on_screen: Arc::new(move |peer, s| {
             let _ = tx.send((peer, s));
         }),
-        on_event: Arc::new(|_, _| {}),
+        ..common::config(root, name)
     })
     .await
     .unwrap();
@@ -37,15 +31,7 @@ async fn screen_stream_both_ways() {
         node(root.path(), "mac").await,
         node(root.path(), "phone").await,
     );
-    let mut t: Ticket = mac.new_pairing_ticket().unwrap().parse().unwrap();
-    t.addrs = vec![SocketAddr::from(([127, 0, 0, 1], mac.port()))];
-    phone
-        .pair_with_ticket(&t.to_string(), Arc::new(|_| Box::pin(async { true })))
-        .await
-        .unwrap();
-    while mac.peers().is_empty() {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    common::pair(&mac, &phone).await;
 
     // the phone dials once so the Mac has a session to open the stream on
     phone.check_in(&mac.device_id()).await.unwrap();

@@ -52,6 +52,8 @@ mod frozen {
             (24, Kind::Dnd(Default::default())),
             (25, Kind::SmsMarkRead(Default::default())),
             (26, Kind::SmsRead(Default::default())),
+            (27, Kind::PhoneRunning(Default::default())),
+            (28, Kind::CallDial(Default::default())),
         ];
         for (n, kind) in kinds {
             let bytes = Event {

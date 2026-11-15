@@ -91,6 +91,8 @@ message Event {
     Dnd dnd = 24;
     SmsMarkRead sms_mark_read = 25;
     SmsRead sms_read = 26;
+    PhoneRunning phone_running = 27;
+    CallDial call_dial = 28;
   }
 }
 message NotifButton {
@@ -104,7 +106,7 @@ message Notification { // phone → Mac; same key again = update
   string package = 3;
   string title = 4;
   string text = 5;
-  int64 posted_unix_ms = 6;
+  reserved 6;
   repeated NotifButton buttons = 7;
 }
 message NotificationRemoved { // phone → Mac
@@ -125,8 +127,7 @@ message NowPlaying { // phone → Mac; active = false clears it
   string title = 3;
   string artist = 4;
   bool playing = 5;
-  int64 duration_ms = 6;
-  int64 position_ms = 7;
+  reserved 6, 7;
 }
 message MediaCommand { // Mac → phone
   enum Cmd {
@@ -186,6 +187,9 @@ message SmsSend { // Mac → phone: the user pressed Send on the Mac
 message SmsMarkRead { // Mac → phone: the user read this conversation on the Mac
   int64 thread_id = 1;
 }
+message PhoneRunning { // phone → Mac: Ferry was stopped on the phone, or is back
+  bool running = 1;
+}
 message SmsRead { // phone → Mac: this conversation has no unread texts any more (read on the phone or another Mac)
   int64 thread_id = 1;
 }
@@ -205,6 +209,9 @@ message CallCommand { // Mac → phone
     DECLINE = 1; // also hangs up an active call
   }
   Cmd cmd = 1;
+}
+message CallDial { // Mac → phone: place a call to this number
+  string number = 1;
 }
 message CallLogRequest { // Mac → phone; answered with CallLog
   int32 limit = 1; // 0 = phone default (50)

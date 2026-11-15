@@ -17,7 +17,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
-import dev.ferry.android.screen.ProjectionActivity
 import dev.ferry.android.screen.ScreenStop
 
 class FerryApplication : Application() {
@@ -41,14 +40,12 @@ object Notifs {
     const val CH_TRANSFER = "transfers"
     const val CH_RING = "ring"
     const val CH_LINKS = "links"
-    const val CH_SCREEN = "screen"
     const val CH_ASK = "mac_requests"
 
     const val ID_ONGOING = 1
     const val ID_PAIR = 2
     const val ID_RING = 3
     const val ID_SCREEN = 4
-    const val ID_SCREEN_ASK = 5
     const val ID_WIFI = 6
     const val ID_DND = 7
 
@@ -65,7 +62,6 @@ object Notifs {
                 // The ringer plays its own alarm sound; the channel stays silent.
                 ch(CH_RING, "Find my phone", NotificationManager.IMPORTANCE_HIGH, "Shows while your Mac rings this phone, with a Stop button").apply { setSound(null, null) },
                 ch(CH_LINKS, "Links from your Mac", NotificationManager.IMPORTANCE_HIGH, "Links sent from your Mac, ready to open"),
-                ch(CH_SCREEN, "Screen sharing requests", NotificationManager.IMPORTANCE_HIGH, "Asks before your Mac can see your screen"),
                 ch(CH_ASK, "Requests from your Mac", NotificationManager.IMPORTANCE_HIGH, "Wi-Fi networks and Do Not Disturb changes your Mac sends"),
             ),
         )
@@ -194,34 +190,18 @@ object Notifs {
             .build(),
     )
 
-    /** Shown while a Mac has a screen stream open (mirroring, control or the shared cursor). */
+    /** Shown while a Mac has a Share Cursor stream open. */
     fun screen(ctx: Context, mac: String, text: String) {
         val stop = broadcast(ctx, ScreenStop::class.java)
         post(
             ctx,
             ID_SCREEN,
-            builder(ctx, CH_SERVICE, "$mac is connected to your screen")
+            builder(ctx, CH_SERVICE, "$mac is sharing its cursor")
                 .setContentText(text)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setContentIntent(openApp(ctx))
                 .addAction(0, "Stop sharing", stop)
-                .build(),
-        )
-    }
-
-    /** Android blocked the consent screen from the background: the user opens it from here. */
-    fun screenAsk(ctx: Context, mac: String) {
-        val open = Intent(ctx, ProjectionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        post(
-            ctx,
-            ID_SCREEN_ASK,
-            builder(ctx, CH_SCREEN, "$mac wants to see your screen")
-                .setContentText("Tap to choose whether to share it")
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setContentIntent(activity(ctx, 0, open))
-                .setAutoCancel(true)
-                .setTimeoutAfter(120_000)
                 .build(),
         )
     }

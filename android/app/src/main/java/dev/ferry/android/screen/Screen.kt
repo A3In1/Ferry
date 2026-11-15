@@ -1,59 +1,76 @@
 package dev.ferry.android.screen
 
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionConfig
-import android.media.projection.MediaProjectionManager
+import android.hardware.display.DisplayManager
 import android.net.wifi.WifiManager
-import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.util.DisplayMetrics
 import android.util.Log
-import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
+import android.view.Display
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import dev.ferry.android.Ferry
-import dev.ferry.android.FerryService
 import dev.ferry.android.Notifs
 import dev.ferry.android.text
 import dev.ferry.core.ScreenStream
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.DelicateCoroutinesApi
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 
 // vivo hides Info logs: everything here logs at warn.
 const val SCREEN_TAG = "FerryScreen"
 
-fun caps(video: Boolean) = (if (video) Fsp.CAP_VIDEO else 0) or (if (ControlService.instance.value != null) Fsp.CAP_CONTROL else 0)
+fun caps() = if (ControlService.instance.value != null) Fsp.CAP_CONTROL else 0
 
-/** The one screen session (docs/screen-protocol.md). A new stream replaces the old one. */
+data class ScreenSize(val w: Int, val h: Int)
+
+fun screenSize(ctx: Context): ScreenSize {
+    val m = DisplayMetrics()
+    @Suppress("DEPRECATION") // still the real size in the current rotation, and works from a non-visual context
+    ctx.getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(m)
+    return ScreenSize(m.widthPixels, m.heightPixels)
+}
+
+/** The screen size now and after every rotation. */
+fun screenSizes(ctx: Context) = callbackFlow {
+    val dm = ctx.getSystemService(DisplayManager::class.java)
+    val l = object : DisplayManager.DisplayListener {
+        override fun onDisplayChanged(id: Int) {
+            if (id == Display.DEFAULT_DISPLAY) trySend(screenSize(ctx))
+        }
+        override fun onDisplayAdded(id: Int) {}
+        override fun onDisplayRemoved(id: Int) {}
+    }
+    trySend(screenSize(ctx))
+    dm.registerDisplayListener(l, Handler(Looper.getMainLooper()))
+    awaitClose { dm.unregisterDisplayListener(l) }
+}.distinctUntilChanged()
+
+/** The one Share Cursor session (docs/screen-protocol.md). A new stream replaces the old one. */
 object Screen {
     /** Sessions run one after another: the next starts once the old one has cleaned up. */
     val turn = Mutex()
     @SuppressLint("StaticFieldLeak") // holds the application context only
     @Volatile private var current: Session? = null
-    @Volatile var ask: Ask? = null
 
     fun open(ctx: Context, peerId: String, stream: ScreenStream) {
         val s = Session(ctx.applicationContext, peerId, stream)
@@ -73,25 +90,13 @@ object Screen {
 /** Phone-side screen settings. */
 object ScreenPrefs {
     private const val KEEP_AWAKE = "keepAwake"
-    private const val LOCK_ON_END = "lockOnEnd"
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("screen", Context.MODE_PRIVATE)
 
-    /** "Keep phone awake while mirroring" (default on); loaded by [load]. */
+    /** "Keep phone awake while sharing the cursor" (default on); loaded by [load]. */
     val keepAwake = MutableStateFlow(true)
 
-    /** "Lock phone when mirroring ends" (default on; needs Ferry control). */
-    val lockOnEnd = MutableStateFlow(true)
-
     fun load(ctx: Context) {
-        val p = prefs(ctx)
-        keepAwake.value = p.getBoolean(KEEP_AWAKE, true)
-        lockOnEnd.value = p.getBoolean(LOCK_ON_END, true)
-    }
-
-
-    fun setLockOnEnd(ctx: Context, on: Boolean) {
-        prefs(ctx).edit { putBoolean(LOCK_ON_END, on) }
-        lockOnEnd.value = on
+        keepAwake.value = prefs(ctx).getBoolean(KEEP_AWAKE, true)
     }
 
     fun setKeepAwake(ctx: Context, on: Boolean) {
@@ -101,26 +106,12 @@ object ScreenPrefs {
     }
 }
 
-/** MediaProjection consent, answered by [ProjectionActivity]. */
-class Ask {
-    val shown = CompletableDeferred<Unit>()
-    val result = CompletableDeferred<Pair<Int, Intent?>>()
-}
-
-class Session(private val ctx: Context, private val peerId: String, private val stream: ScreenStream) {
+class Session(private val ctx: Context, peerId: String, private val stream: ScreenStream) {
     private val mac = Ferry.peerName(peerId)
     private val lock = Mutex()
     private var opened = false
     @Volatile private var ended = false
-    /** The phone ended the session (Stop, projection stopped, locked, replaced): the Mac's close that follows isn't its own. */
-    @Volatile private var endedHere = false
     private var started = false
-    @Volatile private var capture: Capture? = null
-    @Volatile private var projection: MediaProjection? = null
-    @Volatile private var stopped: MediaProjection.Callback? = null
-    /** Video is being captured. */
-    @Volatile var mirroring = false
-        private set
 
     // ATOMIC: runs (and finishes the stream) even if ended before it was dispatched.
     @OptIn(DelicateCoroutinesApi::class)
@@ -135,18 +126,14 @@ class Session(private val ctx: Context, private val peerId: String, private val 
 
     /** Sends END (once, if the stream still works) and tears the session down. Any thread. */
     fun end(reason: Int, detail: String = "") {
-        endedHere = true
         Log.w(SCREEN_TAG, "end $reason $detail")
         Ferry.scope.launch {
-            runCatching { send(Msg.End(reason, detail), last = true) }
+            runCatching { send(Fsp.end(reason, detail), last = true) }
             job.cancel()
         }
     }
 
-    private suspend fun send(m: Msg, last: Boolean = false) = sendRaw(Fsp.encode(m), last)
-
-    /** An encoded message (FRAMEs are encoded straight from the encoder's buffer). */
-    private suspend fun sendRaw(bytes: ByteArray, last: Boolean = false) = lock.withLock {
+    private suspend fun send(bytes: ByteArray, last: Boolean = false) = lock.withLock {
         if (ended) return@withLock
         ended = last
         stream.write(if (opened) bytes else Fsp.MAGIC + bytes)
@@ -163,23 +150,15 @@ class Session(private val ctx: Context, private val peerId: String, private val 
         // Needs Ferry control (the overlay window); without it the phone sleeps on its usual timeout.
         if (ScreenPrefs.keepAwake.value) ControlService.instance.value?.keepAwake(true)
         val wifi = WifiLocks(ctx)
-        var macClosed = false
         try {
             Notifs.screen(ctx, mac, "Getting ready…")
             coroutineScope {
                 val parser = FspParser()
                 while (true) {
-                    val chunk = try {
-                        stream.read()
-                    } catch (e: Exception) {
-                        // The Mac went away (lid closed, out of range): for the phone, the same as it closing.
-                        if (e !is CancellationException) macClosed = true
-                        throw e
-                    }
+                    val chunk = stream.read()
                     if (chunk.isEmpty()) break
                     parser.feed(chunk).forEach { handle(it) }
                 }
-                macClosed = true
                 Log.w(SCREEN_TAG, "$mac closed the screen stream")
                 coroutineContext.cancelChildren()
             }
@@ -187,24 +166,14 @@ class Session(private val ctx: Context, private val peerId: String, private val 
             throw e
         } catch (e: Exception) {
             Log.w(SCREEN_TAG, "screen session failed", e)
-            runCatching { send(Msg.End(Fsp.END_ERROR, e.text()), last = true) }
+            runCatching { send(Fsp.end(Fsp.END_ERROR, e.text()), last = true) }
         } finally {
-            ended = true // nothing more on the wire, incl. END from our own projection.stop() below
+            ended = true // nothing more on the wire
             ctx.unregisterReceiver(screenOff)
             wifi.release()
-            projection?.let {
-                stopped?.let(it::unregisterCallback) // our own stop isn't "stopped on the phone"
-                it.stop()
-                FerryService.instance?.projecting(false)
-            }
-            val wasMirroring = mirroring
-            mirroring = false
             ControlService.instance.value?.apply {
                 reset()
                 keepAwake(false)
-                // Mirroring ended from the Mac: don't leave the phone open on the desk. Not when the phone ended
-                // it (it's in someone's hand) or is already locked. Only locks; the keyguard is never dismissed.
-                if (wasMirroring && macClosed && !endedHere && ScreenPrefs.lockOnEnd.value && !locked()) lockScreen()
             }
             Notifs.cancel(ctx, Notifs.ID_SCREEN)
         }
@@ -212,80 +181,33 @@ class Session(private val ctx: Context, private val peerId: String, private val 
 
     private fun CoroutineScope.handle(m: Msg) {
         when (m) {
-            is Msg.Start -> if (!started) {
+            Msg.Start -> if (!started) {
                 started = true
-                launch { start(m) }
+                launch { start() }
             }
-            Msg.Keyframe -> capture?.keyframe()
-            is Msg.Ack -> capture?.acked(m.ptsUs)
-            is Msg.Touch, is Msg.Scroll, is Msg.Text, is Msg.Key, is Msg.Nav, is Msg.Cursor ->
-                if (started) ControlService.instance.value?.input(m)
-            else -> {} // phone → Mac kinds
+            else -> if (started) ControlService.instance.value?.input(m)
         }
     }
 
     private fun locked() = ctx.getSystemService(KeyguardManager::class.java).isKeyguardLocked ||
         !ctx.getSystemService(PowerManager::class.java).isInteractive
 
-    private suspend fun start(m: Msg.Start) {
+    private suspend fun start() {
         val control = ControlService.instance.value != null
-        Log.w(SCREEN_TAG, "START video=${m.video} control=$control max=${m.maxSize} bitrate=${m.bitrate}")
+        Log.w(SCREEN_TAG, "START control=$control")
         when {
             locked() -> return end(Fsp.END_LOCKED, "phone locked")
-            m.video && Ferry.bluetoothOnly(peerId) -> return end(Fsp.END_ERROR, "Bluetooth is too slow for video")
-            !m.video && !control -> return end(Fsp.END_NOT_ALLOWED, "turn on Ferry control")
+            !control -> return end(Fsp.END_NOT_ALLOWED, "turn on Ferry control")
         }
-        if (!m.video) {
-            Notifs.screen(ctx, mac, "Ferry control is on: $mac can tap, scroll and type here")
-            return screenSizes(ctx).collect { send(Msg.Info(it.w, it.h, caps(false))) }
-        }
-        val p = project() ?: return end(Fsp.END_NOT_ALLOWED, "screen sharing was not allowed on the phone")
-        projection = p
-        val cb = object : MediaProjection.Callback() {
-            override fun onStop() = end(if (locked()) Fsp.END_LOCKED else Fsp.END_STOPPED, "screen sharing stopped on the phone")
-        }
-        p.registerCallback(cb, Handler(Looper.getMainLooper()))
-        stopped = cb
-        Notifs.screen(ctx, mac, if (control) "Screen sharing is on, and $mac can tap and type here" else "Screen sharing is on")
-        mirroring = true
-        Capture(ctx, p, m).also { capture = it }.run(::send) { sendRaw(it) }
-    }
-
-    /** Consent: the activity if Android lets us start it, otherwise a notification the user taps. */
-    private suspend fun project(): MediaProjection? {
-        val a = Ask()
-        Screen.ask = a
-        try {
-            withContext(Dispatchers.Main) {
-                runCatching { ctx.startActivity(Intent(ctx, ProjectionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-            }
-            if (withTimeoutOrNull(2_000) { a.shown.await() } == null) {
-                Log.w(SCREEN_TAG, "consent activity blocked in the background; posting a notification")
-                Notifs.screenAsk(ctx, mac)
-            }
-            val (code, data) = withTimeoutOrNull(120_000) { a.result.await() } ?: return null
-            if (code != Activity.RESULT_OK || data == null) return null
-            // Android 14+: the service must hold the mediaProjection type before getMediaProjection.
-            val service = FerryService.instance ?: error("Ferry isn't running")
-            service.projecting(true)
-            // Don't leave the service holding the mediaProjection type if Android refuses the token.
-            return runCatching { ctx.getSystemService(MediaProjectionManager::class.java).getMediaProjection(code, data) }
-                .onFailure { Log.w(SCREEN_TAG, "getMediaProjection failed", it) }
-                .getOrNull() ?: run {
-                service.projecting(false)
-                null
-            }
-        } finally {
-            Screen.ask = null
-            Notifs.cancel(ctx, Notifs.ID_SCREEN_ASK)
-        }
+        Notifs.screen(ctx, mac, "$mac can tap, scroll and type here")
+        screenSizes(ctx).collect { send(Fsp.info(it.w, it.h, caps())) }
     }
 }
 
 /**
  * Wi-Fi power save off for a session: phone Wi-Fi dozes between beacons (+30–100 ms spikes on a stream that
  * is idle for a moment). LOW_LATENCY is honored only while Ferry is in the foreground with the screen on,
- * which during mirroring it usually isn't (the user is in other apps), so HIGH_PERF is held too as the
+ * which during Share Cursor it usually isn't (the user is in other apps), so HIGH_PERF is held too as the
  * fallback; Android applies the stronger one it allows at the moment. Both need WAKE_LOCK.
  */
 private class WifiLocks(ctx: Context) {
@@ -310,33 +232,7 @@ private class WifiLocks(ctx: Context) {
     }
 }
 
-/** Transparent: shows only Android's "Start now" dialog, then closes. */
-class ProjectionActivity : ComponentActivity() {
-    private val consent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        Screen.ask?.result?.complete(r.resultCode to r.data)
-        finish()
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        if (savedInstanceState != null) return // recreated: the result still arrives
-        // A second copy (late activity start + the notification tap) just closes.
-        if (Screen.ask?.shown?.complete(Unit) != true) return finish()
-        val mpm = getSystemService(MediaProjectionManager::class.java)
-        // Whole screen only: a single-app share would break the Mac's coordinates.
-        consent.launch(
-            if (Build.VERSION.SDK_INT >= 34) mpm.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
-            else mpm.createScreenCaptureIntent(),
-        )
-    }
-
-    override fun onDestroy() {
-        if (isFinishing) Screen.ask?.result?.complete(RESULT_CANCELED to null)
-        super.onDestroy()
-    }
-}
-
-/** Stop on the "connected to your screen" notification. */
+/** Stop on the "sharing its cursor" notification. */
 class ScreenStop : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         Screen.stop(Fsp.END_STOPPED, "stopped on the phone")

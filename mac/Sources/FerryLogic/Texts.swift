@@ -55,3 +55,20 @@ public func sameNumber(_ a: String, _ b: String) -> Bool {
     if x.isEmpty || y.isEmpty { return a.lowercased() == b.lowercased() }
     return x.suffix(10) == y.suffix(10)
 }
+
+/// What's typed in a search box, if it could be a phone number: only digits and "+-() ", at least 3 digits.
+public func typedNumber(_ query: String) -> String? {
+    let q = query.trimmingCharacters(in: .whitespaces)
+    guard q.allSatisfy({ $0.isNumber || "+-() ".contains($0) }), q.filter(\.isNumber).count >= 3 else { return nil }
+    return q
+}
+
+/// Whether a conversation or call matches a search: `query` found in `text` (ignoring case and accents),
+/// or a typed number found in `number` (ignoring its spacing). An empty query matches everything.
+public func matchesSearch(_ query: String, text: [String], number: String) -> Bool {
+    let q = query.trimmingCharacters(in: .whitespaces)
+    if q.isEmpty { return true }
+    if text.contains(where: { $0.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil }) { return true }
+    guard let typed = typedNumber(q) else { return number.localizedCaseInsensitiveContains(q) }
+    return number.filter(\.isNumber).contains(typed.filter(\.isNumber))
+}

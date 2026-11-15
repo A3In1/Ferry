@@ -29,8 +29,9 @@ extension AppModel {
 
     func handle(_ event: FfiEvent, from peer: String) {
         lastHeard[peer] = .now
+        stoppedPhones.remove(peer)
         switch event {
-        case let .notification(key, appName, package, title, text, _, buttons):
+        case let .notification(key, appName, package, title, text, buttons):
             postPhoneNotification(peer: peer, key: key, app: appName, package: package, title: title, text: text, buttons: buttons)
         case let .notificationRemoved(key):
             guard canNotify else { return }
@@ -40,7 +41,7 @@ extension AppModel {
             pb.clearContents()
             pb.setString(text, forType: .string)
             seenClipboardChange = pb.changeCount // our own write: don't send it back
-        case let .nowPlaying(active, appName, title, artist, playing, _, _):
+        case let .nowPlaying(active, appName, title, artist, playing):
             nowPlaying[peer] = active ? NowPlaying(title: title, artist: artist, app: appName, playing: playing) : nil
             onChange()
         case let .battery(percent, charging):
@@ -56,8 +57,20 @@ extension AppModel {
             handleFiles(path: path, entries: entries, error: error, from: peer) // Files.swift
         case let .dnd(on):
             phoneDndChanged(on, peer: peer) // WifiFocus.swift
+        case let .phoneRunning(running):
+            logger.notice("phone \(running ? "running" : "stopped", privacy: .public) Ferry")
+            if !running {
+                stoppedPhones.insert(peer)
+                lastHeard[peer] = nil
+                battery[peer] = nil
+                nowPlaying[peer] = nil
+                activeCalls[peer] = nil
+            } else if messageWindows[peer] != nil {
+                refreshTexts(peer) // it may have changed while Ferry was stopped
+            }
+            onChange()
         case .notificationAction, .mediaCommand, .ring, .smsThreadsRequest, .smsMessagesRequest, .smsSend, .smsMarkRead, .callCommand,
-             .callLogRequest, .fsListRequest, .fsGet, .wifiNetwork:
+             .callLogRequest, .fsListRequest, .fsGet, .wifiNetwork, .callDial:
             break // Mac → phone only
         }
     }

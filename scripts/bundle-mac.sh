@@ -62,7 +62,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSLocalNetworkUsageDescription</key>
   <string>Ferry finds and connects to your paired phone on this network.</string>
   <key>NSBluetoothAlwaysUsageDescription</key>
-  <string>Ferry uses Bluetooth to reach your paired phone when you're not on the same Wi-Fi.</string>
+  <string>Ferry uses Bluetooth to reach your paired phone when you're not on the same Wi-Fi, and for calls if you turn on Talk on the Mac.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>With Talk on the Mac on, Ferry sends your voice to the call while its audio is on this Mac. Nothing is recorded.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>macOS only shows apps your Wi-Fi network's name with Location access. Ferry uses it to share the network with your phone, never your location.</string>
   <key>NSLocationUsageDescription</key>

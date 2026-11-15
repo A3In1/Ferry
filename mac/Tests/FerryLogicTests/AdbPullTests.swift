@@ -13,7 +13,6 @@ import Testing
     @Test func parsesModernProgress() {
         let p = AdbProgress.parse("\r[ 45%] /storage/emulated/0/DCIM/Camera/IMG_1.jpg: 80%\u{1B}[K")
         #expect(p == AdbProgress(overall: 45, path: "/storage/emulated/0/DCIM/Camera/IMG_1.jpg", filePercent: 80))
-        #expect(p?.fileName == "IMG_1.jpg")
         #expect(AdbProgress.parse("[100%] /storage/emulated/0/a.txt: 100%")?.overall == 100)
     }
 

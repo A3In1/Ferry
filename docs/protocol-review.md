@@ -10,7 +10,7 @@ items that need both sides to agree go behind feature negotiation (item 1).
 |---|---|---|---|---|---|
 | 1 | Feature list in `Hello` (field 5, `repeated string features`); absent = none | session | enables 2, 3 and later changes without a protocol bump | S | proposed |
 | 2 | One ordered events stream per session (fallback: one stream per event) | framing | fixes notification add/remove reordering; one stream per session instead of per event | M | proposed |
-| 3 | QUIC datagrams for pointer moves (CURSOR/TOUCH move, SCROLL) | screen | moves are dropped, not delayed, on Wi-Fi loss: smoother cursor crossing | M | proposed |
+| 3 | QUIC datagrams for pointer moves (CURSOR move, SCROLL) | screen | moves are dropped, not delayed, on Wi-Fi loss: smoother cursor crossing | M | proposed |
 | 4 | Bluetooth bridge queueing: measure, then cap the queue (drop-tail in the shim) | BLE | events and acks stay fast while a file crawls over Bluetooth | S–M | measure first |
 | 5 | Try BBR instead of the default congestion controller on Wi-Fi | transport | maybe higher throughput on lossy 2.4 GHz; unknown until measured | S | measure first |
 | 6 | Pin field numbers in tests | proto | a renumbered field fails CI instead of breaking installed apps | S | **done** |
@@ -116,15 +116,10 @@ datagram). **Right choice** as a fallback: one code path, same encryption and ch
 
 ## Screen (FSP1)
 
-A bi stream on `CH_SCREEN`: `u8 type, u32 len` messages, H.264 Annex-B frames one way, input the
-other. **Right choice** for video: frames must arrive in order anyway, and a stream per session keeps
-the encoder simple.
+A bi stream on `CH_SCREEN`: `u8 type, u32 len` messages, input from the Mac (Share Cursor; there's no video).
 
-- **Pointer moves (item 3):** CURSOR/TOUCH moves and SCROLL share one ordered stream, so a lost packet
+- **Pointer moves (item 3):** CURSOR moves and SCROLL share one ordered stream, so a lost packet
   on Wi-Fi delays every later move by a round trip or more. They're idempotent (absolute positions),
-  so they suit QUIC datagrams: newest wins, a lost one is simply skipped. Downs/ups, TEXT, KEY and NAV
+  so they suit QUIC datagrams: newest wins, a lost one is simply skipped. Downs/ups, TEXT and KEY
   stay on the stream. Needs datagrams enabled, a `screen-datagrams` feature (item 1) and a
   `ScreenStream::send_datagram`/`read_datagram` pair in the FFI.
-- Frames under congestion: the phone already repeats frames and sends keyframes every 10 s; if
-  mirroring lags on weak Wi-Fi, have the phone skip non-key frames while the stream's send buffer is
-  backed up. That's an app-side change, no wire change.

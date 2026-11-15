@@ -4,87 +4,52 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.ByteBuffer
 
 class FspTest {
-    private val all = listOf(
-        Msg.Start(1280, 8_000_000, 1),
-        Msg.Start(0, 0xffffffffL, 0),
-        Msg.Touch(2, 0.25f, 1f),
-        Msg.Scroll(0.5f, 0.5f, -1.5f, 3f),
-        Msg.Scroll(0.1f, 0.9f, 0f, -0.25f, Fsp.SCROLL_CONTINUOUS or Fsp.SCROLL_END),
+    private fun msg(type: Int, payload: ByteBuffer.() -> Unit, size: Int): ByteArray =
+        ByteBuffer.allocate(5 + size).put(type.toByte()).putInt(size).apply(payload).array()
+
+    /** The Mac's bytes for one of each kind (mac/Tests/FerryLogicTests/FspTests.swift pins the same layout). */
+    private val fromMac = Fsp.MAGIC +
+        byteArrayOf(0x20, 0, 0, 0, 0) +
+        msg(0x11, { putFloat(0.5f).putFloat(0.25f).putFloat(-1.5f).putFloat(3f).put(3) }, 17) +
+        msg(0x13, { put("héllo 👋".toByteArray()) }, "héllo 👋".toByteArray().size) +
+        msg(0x12, { putInt(21).put(1) }, 5) +
+        msg(0x16, { put(3).putFloat(0f).putFloat(0.75f) }, 9)
+
+    private val parsed = listOf(
+        Msg.Start,
+        Msg.Scroll(0.5f, 0.25f, -1.5f, 3f, Fsp.SCROLL_CONTINUOUS or Fsp.SCROLL_END),
         Msg.Text("héllo 👋"),
-        Msg.Key(67),
-        Msg.Nav(4),
-        Msg.Keyframe,
-        Msg.Cursor(3, 0f, 0.75f),
-        Msg.Info(1080, 2400, Fsp.CAP_VIDEO or Fsp.CAP_CONTROL),
-        Msg.Info(65535, 1, 0),
-        Msg.Frame(123_456_789_000L, 3, byteArrayOf(0, 0, 0, 1, 0x67, 0x42)),
-        Msg.End(Fsp.END_NOT_ALLOWED, "turn on Ferry control"),
-        Msg.End(Fsp.END_NORMAL),
-        Msg.Quality(2_500_000),
         Msg.Key(Keys.LEFT, Keys.SHIFT),
-        Msg.Ack(123_456_789_000L),
-        Msg.Stats(2000, 120, 118, 2, 8_000_000, 7_500_000, 62, 3, 124, 41),
-        Msg.Stats(2000, 0, 0, 0, 1, 0, Msg.Stats.UNKNOWN, Msg.Stats.UNKNOWN, Msg.Stats.UNKNOWN, Msg.Stats.UNKNOWN),
+        Msg.Cursor(3, 0f, 0.75f),
     )
 
-    private fun stream(msgs: List<Msg>) = msgs.fold(Fsp.MAGIC) { acc, m -> acc + Fsp.encode(m) }
-
     @Test
-    fun roundTripEveryType() {
-        val parsed = FspParser().feed(stream(all))
-        assertEquals(all.size, parsed.size)
-        all.zip(parsed).forEach { (a, b) -> assertArrayEquals(Fsp.encode(a), Fsp.encode(b)) }
-        assertEquals(all.filter { it !is Msg.Frame }, parsed.filter { it !is Msg.Frame })
-        val f = parsed.filterIsInstance<Msg.Frame>().single()
-        assertEquals(123_456_789_000L, f.ptsUs)
-        assertEquals(3, f.flags)
-        assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x67, 0x42), f.data)
-    }
-
-    @Test
-    fun wireLayout() {
-        assertArrayEquals(byteArrayOf(0x14, 0, 0, 0, 1, 2), Fsp.encode(Msg.Nav(2)))
-        assertArrayEquals(byteArrayOf(0x01, 0, 0, 0, 5, 0x04, 0x38, 0x09, 0x60, 2), Fsp.encode(Msg.Info(1080, 2400, 2)))
-    }
-
-    @Test
-    fun frameStraightFromABuffer() {
-        val codec = java.nio.ByteBuffer.wrap(byteArrayOf(9, 9, 0, 0, 0, 1, 0x65, 9)).apply { limit(7).position(2) } // offset 2, size 5
-        assertArrayEquals(Fsp.encode(Msg.Frame(42, 1, byteArrayOf(0, 0, 0, 1, 0x65))), Fsp.frame(42, 1, codec))
-    }
-
-    @Test
-    fun ackAndStatsLayout() {
-        assertArrayEquals(byteArrayOf(0x17, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 1, 2), Fsp.encode(Msg.Ack(0x0102)))
-        val s = Fsp.encode(Msg.Stats(2000, 1, 2, 3, 4, 5, 6, 7, 8, 9))
-        assertArrayEquals(byteArrayOf(0x05, 0, 0, 0, 24, 0x07, 0xd0.toByte(), 0, 1, 0, 2, 0, 3), s.copyOf(13))
-        assertEquals(29, s.size)
-    }
-
-    @Test
-    fun scrollWithoutFlagsFromAnOlderMac() {
-        val old = byteArrayOf(0x11, 0, 0, 0, 16) + ByteArray(16)
-        assertEquals(listOf(Msg.Scroll(0f, 0f, 0f, 0f, 0)), FspParser().feed(Fsp.MAGIC + old))
+    fun everyKindFromTheMac() {
+        assertEquals(parsed, FspParser().feed(fromMac))
     }
 
     @Test
     fun splitAcrossChunks() {
-        val bytes = stream(all)
         for (size in listOf(1, 2, 3, 7, 13)) {
             val p = FspParser()
-            val parsed = bytes.toList().chunked(size).flatMap { p.feed(it.toByteArray()) }
-            assertEquals(all.size, parsed.size)
-            all.zip(parsed).forEach { (a, b) -> assertArrayEquals(Fsp.encode(a), Fsp.encode(b)) }
+            assertEquals(parsed, fromMac.toList().chunked(size).flatMap { p.feed(it.toByteArray()) })
         }
+    }
+
+    @Test
+    fun wireLayoutToTheMac() {
+        assertArrayEquals(byteArrayOf(0x01, 0, 0, 0, 5, 0x04, 0x38, 0x09, 0x60, 2), Fsp.info(1080, 2400, Fsp.CAP_CONTROL))
+        assertArrayEquals(byteArrayOf(0x03, 0, 0, 0, 3, 2, 0x6f, 0x6b), Fsp.end(Fsp.END_LOCKED, "ok"))
+        assertArrayEquals(byteArrayOf(0x03, 0, 0, 0, 1, 0), Fsp.end(Fsp.END_NORMAL))
     }
 
     @Test
     fun unknownTypesSkipped() {
         val unknown = byteArrayOf(0x7f, 0, 0, 0, 3, 1, 2, 3) + byteArrayOf(0x30, 0, 0, 0, 0)
-        val parsed = FspParser().feed(Fsp.MAGIC + unknown + Fsp.encode(Msg.Nav(1)))
-        assertEquals(listOf(Msg.Nav(1)), parsed)
+        assertEquals(listOf(Msg.Start), FspParser().feed(Fsp.MAGIC + unknown + byteArrayOf(0x20, 0, 0, 0, 0)))
     }
 
     @Test
@@ -98,7 +63,7 @@ class FspTest {
     @Test
     fun badMagicAndShortPayloadRejected() {
         assertThrows { FspParser().feed("FSP2".toByteArray()) }
-        assertThrows { FspParser().feed(Fsp.MAGIC + byteArrayOf(0x10, 0, 0, 0, 2, 0, 0)) }
+        assertThrows { FspParser().feed(Fsp.MAGIC + byteArrayOf(0x16, 0, 0, 0, 2, 0, 0)) }
     }
 
     private fun assertThrows(block: () -> Unit) {

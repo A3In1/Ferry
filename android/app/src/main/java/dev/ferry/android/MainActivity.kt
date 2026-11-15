@@ -75,7 +75,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
-import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import dev.ferry.android.screen.ControlService
@@ -353,7 +352,7 @@ class MainActivity : ComponentActivity() {
             Explain(
                 "Turn on Ferry control?",
                 "In Accessibility settings, find Ferry control (it may be under Installed apps or Downloaded apps) and turn it on. " +
-                    "Your Mac can then tap, scroll and type here, only while it's connected to your screen, with a Stop sharing notification the whole time.",
+                    "Your Mac can then tap, scroll and type here, only while Share Cursor is connected, with a Stop sharing notification the whole time.",
                 "Open settings",
             ) { settings { ControlService.openSettings(this) } }
         }
@@ -460,19 +459,14 @@ private fun Home(ui: HomeUi) {
                 }
             }
 
-            if (transfers.isNotEmpty()) Section("Transfers") {
-                transfers.forEach { TransferCard(it) }
+            // Up here, not below every switch.
+            if (peers.isNotEmpty() || on.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = ui.onAllOn, enabled = on.size < Grant.entries.size) { Text("Turn on all sharing") }
+                TextButton(onClick = { Grants.allOff(ctx) }, enabled = on.isNotEmpty()) { Text("Turn off all sharing") }
             }
 
-            // A running transfer's line is its card above.
-            val done = recent.filter { r -> transfers.none { it.id == r.id } }
-            if (done.isNotEmpty()) Section("Recent activity") {
-                done.forEach { r ->
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(r.text, style = MaterialTheme.typography.bodyMedium)
-                        r.progress?.takeIf { it < 1f }?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth()) }
-                    }
-                }
+            if (transfers.isNotEmpty()) Section("Transfers") {
+                transfers.forEach { TransferCard(it) }
             }
 
             // Before pairing, only the pairing card matters; the switches appear once there's a Mac (or one is still on).
@@ -490,15 +484,29 @@ private fun Home(ui: HomeUi) {
                 }
                 Section("Messages & calls", "Your texts and calls on your Mac. Android asks for permission when you turn these on.") {
                     MESSAGES_AND_CALLS.forEach { g -> GrantItem(g, g in on, ui.onGrant) }
+                    if (Grant.CALLS in on) {
+                        Text(
+                            "To talk on your Mac, pair the phone with the Mac in Bluetooth settings, then turn on Talk on the Mac (trial) in Ferry's settings on the Mac.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 ScreenSection(ui.onControl)
                 Section("Files", "Files your Mac sends always land in Downloads/Ferry. Turn this on to use Browse Files on your Mac.") {
                     GrantItem(Grant.FILES, Grant.FILES in on, ui.onGrant, unavailable = PhoneFiles.unavailable())
                 }
                 ConnectionSection(ui.bluetooth, usb = Ferry.usbListening.collectAsStateWithLifecycle().value, running)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = ui.onAllOn, enabled = on.size < Grant.entries.size) { Text("Turn on all sharing") }
-                    TextButton(onClick = { Grants.allOff(ctx) }, enabled = on.isNotEmpty()) { Text("Turn off all sharing") }
+            }
+
+            // A running transfer's line is its card above.
+            val done = recent.filter { r -> transfers.none { it.id == r.id } }
+            if (done.isNotEmpty()) Section("Recent activity") {
+                done.forEach { r ->
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(r.text, style = MaterialTheme.typography.bodyMedium)
+                        r.progress?.takeIf { it < 1f }?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth()) }
+                    }
                 }
             }
 
@@ -559,6 +567,8 @@ private fun StatusHeader(status: String, running: Boolean, peers: List<FfiPeer>,
                 phone?.let { Text("This phone: $it", style = MaterialTheme.typography.bodySmall) }
                 if (failed || stopped) {
                     Button(onClick = { FerryService.start(ctx) }, modifier = Modifier.padding(top = 8.dp)) { Text("Start Ferry") }
+                } else if (running) {
+                    OutlinedButton(onClick = { FerryService.stop(ctx) }, modifier = Modifier.padding(top = 8.dp)) { Text("Stop Ferry") }
                 }
             }
         }
@@ -599,31 +609,25 @@ private fun PairCard(running: Boolean, pairing: Boolean, onScan: () -> Unit, onP
     }
 }
 
-/** Mirroring needs no setup (Android asks each time); control needs the Accessibility service. */
+/** Share Cursor needs the Accessibility service. */
 @Composable
 private fun ScreenSection(onControl: (Boolean) -> Unit) {
     val control by ControlService.instance.collectAsStateWithLifecycle()
     val on = control != null
-    Section("Screen & control", "Choose Mirror Screen on your Mac to see this phone's screen. Android asks you to confirm each time, and you can stop it from the notification.") {
+    Section("Cursor & control", "Choose Share Cursor on your Mac to move its pointer onto this phone. You can stop it from the notification.") {
         Item(
             "Ferry control",
-            if (on) "On: your Mac can tap, scroll and type here while it's connected to your screen" else "Off: turn on to tap, scroll and type from your Mac, or use Share Cursor",
+            if (on) "On: your Mac can tap, scroll and type here while Share Cursor is connected" else "Off: turn on to use Share Cursor",
             Modifier.toggleable(on, role = Role.Switch) { onControl(on) },
         ) { Switch(checked = on, onCheckedChange = null) }
         val ctx = LocalContext.current
         LaunchedEffect(Unit) { ScreenPrefs.load(ctx) }
         val awake by ScreenPrefs.keepAwake.collectAsStateWithLifecycle()
         Item(
-            "Keep phone awake while mirroring",
-            if (on) "The screen stays on while your Mac shows or controls it" else "Needs Ferry control",
+            "Keep phone awake while sharing the cursor",
+            if (on) "The screen stays on while your Mac controls it" else "Needs Ferry control",
             Modifier.toggleable(awake, enabled = on, role = Role.Switch) { ScreenPrefs.setKeepAwake(ctx, it) },
         ) { Switch(checked = awake, onCheckedChange = null, enabled = on) }
-        val lock by ScreenPrefs.lockOnEnd.collectAsStateWithLifecycle()
-        Item(
-            "Lock phone when mirroring ends",
-            if (on) "When your Mac stops mirroring, the phone locks as if you pressed the power button" else "Needs Ferry control",
-            Modifier.toggleable(lock && on, enabled = on, role = Role.Switch) { ScreenPrefs.setLockOnEnd(ctx, it) },
-        ) { Switch(checked = lock && on, onCheckedChange = null, enabled = on) }
     }
 }
 

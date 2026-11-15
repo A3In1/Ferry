@@ -23,7 +23,7 @@ import FerryLogic
     private var pacer = Pacer(interval: 1.0 / 120)
     private var unsent = false
     private var flushQueued = false
-    private var own: ScreenSession? // control-only, used when no viewer window is open
+    private var own: ScreenSession?
     private var cursor: VirtualCursor?
     private var screen = CGRect.zero
     private var pressed = false
@@ -109,14 +109,7 @@ import FerryLogic
         own = nil
     }
 
-    /// The viewer's stream if one is open (one stream per phone), else our control-only one.
-    private var session: ScreenSession? {
-        if let v = model.viewers[peerId]?.session, v.isOpen {
-            if cursor == nil { own?.finish(); own = nil }
-            return v
-        }
-        return own?.isOpen == true ? own : nil
-    }
+    private var session: ScreenSession? { own?.isOpen == true ? own : nil }
 
     private func watched(_ type: CGEventType, _ event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
@@ -212,7 +205,7 @@ import FerryLogic
         movesSent = 0
         movesSince = .now
         logger.notice("cursor: crossed to the phone (\(info.width)x\(info.height)) at y \(String(format: "%.2f", c.normalized.y), privacy: .public)")
-        // Catches what no event reports: the tap silently disabled, or the viewer's stream gone while the mouse rests.
+        // Catches what no event reports: the tap silently disabled, or the stream gone while the mouse rests.
         watchdog = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.check() }
         }
@@ -334,7 +327,6 @@ import FerryLogic
                                     "To share the cursor, turn on Ferry control on the phone in Settings → Accessibility → Ferry, "
                                         + "then choose Share Cursor again.")
                 }
-            default: break
             }
         }
         own = s
@@ -395,8 +387,11 @@ extension AppModel {
         crossing = Crossing(model: self, peerId: want, edge: cursorEdge)
         if crossing == nil {
             UserDefaults.standard.removeObject(forKey: "cursorPeer")
-            if confirm("Allow Ferry to share the cursor", "Turn on Ferry in System Settings → Privacy & Security → Accessibility, "
-                           + "then choose Share Cursor again.", "Open System Settings") {
+            logger.notice("cursor: macOS refused the event tap (Ferry isn't trusted for Accessibility)")
+            if confirm("Allow Ferry to share the cursor", "Turn on Ferry in System Settings → Privacy & Security → Accessibility, then choose "
+                           + "Share Cursor again. If Ferry already looks on, that's from an older build: select it, remove it with −, and add it again.",
+                       "Open System Settings") {
+                AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) // lists Ferry there
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
             }
         }

@@ -74,7 +74,7 @@ class FerryListener : NotificationListenerService() {
         val buttons = n.actions.orEmpty().mapIndexed { i, a ->
             FfiNotifButton(i.toString(), a.title?.toString().orEmpty(), a.remoteInputs.orEmpty().any { it.allowFreeFormInput })
         }
-        val e = FfiEvent.Notification(sbn.key, label(sbn.packageName), sbn.packageName, title, text, n.`when`.takeIf { it > 0 } ?: sbn.postTime, buttons)
+        val e = FfiEvent.Notification(sbn.key, label(sbn.packageName), sbn.packageName, title, text, buttons)
         if (forwarded.put(sbn.key, e) == e) return
         Outbox.broadcast(e)
     }
@@ -163,8 +163,6 @@ class FerryListener : NotificationListenerService() {
                 meta.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty(),
                 (meta.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: meta.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)).orEmpty(),
                 state?.state == PlaybackState.STATE_PLAYING,
-                meta.getLong(MediaMetadata.METADATA_KEY_DURATION),
-                state?.position ?: 0,
             )
         }
         if (e == lastPlaying) return
@@ -200,7 +198,7 @@ class FerryListener : NotificationListenerService() {
         /** The connected listener (main thread only); null without notification access. */
         var instance: FerryListener? = null
 
-        val CLEARED = FfiEvent.NowPlaying(false, "", "", "", false, 0, 0)
+        val CLEARED = FfiEvent.NowPlaying(false, "", "", "", false)
 
         private const val SKIP = Notification.FLAG_ONGOING_EVENT or Notification.FLAG_FOREGROUND_SERVICE or
             Notification.FLAG_GROUP_SUMMARY or Notification.FLAG_LOCAL_ONLY

@@ -14,6 +14,8 @@ use ferry_core::node::{ConfirmFn, Node, NodeConfig, PairingPrompt};
 use ferry_core::proto::Event;
 use ferry_core::{identity, trust::TrustStore};
 
+const RECEIVED: &str = "received";
+
 #[derive(Parser)]
 #[command(name = "ferry", about = "Ferry headless peer")]
 struct Cli {
@@ -33,7 +35,7 @@ enum Cmd {
     Id,
     /// Receive files from paired devices until Ctrl-C
     Listen {
-        #[arg(long, default_value = "received")]
+        #[arg(long, default_value = RECEIVED)]
         dir: PathBuf,
         /// Accept pairing codes without asking
         #[arg(long)]
@@ -41,7 +43,7 @@ enum Cmd {
     },
     /// Show a pairing ticket (text + QR), then keep listening
     PairShow {
-        #[arg(long, default_value = "received")]
+        #[arg(long, default_value = RECEIVED)]
         dir: PathBuf,
         #[arg(long)]
         yes: bool,
@@ -72,7 +74,7 @@ enum Cmd {
     BenchFile { path: PathBuf, gib: f64 },
     /// Mac side of the USB link: attach phones plugged in via adb, receive until Ctrl-C
     Usb {
-        #[arg(long, default_value = "received")]
+        #[arg(long, default_value = RECEIVED)]
         dir: PathBuf,
         #[arg(long)]
         yes: bool,
@@ -84,7 +86,7 @@ enum Cmd {
     UsbServe {
         #[arg(long, default_value_t = ferry_core::usb::USB_PORT)]
         port: u16,
-        #[arg(long, default_value = "received")]
+        #[arg(long, default_value = RECEIVED)]
         dir: PathBuf,
         #[arg(long)]
         yes: bool,
@@ -92,7 +94,7 @@ enum Cmd {
     /// Attach to a `usb-serve` bridge on 127.0.0.1:<tcp_port> without adb, then receive
     UsbAttach {
         tcp_port: u16,
-        #[arg(long, default_value = "received")]
+        #[arg(long, default_value = RECEIVED)]
         dir: PathBuf,
         #[arg(long)]
         yes: bool,
@@ -168,13 +170,13 @@ async fn main() -> Result<()> {
             listen(&data_dir, &name, dir, yes, false, Usb::Attach(tcp_port)).await?;
         }
         Cmd::UsbPair { serial, yes, adb } => {
-            let node = start(&data_dir, &name, PathBuf::from("received"), yes).await?;
+            let node = start(&data_dir, &name, PathBuf::from(RECEIVED), yes).await?;
             let res = usb_pair(&node, serial, adb).await;
             node.shutdown().await;
             res?;
         }
         Cmd::Pair { ticket, yes } => {
-            let node = start(&data_dir, &name, PathBuf::from("received"), yes).await?;
+            let node = start(&data_dir, &name, PathBuf::from(RECEIVED), yes).await?;
             let res = node.pair_with_ticket(&ticket, confirm_fn(yes)).await;
             node.shutdown().await;
             let p = res?;
@@ -318,7 +320,7 @@ async fn send(
     peer: &str,
     what: Result<&[PathBuf], Event>,
 ) -> Result<()> {
-    let node = start(data_dir, name, PathBuf::from("received"), false).await?;
+    let node = start(data_dir, name, PathBuf::from(RECEIVED), false).await?;
     let res = async {
         let peers = node.peers();
         let target = match identity::parse_device_id(peer) {

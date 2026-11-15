@@ -2,14 +2,14 @@
 //! promptly: both report `Cancelled` (not a failure), the receiver deletes its partial
 //! files, and the session stays usable for the next send.
 
-use std::net::SocketAddr;
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use ferry_core::file::{Cancelled, FileEvent, PARTIAL_DIR};
 use ferry_core::node::{Node, NodeConfig};
-use ferry_core::pairing::Ticket;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -18,16 +18,10 @@ type Events = mpsc::UnboundedReceiver<FileEvent>;
 async fn node(root: &Path, name: &str) -> (Arc<Node>, Events) {
     let (tx, rx) = mpsc::unbounded_channel();
     let node = Node::start(NodeConfig {
-        data_dir: root.join(name).join("data"),
-        device_name: name.into(),
-        download_dir: root.join(name).join("dl"),
-        accept: Arc::new(|o| vec![true; o.items.len()]),
         events: Arc::new(move |e| {
             let _ = tx.send(e);
         }),
-        confirm_pairing: Arc::new(|_| Box::pin(async { true })),
-        on_screen: Arc::new(|_, _| {}),
-        on_event: Arc::new(|_, _| {}),
+        ..common::config(root, name)
     })
     .await
     .unwrap();
@@ -36,15 +30,7 @@ async fn node(root: &Path, name: &str) -> (Arc<Node>, Events) {
 
 async fn paired(root: &Path) -> ((Arc<Node>, Events), (Arc<Node>, Events)) {
     let (mac, phone) = (node(root, "mac").await, node(root, "phone").await);
-    let mut t: Ticket = mac.0.new_pairing_ticket().unwrap().parse().unwrap();
-    t.addrs = vec![SocketAddr::from(([127, 0, 0, 1], mac.0.port()))];
-    (phone.0)
-        .pair_with_ticket(&t.to_string(), Arc::new(|_| Box::pin(async { true })))
-        .await
-        .unwrap();
-    while mac.0.peers().is_empty() {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    common::pair(&mac.0, &phone.0).await;
     (mac, phone)
 }
 

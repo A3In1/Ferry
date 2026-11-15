@@ -19,7 +19,7 @@ private func drain(_ o: Outbox) async -> [UInt8] {
     let o = Outbox()
     o.send(Data([1]))
     for m: UInt8 in 10...15 { o.sendLatest(Data([m]), slot: 0) } // moves while the writer is busy
-    o.sendLatest(Data([90]), slot: 1) // an ACK
+    o.sendLatest(Data([90]), slot: 1) // another kind
     o.sendLatest(Data([91]), slot: 1)
     #expect(await drain(o) == [1, 15, 91]) // only the newest of each, no backlog
 }

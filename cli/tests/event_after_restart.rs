@@ -2,6 +2,8 @@
 //! SIGKILLed and restarted, QUIC hasn't noticed the old session is dead; the next event
 //! must still arrive (ack timeout → redial), not vanish into the dead connection.
 
+mod common;
+
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -10,7 +12,6 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use ferry_core::node::{Node, NodeConfig};
-use ferry_core::proto::{Clipboard, Event, event::Kind};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ferry");
 
@@ -66,25 +67,13 @@ fn port(first: &str) -> u16 {
     first.rsplit(' ').next().unwrap().parse().unwrap()
 }
 
-fn clip(text: &str) -> Event {
-    Event {
-        kind: Some(Kind::Clipboard(Clipboard { text: text.into() })),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn event_reaches_restarted_peer() {
     let root = tempfile::tempdir().unwrap();
     let mac_dir = root.path().join("mac");
     let phone = Node::start(NodeConfig {
-        data_dir: root.path().join("phone"),
         device_name: "PhoneB".into(),
-        download_dir: root.path().join("phone-dl"),
-        accept: Arc::new(|o| vec![true; o.items.len()]),
-        events: Arc::new(|_| {}),
-        confirm_pairing: Arc::new(|_| Box::pin(async { true })),
-        on_screen: Arc::new(|_, _| {}),
-        on_event: Arc::new(|_, _| {}),
+        ..common::config(root.path(), "phone")
     })
     .await
     .unwrap();
@@ -102,7 +91,10 @@ async fn event_reaches_restarted_peer() {
         .await
         .unwrap();
 
-    phone.send_event(&peer.id, &clip("one")).await.unwrap();
+    phone
+        .send_event(&peer.id, &common::clip("one"))
+        .await
+        .unwrap();
     wait_for(&rx, |l| l.contains("event from") && l.contains("one"));
 
     drop(first); // SIGKILL: no QUIC close reaches the phone; its cached session looks alive
@@ -112,7 +104,10 @@ async fn event_reaches_restarted_peer() {
         .add_peer_addrs(&peer.id, vec![SocketAddr::from(([127, 0, 0, 1], p))])
         .unwrap();
 
-    phone.send_event(&peer.id, &clip("two")).await.unwrap();
+    phone
+        .send_event(&peer.id, &common::clip("two"))
+        .await
+        .unwrap();
     wait_for(&rx, |l| l.contains("event from") && l.contains("two"));
     phone.shutdown().await;
 }

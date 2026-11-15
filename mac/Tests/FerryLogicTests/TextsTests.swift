@@ -47,3 +47,20 @@ func ignoresNonCodes(text: String) {
     #expect(!sameNumber("5551234567", "5551234568"))
     #expect(!sameNumber("HDFCBK", "ICICIB"))
 }
+
+@Test func searching() {
+    #expect(matchesSearch("", text: [], number: ""))
+    #expect(matchesSearch("  ", text: ["Ann"], number: "123"))
+    #expect(matchesSearch("ann", text: ["ANN Lee"], number: ""))
+    #expect(matchesSearch("jose", text: ["José"], number: ""))
+    #expect(matchesSearch("otp", text: ["Ann", "Your OTP is 1234"], number: ""))
+    #expect(!matchesSearch("bob", text: ["Ann"], number: "98765"))
+    #expect(matchesSearch("98765", text: [], number: "+91 98765-43210"))
+    #expect(matchesSearch("987 65", text: [], number: "+919876543210"))
+    #expect(!matchesSearch("555", text: [], number: "+919876543210"))
+    #expect(matchesSearch("VM-HDFC", text: [], number: "VM-HDFCBK")) // sender names aren't numbers
+    #expect(typedNumber(" +91 98765 ") == "+91 98765")
+    #expect(typedNumber("12") == nil)
+    #expect(typedNumber("ann") == nil)
+    #expect(typedNumber("") == nil)
+}

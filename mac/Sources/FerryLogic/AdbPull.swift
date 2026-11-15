@@ -26,8 +26,6 @@ public struct AdbProgress: Equatable, Sendable {
         self.filePercent = filePercent
     }
 
-    public var fileName: String { path.split(separator: "/").last.map(String.init) ?? path }
-
     /// `line` as adb printed it; terminal escapes ("\u{1B}[K") are ignored.
     public static func parse(_ line: String) -> AdbProgress? {
         let s = stripEscapes(line).trimmingCharacters(in: .whitespacesAndNewlines)

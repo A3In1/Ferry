@@ -7,9 +7,10 @@ Android ↔ Mac continuity: our own protocol, our own apps. Design and decisions
 proto/   wire schema (ferry.proto, protobuf via prost + protox, no system protoc)
 core/    Rust core: identity, pairing, trust, discovery, node (sessions), channel framing, file engine
 cli/     `ferry` headless peer: test bench, benchmarks, interop
-ffi/     UniFFI bindings (Swift now, Kotlin later)
-mac/     SwiftUI menu-bar app (see mac/README.md)
-scripts/ build-apple.sh, bundle-mac.sh, udp-baseline.py
+ffi/     UniFFI bindings (Swift and Kotlin)
+mac/     menu-bar app (see mac/README.md)
+android/ Compose app (see android/README.md)
+scripts/ build-apple.sh, build-android.sh, bundle-mac.sh, release-mac.sh, udp-baseline.py
 ```
 
 ## Build and test
@@ -43,13 +44,12 @@ On one machine, edit the ticket's `a=` to `127.0.0.1:<port>`. Over Wi-Fi, use th
 | 5,000 × 50 KB at ≥ 60% of bulk | ✅ 83% (`cargo test --release -p ferry-core small_files_throughput -- --ignored`) |
 | Hostile input (names, offsets, sizes, oversized messages) | ✅ unit tests + 20k randomized names |
 | Mac app runs the core, advertises `_ferry._udp` | ✅ (pairing with the CLI is a manual GUI check, see below) |
-| Android skeleton | ✅ superseded by the Phase 1 app |
 
 **Manual check: Mac app ↔ CLI**
-1. `open mac/build/Ferry.app`, then menu bar → **Pair a device…** and copy the ticket text.
+1. `open mac/build/Ferry.app`, then menu bar → **Pair Your Phone…** → **Copy Pairing Link**.
 2. `target/release/ferry --data-dir /tmp/ferryB --name PhoneB pair '<ticket>'` and confirm the code on both sides.
 3. `target/release/ferry --data-dir /tmp/ferryB send <Mac name> some-file`: it lands in `~/Downloads`.
-4. In the app: Paired devices → PhoneB → **Send files…** while `ferry --data-dir /tmp/ferryB listen` runs.
+4. In the app: **Send Files…** while `ferry --data-dir /tmp/ferryB listen` runs.
 
 ## Phase 1 status (pairing + file sharing, tested on a vivo V2222, Android 15)
 
@@ -87,17 +87,16 @@ vivo notes: app Info logs are hidden (`log.tag=M`), so Kotlin diagnostics use `L
 | L2CAP channel carries the same QUIC/TLS session (no second security protocol) | ✅ link up within about a minute of turning Wi-Fi off |
 | Ring, notifications and clipboard over Bluetooth | ✅ |
 | Companion association lets the service start from the background | ✅ granted from the app |
-| Switch back to Wi-Fi when it returns | ⚠️ a live Bluetooth link isn't dropped; Wi-Fi is used again once that link ends |
+| Switch back to Wi-Fi when it returns | built; see the checklist |
 | Restart after reboot / force-stop | ⚠️ open the app once to restart the scan |
 | Bridge hello is unauthenticated | ⚠️ a nearby device could knock the link offline (denial of service only: QUIC still authenticates every packet) |
 | Throughput / battery while a Bluetooth link idles | ⏳ not measured |
 
-## Phase 4 status (mirroring + control, tested on the vivo V2222 over USB/Wi-Fi)
+## Phase 4 status (Share Cursor, tested on the vivo V2222 over USB/Wi-Fi)
 
 | Check | Result |
 |---|---|
-| Phone screen in a Mac window (MediaProjection consent each session, H.264 576×1280) | ✅ |
-| Click, drag, scroll, type, Back/Home/Recents from the Mac (Ferry control accessibility service, off by default) | ✅ |
+| Click, drag, scroll and type from the Mac (Ferry control accessibility service, off by default) | ✅ |
 | Cursor crossing at a Mac screen edge, overlay cursor on the phone, Esc / move back to return | ✅ |
-| Locked phone | ends the session (capture and control); unlock on the phone, then Reconnect |
-| Known limits | text is appended at the end of a field (not at the caret); fast scrolling may jump; Mac Accessibility grant must be re-added after each ad-hoc rebuild |
+| Locked phone | ends the session; unlock on the phone, then push at the edge again |
+| Known limit | Mac Accessibility grant must be re-added after each ad-hoc rebuild |

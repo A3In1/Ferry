@@ -30,7 +30,7 @@ import kotlin.math.hypot
 
 /**
  * "Ferry control": off until the user turns it on in Accessibility settings. Acts only on input
- * from an open screen session ([Session] checks [instance]); turning it off drops caps bit1.
+ * from an open Share Cursor session ([Session] checks [instance]); turning it off drops caps bit1.
  */
 class ControlService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
@@ -97,10 +97,8 @@ class ControlService : AccessibilityService() {
             }
             applyEdits.run() // typing lands before the tap or nav that follows it
             when (m) {
-                is Msg.Touch -> touch(m.action, m.x, m.y)
                 is Msg.Cursor -> cursor(m.action, m.x, m.y)
                 is Msg.Scroll -> scroll(m)
-                is Msg.Nav -> NAV[m.action]?.let(::performGlobalAction)
                 else -> {}
             }
         }
@@ -320,12 +318,6 @@ class ControlService : AccessibilityService() {
      * (the supported way; wake locks that turn the screen on are deprecated). It never touches the keyguard:
      * the phone still locks if the user presses power, and that ends the session. Any thread.
      */
-    /** Locks the phone like the power button (API 28+). Never unlocks anything. Any thread. */
-    fun lockScreen() = main.post {
-        val ok = performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
-        Log.w(SCREEN_TAG, if (ok) "locked the phone (mirroring ended on the Mac)" else "couldn't lock the phone")
-    }
-
     fun keepAwake(on: Boolean) = main.post {
         val wm = getSystemService(WindowManager::class.java)
         if (on && awake == null) {
@@ -439,13 +431,6 @@ class ControlService : AccessibilityService() {
 
         /** Keystrokes closer together than this are applied as one edit. */
         const val EDIT_BATCH_MS = 8L
-
-        private val NAV = mapOf(
-            1 to GLOBAL_ACTION_BACK,
-            2 to GLOBAL_ACTION_HOME,
-            3 to GLOBAL_ACTION_RECENTS,
-            4 to GLOBAL_ACTION_NOTIFICATIONS,
-        )
 
         fun openSettings(ctx: Context) = ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
